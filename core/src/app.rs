@@ -3,7 +3,10 @@ use crate::p2p::{
 };
 use crate::types::FileChunk;
 use crate::{
-	db::{load_peer_permissions, open_db, run_migrations},
+	db::{
+		Cpu as DbCpu, NodeID, load_peer_permissions, open_db, remove_stale_cpus, run_migrations,
+		save_cpu,
+	},
 	p2p::{AgentBehaviour, AgentEvent, build_swarm, load_or_generate_keypair},
 	scan::{self, ScanEvent},
 	state::{Connection, FLAG_READ, FLAG_SEARCH, FLAG_WRITE, FolderRule, Permission, State},
@@ -531,7 +534,8 @@ impl App {
 
 	fn collect_cpu_info(&mut self) -> Vec<CpuInfo> {
 		self.system.refresh_cpu_usage();
-		self.system
+		let cpus: Vec<CpuInfo> = self
+			.system
 			.cpus()
 			.iter()
 			.map(|cpu| CpuInfo {
@@ -539,7 +543,60 @@ impl App {
 				usage: cpu.cpu_usage(),
 				frequency_hz: cpu.frequency(),
 			})
-			.collect()
+			.collect();
+		self.persist_local_cpus(&cpus);
+		cpus
+	}
+
+	fn persist_local_cpus(&self, cpus: &[CpuInfo]) {
+		if cpus.is_empty() {
+			return;
+		}
+		let node_id = {
+			let state = match self.state.lock() {
+				Ok(state) => state,
+				Err(err) => {
+					log::error!("failed to lock state for CPU persistence: {err}");
+					return;
+				}
+			};
+			match peer_to_node_id(&state.me) {
+				Some(id) => id,
+				None => {
+					log::warn!(
+						"local peer id too short to derive node id; skipping CPU persistence"
+					);
+					return;
+				}
+			}
+		};
+		let conn = match self.db.lock() {
+			Ok(conn) => conn,
+			Err(err) => {
+				log::error!("failed to lock database for CPU persistence: {err}");
+				return;
+			}
+		};
+		let now = Utc::now();
+		let mut current_names = Vec::with_capacity(cpus.len());
+		for info in cpus {
+			let entry = DbCpu {
+				node_id,
+				name: info.name.clone(),
+				usage: info.usage,
+				frequency: info.frequency_hz as u32,
+				created_at: now,
+				modified_at: now,
+			};
+			if let Err(err) = save_cpu(&conn, &entry) {
+				log::error!("failed to save CPU {}: {err}", entry.name);
+			} else {
+				current_names.push(entry.name.clone());
+			}
+		}
+		if let Err(err) = remove_stale_cpus(&conn, &node_id, &current_names) {
+			log::error!("failed to prune stale CPU entries: {err}");
+		}
 	}
 
 	fn collect_disk_info(&self) -> Vec<DiskInfo> {
@@ -950,6 +1007,17 @@ impl App {
 			}
 		}
 	}
+}
+
+fn peer_to_node_id(peer: &PeerId) -> Option<NodeID> {
+	let mut node_id = [0u8; std::mem::size_of::<NodeID>()];
+	let bytes = peer.to_bytes();
+	let len = node_id.len();
+	if bytes.len() < len {
+		return None;
+	}
+	node_id.copy_from_slice(&bytes[..len]);
+	Some(node_id)
 }
 
 #[derive(Debug, Clone)]
