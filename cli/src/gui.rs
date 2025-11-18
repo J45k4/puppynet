@@ -33,15 +33,17 @@ pub enum MenuItem {
 	CreateUser,
 	FileSearch,
 	Scan,
+	ScanResults,
 	Quit,
 }
 
-const MENU_ITEMS: [MenuItem; 6] = [
+const MENU_ITEMS: [MenuItem; 7] = [
 	MenuItem::Peers,
 	MenuItem::PeersGraph,
 	MenuItem::CreateUser,
 	MenuItem::FileSearch,
 	MenuItem::Scan,
+	MenuItem::ScanResults,
 	MenuItem::Quit,
 ];
 
@@ -53,6 +55,7 @@ impl MenuItem {
 			MenuItem::CreateUser => "Create User",
 			MenuItem::FileSearch => "File Search",
 			MenuItem::Scan => "Scanning",
+			MenuItem::ScanResults => "Scan Results",
 			MenuItem::Quit => "Quit",
 		}
 	}
@@ -356,6 +359,16 @@ struct ScanState {
 }
 
 #[derive(Debug, Clone)]
+struct ScanResultsState {
+	entries: Vec<FileSearchEntry>,
+	loading: bool,
+	error: Option<String>,
+	page: usize,
+	page_size: usize,
+	total_entries: usize,
+}
+
+#[derive(Debug, Clone)]
 pub struct ScanSummary {
 	inserted: u64,
 	updated: u64,
@@ -403,6 +416,19 @@ impl ScanState {
 			scanning: false,
 			total_files: 0,
 			processed_files: 0,
+		}
+	}
+}
+
+impl ScanResultsState {
+	fn loading(page: usize, page_size: usize) -> Self {
+		Self {
+			entries: Vec::new(),
+			loading: true,
+			error: None,
+			page,
+			page_size,
+			total_entries: 0,
 		}
 	}
 }
@@ -511,6 +537,7 @@ enum Mode {
 	CreateUser(CreateUserForm),
 	FileSearch(FileSearchState),
 	Scan(ScanState),
+	ScanResults(ScanResultsState),
 }
 
 #[derive(Debug, Clone)]
@@ -592,6 +619,12 @@ pub enum GuiMessage {
 		id: u64,
 		event: ScanEvent,
 	},
+	ScanResultsLoaded {
+		page: usize,
+		result: Result<(Vec<FileSearchEntry>, usize), String>,
+	},
+	ScanResultsNextPage,
+	ScanResultsPrevPage,
 }
 
 impl Application for GuiApp {
@@ -683,6 +716,15 @@ impl Application for GuiApp {
 						self.menu = item;
 						self.mode = Mode::Scan(ScanState::new());
 						self.status = String::from("Folder scanning");
+					}
+					MenuItem::ScanResults => {
+						self.menu = item;
+						let state = ScanResultsState::loading(0, 25);
+						self.status = String::from("Loading scan results...");
+						self.mode = Mode::ScanResults(state);
+						return Command::perform(load_scan_results_page(0, 25), move |result| {
+							GuiMessage::ScanResultsLoaded { page: 0, result }
+						});
 					}
 				}
 				Command::none()
@@ -1414,6 +1456,76 @@ impl Application for GuiApp {
 				}
 				Command::none()
 			}
+			GuiMessage::ScanResultsNextPage => {
+				if let Mode::ScanResults(state) = &mut self.mode {
+					if state.loading {
+						return Command::none();
+					}
+					let next_page = state.page + 1;
+					if next_page * state.page_size >= state.total_entries
+						&& state.total_entries != 0
+					{
+						return Command::none();
+					}
+					state.page = next_page;
+					state.loading = true;
+					state.error = None;
+					let page_size = state.page_size;
+					self.status = format!("Loading scan results (page {})...", next_page + 1);
+					return Command::perform(
+						load_scan_results_page(next_page, page_size),
+						move |result| GuiMessage::ScanResultsLoaded {
+							page: next_page,
+							result,
+						},
+					);
+				}
+				Command::none()
+			}
+			GuiMessage::ScanResultsPrevPage => {
+				if let Mode::ScanResults(state) = &mut self.mode {
+					if state.loading || state.page == 0 {
+						return Command::none();
+					}
+					let prev_page = state.page - 1;
+					state.page = prev_page;
+					state.loading = true;
+					state.error = None;
+					let page_size = state.page_size;
+					self.status = format!("Loading scan results (page {})...", prev_page + 1);
+					return Command::perform(
+						load_scan_results_page(prev_page, page_size),
+						move |result| GuiMessage::ScanResultsLoaded {
+							page: prev_page,
+							result,
+						},
+					);
+				}
+				Command::none()
+			}
+			GuiMessage::ScanResultsLoaded { page, result } => {
+				if let Mode::ScanResults(state) = &mut self.mode {
+					state.loading = false;
+					match result {
+						Ok((entries, total)) => {
+							state.entries = entries;
+							state.total_entries = total;
+							state.page = page;
+							state.error = None;
+							self.status = format!(
+								"Loaded page {} of scan results ({} files total)",
+								state.page + 1,
+								total
+							);
+						}
+						Err(err) => {
+							state.error = Some(err.clone());
+							self.status = format!("Failed to load scan results: {}", err);
+						}
+					}
+				}
+				Command::none()
+			}
 		}
 	}
 
@@ -1444,6 +1556,7 @@ impl Application for GuiApp {
 			Mode::CreateUser(form) => self.view_create_user(form),
 			Mode::FileSearch(state) => self.view_file_search(state),
 			Mode::Scan(state) => self.view_scan(state),
+			Mode::ScanResults(state) => self.view_scan_results(state),
 		};
 		let content_container = container(content)
 			.width(Length::Fill)
@@ -2021,7 +2134,10 @@ impl GuiApp {
 		} else {
 			scan_btn = scan_btn.on_press(GuiMessage::ScanRequested);
 		}
-		controls = controls.push(scan_btn);
+		controls = controls.push(scan_btn).push(
+			button(text("View scan results"))
+				.on_press(GuiMessage::MenuSelected(MenuItem::ScanResults)),
+		);
 		layout = layout.push(controls);
 		if let Some(status) = &state.status {
 			layout = layout.push(text(status).size(14));
@@ -2041,6 +2157,92 @@ impl GuiApp {
 			layout = layout.push(text(format!("Scan error: {}", err)).size(14));
 		}
 		layout.into()
+	}
+
+	fn view_scan_results(&self, state: &ScanResultsState) -> Element<'_, GuiMessage> {
+		let mut layout = iced::widget::Column::new().spacing(12);
+		layout = layout.push(text("Scan Results").size(24));
+		if state.loading {
+			return layout.push(text("Loading scan results...")).into();
+		}
+		if let Some(err) = &state.error {
+			return layout
+				.push(text(format!("Failed to load scan results: {}", err)).size(16))
+				.into();
+		}
+		if state.entries.is_empty() {
+			return layout
+				.push(text("No scanned files stored yet.").size(16))
+				.into();
+		}
+		let mut list = iced::widget::Column::new().spacing(4);
+		for entry in &state.entries {
+			let row = iced::widget::Row::new()
+				.spacing(8)
+				.push(
+					text(&abbreviate_hash(&entry.hash))
+						.size(14)
+						.width(Length::FillPortion(2)),
+				)
+				.push(
+					text(entry.mime_type.clone().unwrap_or_else(|| "?".into()))
+						.size(14)
+						.width(Length::FillPortion(2)),
+				)
+				.push(
+					text(format_size(entry.size))
+						.size(14)
+						.width(Length::FillPortion(1)),
+				)
+				.push(
+					text(entry.latest.clone())
+						.size(14)
+						.width(Length::FillPortion(2)),
+				);
+			list = list.push(container(row).padding(4).style(theme::Container::Box));
+		}
+		let total_pages = if state.page_size == 0 {
+			1
+		} else {
+			(state.total_entries + state.page_size - 1) / state.page_size
+		}
+		.max(1);
+		let mut controls = iced::widget::Row::new().spacing(12);
+		let mut prev_btn = button(text("Previous"));
+		if state.page == 0 || state.loading {
+			prev_btn = prev_btn.style(theme::Button::Secondary);
+		} else {
+			prev_btn = prev_btn.on_press(GuiMessage::ScanResultsPrevPage);
+		}
+		let mut next_btn = button(text("Next"));
+		let at_end = state.page_size == 0
+			|| (state.page + 1) * state.page_size >= state.total_entries
+				&& state.total_entries != 0;
+		if at_end || state.loading {
+			next_btn = next_btn.style(theme::Button::Secondary);
+		} else {
+			next_btn = next_btn.on_press(GuiMessage::ScanResultsNextPage);
+		}
+		controls = controls
+			.push(prev_btn)
+			.push(
+				text(format!(
+					"Page {} of {} ({} files)",
+					state.page + 1,
+					total_pages,
+					state.total_entries
+				))
+				.size(14),
+			)
+			.push(next_btn);
+		layout
+			.push(
+				scrollable(list)
+					.height(Length::FillPortion(9))
+					.width(Length::Fill),
+			)
+			.push(controls)
+			.into()
 	}
 
 	fn gather_known_addresses(&self, peer_id: &str) -> Vec<String> {
@@ -2375,6 +2577,53 @@ async fn search_files(
 	// For now, we just simulate no results but allow UI to function.
 	let _ = (_query, mime, sort_desc); // suppress warnings
 	Ok((Vec::new(), Vec::new()))
+}
+
+async fn load_scan_results_page(
+	page: usize,
+	page_size: usize,
+) -> Result<(Vec<FileSearchEntry>, usize), String> {
+	task::spawn_blocking(move || {
+		let db_path = std::env::var("DB").unwrap_or_else(|_| String::from("puppyapp.db"));
+		let conn = rusqlite::Connection::open(db_path)
+			.map_err(|err| format!("failed to open database: {err}"))?;
+		let total_entries: i64 = conn
+			.query_row("SELECT COUNT(*) FROM file_entries", [], |row| row.get(0))
+			.map_err(|err| format!("failed to count scan results: {err}"))?;
+		let offset = page.saturating_mul(page_size);
+		let mut stmt = conn
+			.prepare(
+				"SELECT hash, size, mime_type, first_datetime, latest_datetime \
+				FROM file_entries \
+				ORDER BY latest_datetime DESC \
+				LIMIT ? OFFSET ?",
+			)
+			.map_err(|err| format!("failed to prepare scan results query: {err}"))?;
+		let rows = stmt
+			.query_map((page_size as i64, offset as i64), |row| {
+				let hash_bytes: Vec<u8> = row.get(0)?;
+				let hash = hash_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+				let size: i64 = row.get(1)?;
+				let mime_type = row.get(2)?;
+				let first: Option<String> = row.get(3)?;
+				let latest: Option<String> = row.get(4)?;
+				Ok(FileSearchEntry {
+					hash,
+					size: size.max(0) as u64,
+					mime_type,
+					first: first.unwrap_or_else(|| String::from("-")),
+					latest: latest.unwrap_or_else(|| String::from("-")),
+				})
+			})
+			.map_err(|err| format!("failed to query scan results: {err}"))?;
+		let mut entries = Vec::new();
+		for entry in rows {
+			entries.push(entry.map_err(|err| format!("error reading scan row: {err}"))?);
+		}
+		Ok((entries, total_entries.max(0) as usize))
+	})
+	.await
+	.map_err(|err| format!("scan results task failed: {err}"))?
 }
 
 pub fn run(app_title: String) -> iced::Result {
