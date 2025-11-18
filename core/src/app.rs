@@ -5,6 +5,7 @@ use crate::types::FileChunk;
 use crate::{
 	db::{load_peer_permissions, open_db, run_migrations},
 	p2p::{AgentBehaviour, AgentEvent, build_swarm, load_or_generate_keypair},
+	scan::{self, ScanEvent},
 	state::{Connection, FLAG_READ, FLAG_SEARCH, FLAG_WRITE, FolderRule, Permission, State},
 };
 use anyhow::{Result, anyhow, bail};
@@ -12,8 +13,9 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use futures::executor::block_on;
 use libp2p::{PeerId, Swarm, mdns, swarm::SwarmEvent};
+use rusqlite::{Connection as SqliteConnection, params};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::{
 	env,
 	path::{Path, PathBuf},
@@ -62,6 +64,10 @@ pub enum Command {
 		tx: oneshot::Sender<Result<Vec<Permission>>>,
 	},
 	ReadFile(ReadFileCmd),
+	Scan {
+		path: String,
+		tx: mpsc::Sender<ScanEvent>,
+	},
 }
 
 async fn read_file(path: &Path, offset: u64, length: Option<u64>) -> Result<FileChunk> {
@@ -139,6 +145,7 @@ pub struct App {
 	rx: UnboundedReceiver<Command>,
 	pending_requests: HashMap<OutboundRequestId, PendingRequest>,
 	system: System,
+	db: Arc<Mutex<SqliteConnection>>,
 }
 
 trait ResponseDecoder: Sized + Send + 'static {
@@ -229,7 +236,10 @@ impl App {
 			.unwrap_or(false)
 	}
 
-	pub fn new(state: Arc<Mutex<State>>) -> (Self, tokio::sync::mpsc::UnboundedSender<Command>) {
+	pub fn new(
+		state: Arc<Mutex<State>>,
+		db: Arc<Mutex<SqliteConnection>>,
+	) -> (Self, tokio::sync::mpsc::UnboundedSender<Command>) {
 		let key_path = env::var("KEYPAIR").unwrap_or_else(|_| String::from("peer_keypair.bin"));
 		let key_path = Path::new(&key_path);
 		if !key_path.exists() {
@@ -249,17 +259,12 @@ impl App {
 
 		let mut swarm = build_swarm(id_keys, peer_id).unwrap();
 		let stored_permissions = {
-			let mut conn = open_db();
-			if let Err(err) = run_migrations(&mut conn) {
-				log::error!("failed to run database migrations: {err}");
-				Vec::new()
-			} else {
-				match load_peer_permissions(&conn, &peer_id) {
-					Ok(perms) => perms,
-					Err(err) => {
-						log::error!("failed to load peer permissions: {err}");
-						Vec::new()
-					}
+			let conn = db.lock().unwrap();
+			match load_peer_permissions(&conn, &peer_id) {
+				Ok(perms) => perms,
+				Err(err) => {
+					log::error!("failed to load peer permissions: {err}");
+					Vec::new()
 				}
 			}
 		};
@@ -284,6 +289,7 @@ impl App {
 				rx,
 				pending_requests: HashMap::new(),
 				system: System::new(),
+				db,
 			},
 			tx,
 		)
@@ -901,6 +907,34 @@ impl App {
 				self.pending_requests
 					.insert(request_id, Pending::<FileChunk>::new(req.tx));
 			}
+			Command::Scan { path, tx } => {
+				let node_id = match self.state.lock() {
+					Ok(state) => state.me.to_bytes(),
+					Err(err) => {
+						let _ = tx.send(ScanEvent::Finished(Err(format!(
+							"state lock poisoned: {}",
+							err
+						))));
+						return;
+					}
+				};
+				let db = Arc::clone(&self.db);
+				tokio::task::spawn_blocking(move || {
+					let result = db
+						.lock()
+						.map_err(|err| format!("db lock poisoned: {}", err))
+						.and_then(|mut guard| {
+							scan::scan_with_progress(&node_id, &path, &mut *guard, |progress| {
+								let _ = tx.send(ScanEvent::Progress(progress.clone()));
+							})
+						});
+					let final_event = match result {
+						Ok(stats) => ScanEvent::Finished(Ok(stats)),
+						Err(err) => ScanEvent::Finished(Err(err)),
+					};
+					let _ = tx.send(final_event);
+				});
+			}
 		}
 	}
 
@@ -918,20 +952,37 @@ impl App {
 	}
 }
 
+#[derive(Debug, Clone)]
+pub struct ScanResultRow {
+	pub hash: Vec<u8>,
+	pub size: u64,
+	pub mime_type: Option<String>,
+	pub first_datetime: Option<String>,
+	pub latest_datetime: Option<String>,
+}
+
 pub struct PuppyNet {
 	shutdown_tx: Option<oneshot::Sender<()>>,
 	handle: JoinHandle<()>,
 	state: Arc<Mutex<State>>,
 	cmd_tx: UnboundedSender<Command>,
+	db: Arc<Mutex<SqliteConnection>>,
 }
 
 impl PuppyNet {
 	pub fn new() -> Self {
 		let state = Arc::new(Mutex::new(State::default()));
+		let db = Arc::new(Mutex::new(open_db()));
+		{
+			let mut conn = db.lock().unwrap();
+			if let Err(err) = run_migrations(&mut conn) {
+				log::error!("failed to run database migrations: {err}");
+			}
+		}
 		// channel to request shutdown
 		let (shutdown_tx, shutdown_rx) = oneshot::channel();
 		let state_clone = state.clone();
-		let (mut app, cmd_tx) = App::new(state_clone);
+		let (mut app, cmd_tx) = App::new(state_clone, db.clone());
 		let mut shutdown_rx = shutdown_rx;
 		let handle: JoinHandle<()> = tokio::spawn(async move {
 			loop {
@@ -950,6 +1001,7 @@ impl PuppyNet {
 			handle,
 			state,
 			cmd_tx,
+			db,
 		}
 	}
 
@@ -1054,6 +1106,62 @@ impl PuppyNet {
 
 	pub fn list_permissions_blocking(&self, peer: PeerId) -> Result<Vec<Permission>> {
 		block_on(self.list_permissions(peer))
+	}
+
+	pub fn scan_folder(
+		&self,
+		path: impl Into<String>,
+	) -> Result<Arc<Mutex<mpsc::Receiver<ScanEvent>>>, String> {
+		let path = path.into();
+		let (tx, rx) = mpsc::channel();
+		self.cmd_tx
+			.send(Command::Scan { path, tx })
+			.map_err(|e| format!("failed to send Scan command: {e}"))?;
+		Ok(Arc::new(Mutex::new(rx)))
+	}
+
+	pub fn fetch_scan_results_page(
+		&self,
+		page: usize,
+		page_size: usize,
+	) -> Result<(Vec<ScanResultRow>, usize), String> {
+		let offset = page.saturating_mul(page_size);
+		let conn = self
+			.db
+			.lock()
+			.map_err(|err| format!("db lock poisoned: {}", err))?;
+		let total_entries: i64 = conn
+			.query_row("SELECT COUNT(*) FROM file_entries", [], |row| row.get(0))
+			.map_err(|err| format!("failed to count scan results: {err}"))?;
+		let mut stmt = conn
+			.prepare(
+				"SELECT hash, size, mime_type, first_datetime, latest_datetime \
+				FROM file_entries \
+				ORDER BY latest_datetime DESC \
+				LIMIT ? OFFSET ?",
+			)
+			.map_err(|err| format!("failed to prepare scan results query: {err}"))?;
+		let rows = stmt
+			.query_map(params![page_size as i64, offset as i64], |row| {
+				let hash: Vec<u8> = row.get(0)?;
+				let size = row.get::<_, i64>(1)?.max(0) as u64;
+				let mime_type = row.get(2)?;
+				let first = row.get(3)?;
+				let latest = row.get(4)?;
+				Ok(ScanResultRow {
+					hash,
+					size,
+					mime_type,
+					first_datetime: first,
+					latest_datetime: latest,
+				})
+			})
+			.map_err(|err| format!("failed to query scan results: {err}"))?;
+		let mut entries = Vec::new();
+		for entry in rows {
+			entries.push(entry.map_err(|err| format!("error reading scan row: {err}"))?);
+		}
+		Ok((entries, total_entries.max(0) as usize))
 	}
 
 	pub async fn read_file(

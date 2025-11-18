@@ -16,11 +16,10 @@ use iced::widget::{
 use iced::{Application, Command, Element, Length, Settings, Subscription, Theme};
 use libp2p::PeerId;
 use puppynet_core::p2p::{CpuInfo, DirEntry, DiskInfo};
-use puppynet_core::scan::{self, ScanProgress};
+use puppynet_core::scan::ScanEvent;
 use puppynet_core::{
 	FLAG_READ, FLAG_SEARCH, FLAG_WRITE, FileChunk, FolderRule, Permission, PuppyNet, Rule, State,
 };
-use rusqlite::params;
 use tokio::task;
 
 const LOCAL_LISTEN_MULTIADDR: &str = "/ip4/0.0.0.0:8336";
@@ -366,20 +365,6 @@ struct ScanResultsState {
 	total_entries: usize,
 }
 
-#[derive(Debug, Clone)]
-pub struct ScanSummary {
-	inserted: u64,
-	updated: u64,
-	removed: u64,
-	duration_secs: f32,
-}
-
-#[derive(Debug, Clone)]
-pub enum ScanEvent {
-	Progress(ScanProgress),
-	Finished(Result<ScanSummary, String>),
-}
-
 #[derive(Clone)]
 struct ActiveScan {
 	id: u64,
@@ -716,9 +701,11 @@ impl Application for GuiApp {
 						let state = ScanResultsState::loading(0, 25);
 						self.status = String::from("Loading scan results...");
 						self.mode = Mode::ScanResults(state);
-						return Command::perform(load_scan_results_page(0, 25), move |result| {
-							GuiMessage::ScanResultsLoaded { page: 0, result }
-						});
+						let peer = self.peer.clone();
+						return Command::perform(
+							load_scan_results_page(peer, 0, 25),
+							move |result| GuiMessage::ScanResultsLoaded { page: 0, result },
+						);
 					}
 				}
 				Command::none()
@@ -1363,13 +1350,18 @@ impl Application for GuiApp {
 				self.status = format!("Scanning {}...", requested);
 				let scan_id = self.next_scan_id;
 				self.next_scan_id += 1;
-				let (tx, rx) = mpsc::channel();
-				let receiver = Arc::new(Mutex::new(rx));
+				let receiver = match self.peer.scan_folder(requested.clone()) {
+					Ok(receiver) => receiver,
+					Err(err) => {
+						state.scanning = false;
+						state.error = Some(err);
+						return Command::none();
+					}
+				};
 				self.active_scan = Some(ActiveScan {
 					id: scan_id,
 					receiver: receiver.clone(),
 				});
-				spawn_scan_worker(self.local_node_id_bytes(), requested.clone(), tx);
 				Command::perform(wait_for_scan_event(receiver), move |event| {
 					GuiMessage::ScanEventReceived { id: scan_id, event }
 				})
@@ -1413,11 +1405,11 @@ impl Application for GuiApp {
 								let processed = state.processed_files;
 								let summary = format!(
 									"Scan finished: {} inserted, {} updated, {} removed after scanning {} files ({:.2}s)",
-									stats.inserted,
-									stats.updated,
-									stats.removed,
+									stats.inserted_count,
+									stats.updated_count,
+									stats.removed_count,
 									processed,
-									stats.duration_secs
+									stats.duration.as_secs_f32()
 								);
 								state.status = Some(summary.clone());
 								state.error = None;
@@ -1457,8 +1449,9 @@ impl Application for GuiApp {
 					state.error = None;
 					let page_size = state.page_size;
 					self.status = format!("Loading scan results (page {})...", next_page + 1);
+					let peer = self.peer.clone();
 					return Command::perform(
-						load_scan_results_page(next_page, page_size),
+						load_scan_results_page(peer, next_page, page_size),
 						move |result| GuiMessage::ScanResultsLoaded {
 							page: next_page,
 							result,
@@ -1478,8 +1471,9 @@ impl Application for GuiApp {
 					state.error = None;
 					let page_size = state.page_size;
 					self.status = format!("Loading scan results (page {})...", prev_page + 1);
+					let peer = self.peer.clone();
 					return Command::perform(
-						load_scan_results_page(prev_page, page_size),
+						load_scan_results_page(peer, prev_page, page_size),
 						move |result| GuiMessage::ScanResultsLoaded {
 							page: prev_page,
 							result,
@@ -2194,9 +2188,8 @@ impl GuiApp {
 		let total_pages = if state.page_size == 0 {
 			1
 		} else {
-			(state.total_entries + state.page_size - 1) / state.page_size
-		}
-		.max(1);
+			state.total_entries.div_ceil(state.page_size).max(1)
+		};
 		let mut controls = iced::widget::Row::new().spacing(12);
 		let mut prev_btn = button(text("Previous"));
 		if state.page == 0 || state.loading {
@@ -2525,30 +2518,6 @@ async fn fetch_cpus(
 	(peer_id, result)
 }
 
-fn spawn_scan_worker(node_id: Vec<u8>, path: String, sender: mpsc::Sender<ScanEvent>) {
-	std::thread::spawn(move || {
-		let db_path = std::env::var("DB").unwrap_or_else(|_| String::from("puppyapp.db"));
-		let result = rusqlite::Connection::open(db_path)
-			.map_err(|err| format!("failed to open database: {err}"))
-			.and_then(|conn| {
-				let tx = sender.clone();
-				scan::scan_with_progress(&node_id, &path, conn, move |progress| {
-					let _ = tx.send(ScanEvent::Progress(progress));
-				})
-			});
-		let final_event = match result {
-			Ok(stats) => ScanEvent::Finished(Ok(ScanSummary {
-				inserted: stats.inserted_count,
-				updated: stats.updated_count,
-				removed: stats.removed_count,
-				duration_secs: stats.duration.as_secs_f32(),
-			})),
-			Err(err) => ScanEvent::Finished(Err(err)),
-		};
-		let _ = sender.send(final_event);
-	});
-}
-
 async fn wait_for_scan_event(receiver: Arc<Mutex<mpsc::Receiver<ScanEvent>>>) -> ScanEvent {
 	match task::spawn_blocking(move || receiver.lock().unwrap().recv()).await {
 		Ok(Ok(event)) => event,
@@ -2570,50 +2539,27 @@ async fn search_files(
 }
 
 async fn load_scan_results_page(
+	peer: Arc<PuppyNet>,
 	page: usize,
 	page_size: usize,
 ) -> Result<(Vec<FileSearchEntry>, usize), String> {
-	task::spawn_blocking(move || {
-		let db_path = std::env::var("DB").unwrap_or_else(|_| String::from("puppyapp.db"));
-		let conn = rusqlite::Connection::open(db_path)
-			.map_err(|err| format!("failed to open database: {err}"))?;
-		let total_entries: i64 = conn
-			.query_row("SELECT COUNT(*) FROM file_entries", [], |row| row.get(0))
-			.map_err(|err| format!("failed to count scan results: {err}"))?;
-		let offset = page.saturating_mul(page_size);
-		let mut stmt = conn
-			.prepare(
-				"SELECT hash, size, mime_type, first_datetime, latest_datetime \
-				FROM file_entries \
-				ORDER BY latest_datetime DESC \
-				LIMIT ? OFFSET ?",
-			)
-			.map_err(|err| format!("failed to prepare scan results query: {err}"))?;
-		let rows = stmt
-			.query_map(params![page_size as i64, offset as i64], |row| {
-				let hash_bytes: Vec<u8> = row.get(0)?;
-				let hash = hash_bytes.iter().map(|b| format!("{:02x}", b)).collect();
-				let size: i64 = row.get(1)?;
-				let mime_type = row.get(2)?;
-				let first: Option<String> = row.get(3)?;
-				let latest: Option<String> = row.get(4)?;
-				Ok(FileSearchEntry {
-					hash,
-					size: size.max(0) as u64,
-					mime_type,
-					first: first.unwrap_or_else(|| String::from("-")),
-					latest: latest.unwrap_or_else(|| String::from("-")),
-				})
-			})
-			.map_err(|err| format!("failed to query scan results: {err}"))?;
-		let mut entries = Vec::new();
-		for entry in rows {
-			entries.push(entry.map_err(|err| format!("error reading scan row: {err}"))?);
-		}
-		Ok((entries, total_entries.max(0) as usize))
-	})
-	.await
-	.map_err(|err| format!("scan results task failed: {err}"))?
+	let (rows, total) = task::spawn_blocking(move || peer.fetch_scan_results_page(page, page_size))
+		.await
+		.map_err(|err| format!("scan results task failed: {err}"))??;
+	let entries = rows
+		.into_iter()
+		.map(|row| {
+			let hash = row.hash.iter().map(|b| format!("{:02x}", b)).collect();
+			FileSearchEntry {
+				hash,
+				size: row.size,
+				mime_type: row.mime_type,
+				first: row.first_datetime.unwrap_or_else(|| String::from("-")),
+				latest: row.latest_datetime.unwrap_or_else(|| String::from("-")),
+			}
+		})
+		.collect();
+	Ok((entries, total))
 }
 
 pub fn run(app_title: String) -> iced::Result {

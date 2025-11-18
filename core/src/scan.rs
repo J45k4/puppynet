@@ -111,7 +111,7 @@ const UPDATE_FILE_LOCATION: &str = "UPDATE file_locations SET hash = ?, size = ?
 const DELETE_FILE_LOCATION: &str = "DELETE FROM file_locations WHERE node_id = ? and path = ?";
 const UPSERT_FILE_ENTRY: &str = "INSERT INTO file_entries (hash, size, mime_type, first_datetime, latest_datetime) VALUES (?, ?, ?, ?, ?) ON CONFLICT(hash) DO UPDATE SET latest_datetime = excluded.latest_datetime";
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ScanResult {
 	pub updated_count: u64,
 	pub inserted_count: u64,
@@ -128,6 +128,12 @@ pub struct ScanProgress {
 	pub inserted_count: u64,
 	pub updated_count: u64,
 	pub removed_count: u64,
+}
+
+#[derive(Debug, Clone)]
+pub enum ScanEvent {
+	Progress(ScanProgress),
+	Finished(Result<ScanResult, String>),
 }
 
 fn report_progress<F: FnMut(ScanProgress)>(
@@ -157,7 +163,7 @@ fn should_emit_progress(processed: usize, total: usize) -> bool {
 pub fn scan<P: AsRef<Path>>(
 	node_id: &[u8],
 	path: P,
-	conn: Connection,
+	conn: &mut Connection,
 ) -> Result<ScanResult, String> {
 	scan_with_progress(node_id, path, conn, |_| {})
 }
@@ -165,7 +171,7 @@ pub fn scan<P: AsRef<Path>>(
 pub fn scan_with_progress<P, F>(
 	node_id: &[u8],
 	path: P,
-	mut conn: Connection,
+	conn: &mut Connection,
 	mut progress: F,
 ) -> Result<ScanResult, String>
 where

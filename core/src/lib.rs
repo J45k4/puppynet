@@ -7,4 +7,4 @@ mod types;
 pub use state::{FLAG_READ, FLAG_SEARCH, FLAG_WRITE, FolderRule, Permission, Rule, State};
 pub use types::FileChunk;
 pub mod wait_group;
-pub use app::PuppyNet;
+pub use app::{PuppyNet, ScanResultRow};
