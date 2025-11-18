@@ -6,3 +6,5 @@ If you make changes to apis make sure you also update readme.md
 end_of_line = lf
 tab_width = 4
 indent_style = tab
+
+dont modify readme unless given instruction to do that
