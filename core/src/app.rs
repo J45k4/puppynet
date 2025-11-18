@@ -532,8 +532,8 @@ impl App {
 				name: cpu.name().to_string(),
 				usage: cpu.cpu_usage(),
 				frequency_hz: cpu.frequency(),
-				})
-				.collect()
+			})
+			.collect()
 	}
 
 	fn collect_disk_info(&self) -> Vec<DiskInfo> {

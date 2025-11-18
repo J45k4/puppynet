@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use iced::alignment::{Horizontal, Vertical};
@@ -16,9 +16,11 @@ use iced::widget::{
 use iced::{Application, Command, Element, Length, Settings, Subscription, Theme};
 use libp2p::PeerId;
 use puppypeer_core::p2p::{CpuInfo, DirEntry, DiskInfo};
+use puppypeer_core::scan::{self, ScanProgress};
 use puppypeer_core::{
 	FLAG_READ, FLAG_SEARCH, FLAG_WRITE, FileChunk, FolderRule, Permission, PuppyPeer, Rule, State,
 };
+use tokio::task;
 
 const LOCAL_LISTEN_MULTIADDR: &str = "/ip4/0.0.0.0:8336";
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
@@ -30,14 +32,16 @@ pub enum MenuItem {
 	PeersGraph,
 	CreateUser,
 	FileSearch,
+	Scan,
 	Quit,
 }
 
-const MENU_ITEMS: [MenuItem; 5] = [
+const MENU_ITEMS: [MenuItem; 6] = [
 	MenuItem::Peers,
 	MenuItem::PeersGraph,
 	MenuItem::CreateUser,
 	MenuItem::FileSearch,
+	MenuItem::Scan,
 	MenuItem::Quit,
 ];
 
@@ -48,6 +52,7 @@ impl MenuItem {
 			MenuItem::PeersGraph => "Peers Graph",
 			MenuItem::CreateUser => "Create User",
 			MenuItem::FileSearch => "File Search",
+			MenuItem::Scan => "Scanning",
 			MenuItem::Quit => "Quit",
 		}
 	}
@@ -340,6 +345,36 @@ pub struct FileSearchEntry {
 	latest: String,
 }
 
+#[derive(Debug, Clone)]
+struct ScanState {
+	path: String,
+	status: Option<String>,
+	error: Option<String>,
+	scanning: bool,
+	total_files: usize,
+	processed_files: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanSummary {
+	inserted: u64,
+	updated: u64,
+	removed: u64,
+	duration_secs: f32,
+}
+
+#[derive(Debug, Clone)]
+pub enum ScanEvent {
+	Progress(ScanProgress),
+	Finished(Result<ScanSummary, String>),
+}
+
+#[derive(Clone)]
+struct ActiveScan {
+	id: u64,
+	receiver: Arc<Mutex<mpsc::Receiver<ScanEvent>>>,
+}
+
 impl FileSearchState {
 	fn new() -> Self {
 		Self {
@@ -351,6 +386,23 @@ impl FileSearchState {
 			results: Vec::new(),
 			loading: false,
 			error: None,
+		}
+	}
+}
+
+impl ScanState {
+	fn new() -> Self {
+		let default_path = std::env::current_dir()
+			.ok()
+			.and_then(|path| path.into_os_string().into_string().ok())
+			.unwrap_or_else(|| String::from("."));
+		Self {
+			path: default_path,
+			status: None,
+			error: None,
+			scanning: false,
+			total_files: 0,
+			processed_files: 0,
 		}
 	}
 }
@@ -430,6 +482,21 @@ pub struct GuiApp {
 	graph: GraphView,
 	status: String,
 	app_title: String,
+	active_scan: Option<ActiveScan>,
+	next_scan_id: u64,
+}
+
+impl GuiApp {
+	fn local_node_id_bytes(&self) -> Vec<u8> {
+		if let Ok(state) = self.peer.state().lock() {
+			state.me.to_bytes()
+		} else {
+			self.local_peer_id
+				.as_ref()
+				.map(|id| id.as_bytes().to_vec())
+				.unwrap_or_default()
+		}
+	}
 }
 
 #[derive(Debug, Clone)]
@@ -443,6 +510,7 @@ enum Mode {
 	PeersGraph,
 	CreateUser(CreateUserForm),
 	FileSearch(FileSearchState),
+	Scan(ScanState),
 }
 
 #[derive(Debug, Clone)]
@@ -518,6 +586,12 @@ pub enum GuiMessage {
 	FileSearchToggleSort,
 	FileSearchExecute,
 	FileSearchLoaded(Result<(Vec<FileSearchEntry>, Vec<String>), String>),
+	ScanPathChanged(String),
+	ScanRequested,
+	ScanEventReceived {
+		id: u64,
+		event: ScanEvent,
+	},
 }
 
 impl Application for GuiApp {
@@ -546,6 +620,8 @@ impl Application for GuiApp {
 			graph,
 			status: String::from("Ready"),
 			app_title: flags,
+			active_scan: None,
+			next_scan_id: 1,
 		};
 		(app, Command::none())
 	}
@@ -602,6 +678,11 @@ impl Application for GuiApp {
 						self.menu = item;
 						self.mode = Mode::FileSearch(FileSearchState::new());
 						self.status = String::from("File search");
+					}
+					MenuItem::Scan => {
+						self.menu = item;
+						self.mode = Mode::Scan(ScanState::new());
+						self.status = String::from("Folder scanning");
 					}
 				}
 				Command::none()
@@ -1224,6 +1305,115 @@ impl Application for GuiApp {
 				}
 				Command::none()
 			}
+			GuiMessage::ScanPathChanged(path) => {
+				if let Mode::Scan(state) = &mut self.mode {
+					state.path = path;
+				}
+				Command::none()
+			}
+			GuiMessage::ScanRequested => {
+				let (scan_id, receiver) = match &mut self.mode {
+					Mode::Scan(state) => {
+						if state.scanning {
+							return Command::none();
+						}
+						let requested = state.path.trim().to_string();
+						if requested.is_empty() {
+							state.error = Some(String::from("Scan path cannot be empty"));
+							return Command::none();
+						}
+						state.scanning = true;
+						state.error = None;
+						state.status = Some(format!("Scanning {}...", requested));
+						state.processed_files = 0;
+						state.total_files = 0;
+						self.status = format!("Scanning {}...", requested);
+						let scan_id = self.next_scan_id;
+						self.next_scan_id += 1;
+						let (tx, rx) = mpsc::channel();
+						let receiver = Arc::new(Mutex::new(rx));
+						self.active_scan = Some(ActiveScan {
+							id: scan_id,
+							receiver: receiver.clone(),
+						});
+						spawn_scan_worker(self.local_node_id_bytes(), requested.clone(), tx);
+						(scan_id, receiver)
+					}
+					_ => return Command::none(),
+				};
+				Command::perform(wait_for_scan_event(receiver), move |event| {
+					GuiMessage::ScanEventReceived { id: scan_id, event }
+				})
+			}
+			GuiMessage::ScanEventReceived { id, event } => {
+				if self.active_scan.as_ref().map(|scan| scan.id) != Some(id) {
+					return Command::none();
+				}
+				let mut should_poll = false;
+				match event {
+					ScanEvent::Progress(progress) => {
+						if let Mode::Scan(state) = &mut self.mode {
+							state.total_files = progress.total_files;
+							state.processed_files = progress.processed_files;
+							let status = if progress.total_files > 0 {
+								format!(
+									"Scanning {}... {}/{} files ({} inserted, {} updated, {} removed)",
+									state.path,
+									progress.processed_files,
+									progress.total_files,
+									progress.inserted_count,
+									progress.updated_count,
+									progress.removed_count
+								)
+							} else {
+								format!("Scanning {}... collecting entries", state.path)
+							};
+							state.status = Some(status.clone());
+							state.error = None;
+							self.status = status;
+						}
+						should_poll = true;
+					}
+					ScanEvent::Finished(result) => {
+						if let Mode::Scan(state) = &mut self.mode {
+							state.scanning = false;
+							if state.total_files == 0 {
+								state.total_files = state.processed_files;
+							}
+							match result {
+								Ok(stats) => {
+									let processed = state.processed_files;
+									let summary = format!(
+										"Scan finished: {} inserted, {} updated, {} removed after scanning {} files ({:.2}s)",
+										stats.inserted,
+										stats.updated,
+										stats.removed,
+										processed,
+										stats.duration_secs
+									);
+									state.status = Some(summary.clone());
+									state.error = None;
+									self.status = summary;
+								}
+								Err(err) => {
+									state.error = Some(err.clone());
+									self.status = format!("Scan failed: {}", err);
+								}
+							}
+						}
+						self.active_scan = None;
+					}
+				}
+				if should_poll {
+					if let Some(active) = &self.active_scan {
+						let receiver = active.receiver.clone();
+						return Command::perform(wait_for_scan_event(receiver), move |event| {
+							GuiMessage::ScanEventReceived { id, event }
+						});
+					}
+				}
+				Command::none()
+			}
 		}
 	}
 
@@ -1253,6 +1443,7 @@ impl Application for GuiApp {
 			Mode::PeersGraph => self.view_graph(),
 			Mode::CreateUser(form) => self.view_create_user(form),
 			Mode::FileSearch(state) => self.view_file_search(state),
+			Mode::Scan(state) => self.view_scan(state),
 		};
 		let content_container = container(content)
 			.width(Length::Fill)
@@ -1553,13 +1744,10 @@ impl GuiApp {
 		} else {
 			up_button = up_button.on_press(GuiMessage::FileNavigateUp);
 		}
-		let controls = iced::widget::Row::new()
-			.spacing(12)
-			.push(up_button)
-			.push(
-				button(text("Back to actions"))
-					.on_press(GuiMessage::PeerActionsRequested(state.peer_id.clone())),
-			);
+		let controls = iced::widget::Row::new().spacing(12).push(up_button).push(
+			button(text("Back to actions"))
+				.on_press(GuiMessage::PeerActionsRequested(state.peer_id.clone())),
+		);
 		layout = layout.push(controls);
 		if state.showing_disks {
 			if state.loading {
@@ -1572,12 +1760,12 @@ impl GuiApp {
 				let mut list = iced::widget::Column::new().spacing(4);
 				for disk in &state.disks {
 					let label = format_disk_label(disk);
-					let button = button(text(label))
-						.width(Length::Fill)
-						.on_press(GuiMessage::FileBrowserDiskSelected {
+					let button = button(text(label)).width(Length::Fill).on_press(
+						GuiMessage::FileBrowserDiskSelected {
 							peer_id: state.peer_id.clone(),
 							disk_path: disk.mount_path.clone(),
-						});
+						},
+					);
 					list = list.push(button);
 				}
 				layout = layout.push(scrollable(list).height(Length::Fill));
@@ -1817,6 +2005,44 @@ impl GuiApp {
 		layout.push(scrollable(list).height(Length::Fill)).into()
 	}
 
+	fn view_scan(&self, state: &ScanState) -> Element<'_, GuiMessage> {
+		let mut layout = iced::widget::Column::new().spacing(12);
+		layout = layout.push(text("Folder Scanner").size(24));
+		layout = layout
+			.push(text_input("Folder to scan", &state.path).on_input(GuiMessage::ScanPathChanged));
+		let mut controls = iced::widget::Row::new().spacing(12);
+		let mut scan_btn = button(text(if state.scanning {
+			"Scanning..."
+		} else {
+			"Scan folder"
+		}));
+		if state.scanning {
+			scan_btn = scan_btn.style(theme::Button::Secondary);
+		} else {
+			scan_btn = scan_btn.on_press(GuiMessage::ScanRequested);
+		}
+		controls = controls.push(scan_btn);
+		layout = layout.push(controls);
+		if let Some(status) = &state.status {
+			layout = layout.push(text(status).size(14));
+		}
+		if state.processed_files > 0 || state.total_files > 0 {
+			let progress_label = if state.total_files > 0 {
+				format!(
+					"Processed {} / {} files",
+					state.processed_files, state.total_files
+				)
+			} else {
+				format!("Processed {} files", state.processed_files)
+			};
+			layout = layout.push(text(progress_label).size(14));
+		}
+		if let Some(err) = &state.error {
+			layout = layout.push(text(format!("Scan error: {}", err)).size(14));
+		}
+		layout.into()
+	}
+
 	fn gather_known_addresses(&self, peer_id: &str) -> Vec<String> {
 		if let Some(state) = &self.latest_state {
 			if let Ok(target) = PeerId::from_str(peer_id) {
@@ -1926,7 +2152,10 @@ fn format_size(bytes: u64) -> String {
 fn format_disk_label(disk: &DiskInfo) -> String {
 	let total = format_size(disk.total_space);
 	let free = format_size(disk.available_space);
-	let mut label = format!("{} ({}) — {} free of {}", disk.mount_path, disk.name, free, total);
+	let mut label = format!(
+		"{} ({}) — {} free of {}",
+		disk.mount_path, disk.name, free, total
+	);
 	if disk.read_only {
 		label.push_str(" [read-only]");
 	}
@@ -2102,6 +2331,38 @@ async fn fetch_cpus(
 		Err(err) => Err(err.to_string()),
 	};
 	(peer_id, result)
+}
+
+fn spawn_scan_worker(node_id: Vec<u8>, path: String, sender: mpsc::Sender<ScanEvent>) {
+	std::thread::spawn(move || {
+		let db_path = std::env::var("DB").unwrap_or_else(|_| String::from("puppyapp.db"));
+		let result = rusqlite::Connection::open(db_path)
+			.map_err(|err| format!("failed to open database: {err}"))
+			.and_then(|conn| {
+				let tx = sender.clone();
+				scan::scan_with_progress(&node_id, &path, conn, move |progress| {
+					let _ = tx.send(ScanEvent::Progress(progress));
+				})
+			});
+		let final_event = match result {
+			Ok(stats) => ScanEvent::Finished(Ok(ScanSummary {
+				inserted: stats.inserted_count,
+				updated: stats.updated_count,
+				removed: stats.removed_count,
+				duration_secs: stats.duration.as_secs_f32(),
+			})),
+			Err(err) => ScanEvent::Finished(Err(err)),
+		};
+		let _ = sender.send(final_event);
+	});
+}
+
+async fn wait_for_scan_event(receiver: Arc<Mutex<mpsc::Receiver<ScanEvent>>>) -> ScanEvent {
+	match task::spawn_blocking(move || receiver.lock().unwrap().recv()).await {
+		Ok(Ok(event)) => event,
+		Ok(Err(_)) => ScanEvent::Finished(Err(String::from("Scan worker stopped"))),
+		Err(err) => ScanEvent::Finished(Err(format!("Scan wait failed: {err}"))),
+	}
 }
 
 async fn search_files(

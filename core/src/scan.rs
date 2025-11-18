@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::fs::canonicalize;
 use std::io::{self, Read, Seek};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "rayon")]
+use std::sync::mpsc;
 use walkdir::WalkDir;
 
 pub type FileHash = [u8; 32];
@@ -117,11 +119,59 @@ pub struct ScanResult {
 	pub duration: std::time::Duration,
 }
 
+const PROGRESS_REPORT_INTERVAL: usize = 25;
+
+#[derive(Debug, Clone, Default)]
+pub struct ScanProgress {
+	pub total_files: usize,
+	pub processed_files: usize,
+	pub inserted_count: u64,
+	pub updated_count: u64,
+	pub removed_count: u64,
+}
+
+fn report_progress<F: FnMut(ScanProgress)>(
+	cb: &mut F,
+	total_files: usize,
+	processed_files: usize,
+	inserted_count: u64,
+	updated_count: u64,
+	removed_count: u64,
+) {
+	cb(ScanProgress {
+		total_files,
+		processed_files,
+		inserted_count,
+		updated_count,
+		removed_count,
+	});
+}
+
+fn should_emit_progress(processed: usize, total: usize) -> bool {
+	processed == total
+		|| processed == 0
+		|| processed % PROGRESS_REPORT_INTERVAL == 0
+		|| total < PROGRESS_REPORT_INTERVAL
+}
+
 pub fn scan<P: AsRef<Path>>(
 	node_id: &[u8],
 	path: P,
-	mut conn: Connection,
+	conn: Connection,
 ) -> Result<ScanResult, String> {
+	scan_with_progress(node_id, path, conn, |_| {})
+}
+
+pub fn scan_with_progress<P, F>(
+	node_id: &[u8],
+	path: P,
+	mut conn: Connection,
+	mut progress: F,
+) -> Result<ScanResult, String>
+where
+	P: AsRef<Path>,
+	F: FnMut(ScanProgress),
+{
 	let timer = std::time::Instant::now();
 	let mut updated_count = 0;
 	let mut inserted_count = 0;
@@ -129,9 +179,10 @@ pub fn scan<P: AsRef<Path>>(
 	let path = path.as_ref().to_path_buf();
 	let absolute_path = canonicalize(&path).unwrap();
 	let tx = conn.transaction().unwrap();
+	let mut processed_files = 0usize;
 
-	{
-		// load all existing file_locations into a map
+	// load all existing file_locations into a map
+	let existing: HashMap<PathBuf, FileLocation> = {
 		let mut file_locations_stmt = tx
 			.prepare(
 				"SELECT path, hash, size, timestamp, created_at, modified_at, accessed_at \
@@ -139,7 +190,7 @@ pub fn scan<P: AsRef<Path>>(
 			WHERE path LIKE ?",
 			)
 			.map_err(|e| format!("error preparing statement: {:?}", e))?;
-		let existing: HashMap<PathBuf, FileLocation> = file_locations_stmt
+		file_locations_stmt
 			.query_map(
 				[&(absolute_path.to_string_lossy().to_string() + "%")],
 				|row| {
@@ -147,7 +198,7 @@ pub fn scan<P: AsRef<Path>>(
 						path: PathBuf::from(row.get::<_, String>(0)?),
 						hash: row.get(1)?,
 						size: row.get(2)?,
-						mime_type: None, // we don’t need mime here
+						mime_type: None, // not needed for comparison
 						timestamp: row.get(3)?,
 						created_at: row.get(4)?,
 						modified_at: row.get(5)?,
@@ -158,63 +209,132 @@ pub fn scan<P: AsRef<Path>>(
 			.map_err(|e| format!("error querying file locations: {:?}", e))?
 			.filter_map(Result::ok)
 			.map(|fl| (fl.path.clone(), fl))
-			.collect();
+			.collect()
+	};
 
-		// scan disk
-		let entries = WalkDir::new(&absolute_path)
-			.into_iter()
-			.filter_map(|e| e.ok())
-			.filter(|e| e.file_type().is_file())
-			.collect::<Vec<_>>();
+	let entries = WalkDir::new(&absolute_path)
+		.into_iter()
+		.filter_map(|e| e.ok())
+		.filter(|e| e.file_type().is_file())
+		.collect::<Vec<_>>();
+	let total_files = entries.len();
+	report_progress(
+		&mut progress,
+		total_files,
+		processed_files,
+		inserted_count,
+		updated_count,
+		removed_count,
+	);
 
-		#[cfg(feature = "rayon")]
-		let mapped = entries
+	let mut scanned: HashMap<PathBuf, FileLocation>;
+	#[cfg(feature = "rayon")]
+	{
+		let (tx, rx) = mpsc::channel();
+		let existing = &existing;
+		entries
 			.par_iter()
-			.map(|entry| (entry.path().to_path_buf(), entry.clone()));
-		#[cfg(not(feature = "rayon"))]
-		let mapped = entries
-			.iter()
-			.map(|entry| (entry.path().to_path_buf(), entry.clone()));
-
-		let mut scanned: HashMap<PathBuf, FileLocation> = mapped
-			.map(|(pbuf, entry)| {
-				// 1) quick metadata check
+			.for_each_with(tx.clone(), |sender, entry| {
+				let pbuf = entry.path().to_path_buf();
 				let meta = std::fs::metadata(&pbuf).unwrap();
 				let created_at = to_datetime(meta.created());
 				let modified_at = to_datetime(meta.modified());
 				let accessed_at = to_datetime(meta.accessed());
 				let size = meta.len();
-
-				if let Some(prev) = existing.get(&pbuf) {
+				let fl = if let Some(prev) = existing.get(&pbuf) {
 					if prev.size == size
 						&& prev.created_at == created_at
 						&& prev.modified_at == modified_at
 						&& prev.accessed_at == accessed_at
 					{
-						// unchanged → reuse previous hash & mime; only update timestamp
-						return (
-							pbuf.clone(),
-							FileLocation {
-								path: pbuf.clone(),
-								hash: prev.hash,
-								size,
-								mime_type: prev.mime_type.clone(),
-								timestamp: Utc::now(),
-								created_at,
-								modified_at,
-								accessed_at,
-							},
-						);
+						FileLocation {
+							path: pbuf.clone(),
+							hash: prev.hash,
+							size,
+							mime_type: prev.mime_type.clone(),
+							timestamp: Utc::now(),
+							created_at,
+							modified_at,
+							accessed_at,
+						}
+					} else {
+						handle_path(&pbuf)
 					}
+				} else {
+					handle_path(&pbuf)
+				};
+				let _ = sender.send((pbuf, fl));
+			});
+		drop(tx);
+		let mut map = HashMap::new();
+		for (pbuf, fl) in rx {
+			map.insert(pbuf, fl);
+			processed_files += 1;
+			if should_emit_progress(processed_files, total_files) {
+				report_progress(
+					&mut progress,
+					total_files,
+					processed_files,
+					inserted_count,
+					updated_count,
+					removed_count,
+				);
+			}
+		}
+		scanned = map;
+	}
+	#[cfg(not(feature = "rayon"))]
+	{
+		let mut map = HashMap::new();
+		for entry in entries {
+			let pbuf = entry.path().to_path_buf();
+			let meta = std::fs::metadata(&pbuf).unwrap();
+			let created_at = to_datetime(meta.created());
+			let modified_at = to_datetime(meta.modified());
+			let accessed_at = to_datetime(meta.accessed());
+			let size = meta.len();
+
+			let fl = if let Some(prev) = existing.get(&pbuf) {
+				if prev.size == size
+					&& prev.created_at == created_at
+					&& prev.modified_at == modified_at
+					&& prev.accessed_at == accessed_at
+				{
+					FileLocation {
+						path: pbuf.clone(),
+						hash: prev.hash,
+						size,
+						mime_type: prev.mime_type.clone(),
+						timestamp: Utc::now(),
+						created_at,
+						modified_at,
+						accessed_at,
+					}
+				} else {
+					handle_path(&pbuf)
 				}
+			} else {
+				handle_path(&pbuf)
+			};
 
-				// metadata changed (or new file) → do full read+hash
-				let fl = handle_path(&pbuf);
-				(pbuf.clone(), fl)
-			})
-			.collect();
+			map.insert(pbuf, fl);
+			processed_files += 1;
+			if should_emit_progress(processed_files, total_files) {
+				report_progress(
+					&mut progress,
+					total_files,
+					processed_files,
+					inserted_count,
+					updated_count,
+					removed_count,
+				);
+			}
+		}
+		scanned = map;
+	}
 
-		// remove deleted files
+	// remove deleted files
+	{
 		let mut delete_stmt = tx.prepare(DELETE_FILE_LOCATION).unwrap();
 		for old in existing.keys() {
 			if !scanned.contains_key(old) {
@@ -222,19 +342,26 @@ pub fn scan<P: AsRef<Path>>(
 					.execute(&[&node_id as &dyn ToSql, &old.to_string_lossy() as &dyn ToSql])
 					.unwrap();
 				removed_count += 1;
+				report_progress(
+					&mut progress,
+					total_files,
+					processed_files,
+					inserted_count,
+					updated_count,
+					removed_count,
+				);
 			}
 		}
+	}
 
-		// insert or update each scanned file
+	{
 		let mut insert_stmt = tx.prepare(INSERT_FILE_LOCATION).unwrap();
 		let mut update_stmt = tx.prepare(UPDATE_FILE_LOCATION).unwrap();
 		for (path, fl) in scanned.iter() {
 			if let Some(prev) = existing.get(path) {
 				if fl == prev {
-					// completely identical (including timestamp) → skip
 					continue;
 				}
-				// else: update hash/size/timestamps
 				update_stmt
 					.execute(&[
 						&fl.hash as &dyn ToSql,
@@ -249,7 +376,6 @@ pub fn scan<P: AsRef<Path>>(
 					.unwrap();
 				updated_count += 1;
 			} else {
-				// new file
 				insert_stmt
 					.execute(&[
 						&node_id as &dyn ToSql,
@@ -264,9 +390,18 @@ pub fn scan<P: AsRef<Path>>(
 					.unwrap();
 				inserted_count += 1;
 			}
+			report_progress(
+				&mut progress,
+				total_files,
+				processed_files,
+				inserted_count,
+				updated_count,
+				removed_count,
+			);
 		}
+	}
 
-		// upsert into file_entries as before…
+	{
 		let mut upsert_stmt = tx.prepare(UPSERT_FILE_ENTRY).unwrap();
 		for fl in scanned.values() {
 			let timestamps: Vec<_> = [fl.created_at, fl.modified_at, fl.accessed_at]
@@ -289,6 +424,14 @@ pub fn scan<P: AsRef<Path>>(
 	}
 
 	tx.commit().unwrap();
+	report_progress(
+		&mut progress,
+		total_files,
+		processed_files,
+		inserted_count,
+		updated_count,
+		removed_count,
+	);
 	Ok(ScanResult {
 		updated_count,
 		inserted_count,
