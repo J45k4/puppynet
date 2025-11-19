@@ -11,11 +11,12 @@ use iced::theme;
 use iced::time;
 use iced::widget::image::Handle as ImageHandle;
 use iced::widget::{
-	Image, button, checkbox, container, pick_list, scrollable, text, text_input, tooltip,
+	Image, Rule as Divider, button, checkbox, container, pick_list, scrollable, text, text_input,
+	tooltip,
 };
 use iced::{Application, Command, Element, Length, Settings, Subscription, Theme};
 use libp2p::PeerId;
-use puppynet_core::p2p::{CpuInfo, DirEntry, DiskInfo};
+use puppynet_core::p2p::{CpuInfo, DirEntry, DiskInfo, InterfaceInfo};
 use puppynet_core::scan::ScanEvent;
 use puppynet_core::{
 	FLAG_READ, FLAG_SEARCH, FLAG_WRITE, FileChunk, FolderRule, Permission, PuppyNet, Rule, State,
@@ -69,6 +70,14 @@ struct PeerRow {
 struct PeerCpuState {
 	peer_id: String,
 	cpus: Vec<CpuInfo>,
+}
+
+#[derive(Debug, Clone)]
+struct PeerInterfacesState {
+	peer_id: String,
+	interfaces: Vec<InterfaceInfo>,
+	loading: bool,
+	error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -386,6 +395,17 @@ impl FileSearchState {
 	}
 }
 
+impl PeerInterfacesState {
+	fn loading(peer_id: String) -> Self {
+		Self {
+			peer_id,
+			interfaces: Vec::new(),
+			loading: true,
+			error: None,
+		}
+	}
+}
+
 impl ScanState {
 	fn new() -> Self {
 		let default_path = std::env::current_dir()
@@ -515,6 +535,7 @@ enum Mode {
 	PeerActions { peer_id: String },
 	PeerPermissions(PeerPermissionsState),
 	PeerCpus(PeerCpuState),
+	PeerInterfaces(PeerInterfacesState),
 	FileBrowser(FileBrowserState),
 	FileViewer(FileViewerState),
 	PeersGraph,
@@ -556,6 +577,11 @@ pub enum GuiMessage {
 	},
 	CpuRequested(String),
 	CpuLoaded(String, Result<Vec<CpuInfo>, String>),
+	InterfacesRequested(String),
+	InterfacesLoaded {
+		peer_id: String,
+		interfaces: Result<Vec<InterfaceInfo>, String>,
+	},
 	FileBrowserRequested {
 		peer_id: String,
 	},
@@ -608,6 +634,7 @@ pub enum GuiMessage {
 	},
 	ScanResultsNextPage,
 	ScanResultsPrevPage,
+	InterfacesFieldEdited,
 }
 
 impl Application for GuiApp {
@@ -874,6 +901,41 @@ impl Application for GuiApp {
 					Err(err) => {
 						self.status = format!("Failed to load CPU info: {}", err);
 						self.mode = Mode::Peers;
+					}
+				}
+				Command::none()
+			}
+			GuiMessage::InterfacesRequested(peer_id) => {
+				self.status = format!("Loading interfaces for {}...", peer_id);
+				self.selected_peer_id = Some(peer_id.clone());
+				self.mode = Mode::PeerInterfaces(PeerInterfacesState::loading(peer_id.clone()));
+				let peer = self.peer.clone();
+				return Command::perform(
+					fetch_interfaces(peer, peer_id.clone()),
+					|(peer_id, interfaces)| GuiMessage::InterfacesLoaded {
+						peer_id,
+						interfaces,
+					},
+				);
+			}
+			GuiMessage::InterfacesLoaded {
+				peer_id,
+				interfaces,
+			} => {
+				if let Mode::PeerInterfaces(state) = &mut self.mode {
+					if state.peer_id == peer_id {
+						state.loading = false;
+						match interfaces {
+							Ok(list) => {
+								state.interfaces = list;
+								state.error = None;
+								self.status = format!("Interfaces loaded for {}", peer_id);
+							}
+							Err(err) => {
+								state.error = Some(err.clone());
+								self.status = format!("Failed to load interfaces: {}", err);
+							}
+						}
 					}
 				}
 				Command::none()
@@ -1505,6 +1567,7 @@ impl Application for GuiApp {
 				}
 				Command::none()
 			}
+			GuiMessage::InterfacesFieldEdited => Command::none(),
 		}
 	}
 
@@ -1529,6 +1592,7 @@ impl Application for GuiApp {
 			Mode::PeerActions { peer_id } => self.view_peer_actions(peer_id),
 			Mode::PeerPermissions(state) => self.view_peer_permissions(state),
 			Mode::PeerCpus(state) => self.view_peer_cpus(state),
+			Mode::PeerInterfaces(state) => self.view_peer_interfaces(state),
 			Mode::FileBrowser(state) => self.view_file_browser(state),
 			Mode::FileViewer(state) => self.view_file_viewer(state),
 			Mode::PeersGraph => self.view_graph(),
@@ -1677,6 +1741,10 @@ impl GuiApp {
 				.spacing(12)
 				.push(button(text("CPU info")).on_press(GuiMessage::CpuRequested(peer.id.clone())))
 				.push(
+					button(text("Interfaces"))
+						.on_press(GuiMessage::InterfacesRequested(peer.id.clone())),
+				)
+				.push(
 					button(text("File browser")).on_press(GuiMessage::FileBrowserRequested {
 						peer_id: peer.id.clone(),
 					}),
@@ -1816,6 +1884,74 @@ impl GuiApp {
 		let controls = iced::widget::Row::new()
 			.spacing(12)
 			.push(button(text("Refresh")).on_press(GuiMessage::CpuRequested(state.peer_id.clone())))
+			.push(
+				button(text("Back to actions"))
+					.on_press(GuiMessage::PeerActionsRequested(state.peer_id.clone())),
+			);
+		layout = layout.push(controls);
+		layout.into()
+	}
+
+	fn view_peer_interfaces(&self, state: &PeerInterfacesState) -> Element<'_, GuiMessage> {
+		let mut layout = iced::widget::Column::new().spacing(12);
+		layout = layout.push(text(format!("Network interfaces for {}", state.peer_id)).size(24));
+		if state.loading {
+			return layout
+				.push(text("Loading network interfaces...").size(16))
+				.into();
+		}
+		if let Some(err) = &state.error {
+			layout = layout.push(text(format!("Error: {}", err)).size(16));
+		}
+		if state.interfaces.is_empty() {
+			layout = layout.push(text("No interface information available.").size(16));
+		} else {
+			let mut list = iced::widget::Column::new().spacing(4);
+			for iface in &state.interfaces {
+				let ips = if iface.ips.is_empty() {
+					String::from("-")
+				} else {
+					iface.ips.join(", ")
+				};
+				let mut fields = iced::widget::Column::new().spacing(6);
+				fields = fields
+					.push(copyable_interface_field("MAC", iface.mac.clone()))
+					.push(copyable_interface_field("IPs", ips))
+					.push(copyable_interface_field("MTU", iface.mtu.to_string()))
+					.push(copyable_interface_field(
+						"Total received",
+						format_size(iface.total_received),
+					))
+					.push(copyable_interface_field(
+						"Total transmitted",
+						format_size(iface.total_transmitted),
+					))
+					.push(copyable_interface_field(
+						"Packets (rx/tx)",
+						format!("{}/{}", iface.packets_received, iface.packets_transmitted),
+					))
+					.push(copyable_interface_field(
+						"Errors (rx/tx)",
+						format!(
+							"{}/{}",
+							iface.errors_on_received, iface.errors_on_transmitted
+						),
+					));
+				let card = iced::widget::Column::new()
+					.spacing(6)
+					.push(text(format!("Interface {}", iface.name)).size(18))
+					.push(Divider::horizontal(0))
+					.push(fields);
+				list = list.push(container(card).padding(12).style(theme::Container::Box));
+			}
+			layout = layout.push(scrollable(list).height(Length::Fill));
+		}
+		let controls = iced::widget::Row::new()
+			.spacing(12)
+			.push(
+				button(text("Refresh"))
+					.on_press(GuiMessage::InterfacesRequested(state.peer_id.clone())),
+			)
 			.push(
 				button(text("Back to actions"))
 					.on_press(GuiMessage::PeerActionsRequested(state.peer_id.clone())),
@@ -2334,6 +2470,20 @@ fn format_size(bytes: u64) -> String {
 	}
 }
 
+fn copyable_interface_field<'a>(label: &str, value: impl Into<String>) -> Element<'a, GuiMessage> {
+	let value_string = value.into();
+	let input = text_input("", value_string.as_str())
+		.on_input(|_| GuiMessage::InterfacesFieldEdited)
+		.padding(6)
+		.size(14)
+		.width(Length::Fill);
+	let row = iced::widget::Row::new()
+		.spacing(8)
+		.push(text(label).size(14).width(Length::Shrink))
+		.push(input);
+	container(row).padding(4).into()
+}
+
 fn format_disk_label(disk: &DiskInfo) -> String {
 	let total = format_size(disk.total_space);
 	let free = format_size(disk.available_space);
@@ -2513,6 +2663,20 @@ async fn fetch_cpus(
 ) -> (String, Result<Vec<CpuInfo>, String>) {
 	let result = match PeerId::from_str(&peer_id) {
 		Ok(id) => peer.list_cpus(id).await.map_err(|err| err.to_string()),
+		Err(err) => Err(err.to_string()),
+	};
+	(peer_id, result)
+}
+
+async fn fetch_interfaces(
+	peer: Arc<PuppyNet>,
+	peer_id: String,
+) -> (String, Result<Vec<InterfaceInfo>, String>) {
+	let result = match PeerId::from_str(&peer_id) {
+		Ok(id) => peer
+			.list_interfaces(id)
+			.await
+			.map_err(|err| err.to_string()),
 		Err(err) => Err(err.to_string()),
 	};
 	(peer_id, result)

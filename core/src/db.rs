@@ -395,6 +395,37 @@ pub fn remove_stale_cpus(
 	Ok(())
 }
 
+/// Remove interface rows for `node_id` whose names are not in `current_names`.
+pub fn remove_stale_interfaces(
+	conn: &Connection,
+	node_id: &[u8],
+	current_names: &[String],
+) -> anyhow::Result<()> {
+	if current_names.is_empty() {
+		conn.execute(
+			"DELETE FROM interfaces WHERE node_id = ?1",
+			params![node_id],
+		)?;
+	} else {
+		let placeholders = std::iter::repeat("?")
+			.take(current_names.len())
+			.collect::<Vec<_>>()
+			.join(", ");
+		let sql = format!(
+			"DELETE FROM interfaces WHERE node_id = ?1 AND name NOT IN ({})",
+			placeholders
+		);
+		let mut stmt = conn.prepare(&sql)?;
+		let mut params: Vec<&dyn ToSql> = Vec::with_capacity(1 + current_names.len());
+		params.push(&node_id);
+		for name in current_names {
+			params.push(name);
+		}
+		stmt.execute(&params[..])?;
+	}
+	Ok(())
+}
+
 /// Save a disk row (upsert on `(node_id,name)`).
 pub fn save_disk(conn: &Connection, disk: &Disk) -> anyhow::Result<()> {
 	conn.execute(

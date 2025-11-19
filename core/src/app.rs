@@ -4,8 +4,8 @@ use crate::p2p::{
 use crate::types::FileChunk;
 use crate::{
 	db::{
-		Cpu as DbCpu, NodeID, load_peer_permissions, open_db, remove_stale_cpus, run_migrations,
-		save_cpu,
+		Cpu as DbCpu, Interface as DbInterface, NodeID, load_peer_permissions, open_db,
+		remove_stale_cpus, remove_stale_interfaces, run_migrations, save_cpu, save_interface,
 	},
 	p2p::{AgentBehaviour, AgentEvent, build_swarm, load_or_generate_keypair},
 	scan::{self, ScanEvent},
@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, mpsc};
 use std::{
 	env,
+	net::IpAddr,
 	path::{Path, PathBuf},
 };
 use sysinfo::{Disks, Networks, System};
@@ -60,6 +61,10 @@ pub enum Command {
 	},
 	ListDisks {
 		tx: oneshot::Sender<Result<Vec<DiskInfo>>>,
+		peer_id: PeerId,
+	},
+	ListInterfaces {
+		tx: oneshot::Sender<Result<Vec<InterfaceInfo>>>,
 		peer_id: PeerId,
 	},
 	ListPermissions {
@@ -177,6 +182,15 @@ impl ResponseDecoder for Vec<DiskInfo> {
 	fn decode(response: PeerRes) -> anyhow::Result<Self> {
 		match response {
 			PeerRes::Disks(disks) => Ok(disks),
+			other => Err(anyhow!("unexpected response: {:?}", other)),
+		}
+	}
+}
+
+impl ResponseDecoder for Vec<InterfaceInfo> {
+	fn decode(response: PeerRes) -> anyhow::Result<Self> {
+		match response {
+			PeerRes::Interfaces(interfaces) => Ok(interfaces),
 			other => Err(anyhow!("unexpected response: {:?}", other)),
 		}
 	}
@@ -462,23 +476,8 @@ impl App {
 				PeerRes::Disks(disks)
 			}
 			PeerReq::ListInterfaces => {
-				let networks = Networks::new_with_refreshed_list();
-				let infos = networks
-					.iter()
-					.map(|(name, data)| InterfaceInfo {
-						name: name.clone(),
-						mac: data.mac_address().to_string(),
-						ips: data.ip_networks().iter().map(|ip| ip.to_string()).collect(),
-						total_received: data.total_received(),
-						total_transmitted: data.total_transmitted(),
-						packets_received: data.total_packets_received(),
-						packets_transmitted: data.total_packets_transmitted(),
-						errors_on_received: data.total_errors_on_received(),
-						errors_on_transmitted: data.total_errors_on_transmitted(),
-						mtu: data.mtu(),
-					})
-					.collect();
-				PeerRes::Interfaces(infos)
+				let interfaces = self.collect_interface_info();
+				PeerRes::Interfaces(interfaces)
 			}
 			PeerReq::ListPermissions => {
 				log::info!("[{}] ListPermissions", peer);
@@ -552,23 +551,9 @@ impl App {
 		if cpus.is_empty() {
 			return;
 		}
-		let node_id = {
-			let state = match self.state.lock() {
-				Ok(state) => state,
-				Err(err) => {
-					log::error!("failed to lock state for CPU persistence: {err}");
-					return;
-				}
-			};
-			match peer_to_node_id(&state.me) {
-				Some(id) => id,
-				None => {
-					log::warn!(
-						"local peer id too short to derive node id; skipping CPU persistence"
-					);
-					return;
-				}
-			}
+		let node_id = match self.local_node_id() {
+			Some(id) => id,
+			None => return,
 		};
 		let conn = match self.db.lock() {
 			Ok(conn) => conn,
@@ -596,6 +581,86 @@ impl App {
 		}
 		if let Err(err) = remove_stale_cpus(&conn, &node_id, &current_names) {
 			log::error!("failed to prune stale CPU entries: {err}");
+		}
+	}
+
+	fn collect_interface_info(&self) -> Vec<InterfaceInfo> {
+		let networks = Networks::new_with_refreshed_list();
+		let interfaces: Vec<InterfaceInfo> = networks
+			.iter()
+			.map(|(name, data)| InterfaceInfo {
+				name: name.clone(),
+				mac: data.mac_address().to_string(),
+				ips: data.ip_networks().iter().map(|ip| ip.to_string()).collect(),
+				total_received: data.total_received(),
+				total_transmitted: data.total_transmitted(),
+				packets_received: data.total_packets_received(),
+				packets_transmitted: data.total_packets_transmitted(),
+				errors_on_received: data.total_errors_on_received(),
+				errors_on_transmitted: data.total_errors_on_transmitted(),
+				mtu: data.mtu(),
+			})
+			.collect();
+		self.persist_local_interfaces(&interfaces);
+		interfaces
+	}
+
+	fn persist_local_interfaces(&self, interfaces: &[InterfaceInfo]) {
+		if interfaces.is_empty() {
+			return;
+		}
+		let node_id = match self.local_node_id() {
+			Some(id) => id,
+			None => return,
+		};
+		let conn = match self.db.lock() {
+			Ok(conn) => conn,
+			Err(err) => {
+				log::error!("failed to lock database for interface persistence: {err}");
+				return;
+			}
+		};
+		let now = Utc::now();
+		let mut current_names = Vec::with_capacity(interfaces.len());
+		for info in interfaces {
+			let (ip, loopback, linklocal) = summarize_interface_ips(&info.ips);
+			let entry = DbInterface {
+				node_id,
+				name: info.name.clone(),
+				ip,
+				mac: info.mac.clone(),
+				loopback,
+				linklocal,
+				usage: (info.total_received + info.total_transmitted) as f32,
+				total_received: info.total_received,
+				created_at: now,
+				modified_at: now,
+			};
+			if let Err(err) = save_interface(&conn, &entry) {
+				log::error!("failed to save interface {}: {err}", entry.name);
+			} else {
+				current_names.push(entry.name.clone());
+			}
+		}
+		if let Err(err) = remove_stale_interfaces(&conn, &node_id, &current_names) {
+			log::error!("failed to prune stale interface entries: {err}");
+		}
+	}
+
+	fn local_node_id(&self) -> Option<NodeID> {
+		let state = match self.state.lock() {
+			Ok(state) => state,
+			Err(err) => {
+				log::error!("failed to lock state for hardware persistence: {err}");
+				return None;
+			}
+		};
+		match peer_to_node_id(&state.me) {
+			Some(id) => Some(id),
+			None => {
+				log::warn!("local peer id too short to derive node id; skipping persistence");
+				None
+			}
 		}
 	}
 
@@ -917,6 +982,20 @@ impl App {
 				self.pending_requests
 					.insert(request_id, Pending::<Vec<DiskInfo>>::new(tx));
 			}
+			Command::ListInterfaces { tx, peer_id } => {
+				if self.state.lock().unwrap().me == peer_id {
+					let interfaces = self.collect_interface_info();
+					let _ = tx.send(Ok(interfaces));
+					return;
+				}
+				let request_id = self
+					.swarm
+					.behaviour_mut()
+					.puppypeer
+					.send_request(&peer_id, PeerReq::ListInterfaces);
+				self.pending_requests
+					.insert(request_id, Pending::<Vec<InterfaceInfo>>::new(tx));
+			}
 			Command::ListPermissions { peer, tx } => {
 				let local_permissions = match self.state.lock() {
 					Ok(state) => {
@@ -1018,6 +1097,44 @@ fn peer_to_node_id(peer: &PeerId) -> Option<NodeID> {
 	}
 	node_id.copy_from_slice(&bytes[..len]);
 	Some(node_id)
+}
+
+fn summarize_interface_ips(ips: &[String]) -> (String, bool, bool) {
+	let mut first_ip = String::new();
+	let mut loopback = false;
+	let mut linklocal = false;
+	for entry in ips {
+		if first_ip.is_empty() {
+			first_ip = entry.clone();
+		}
+		if let Some(addr) = parse_ip_addr(entry) {
+			if addr.is_loopback() {
+				loopback = true;
+			}
+			match addr {
+				IpAddr::V4(v4) => {
+					if v4.is_link_local() {
+						linklocal = true;
+					}
+				}
+				IpAddr::V6(v6) => {
+					if v6.is_unicast_link_local() {
+						linklocal = true;
+					}
+				}
+			}
+		}
+	}
+	if first_ip.is_empty() {
+		first_ip = String::from("-");
+	}
+	(first_ip, loopback, linklocal)
+}
+
+fn parse_ip_addr(value: &str) -> Option<IpAddr> {
+	let mut parts = value.split('/');
+	let addr = parts.next()?.trim();
+	addr.parse().ok()
 }
 
 #[derive(Debug, Clone)]
@@ -1153,6 +1270,19 @@ impl PuppyNet {
 
 	pub fn list_disks_blocking(&self, peer_id: PeerId) -> Result<Vec<DiskInfo>> {
 		block_on(self.list_disks(peer_id))
+	}
+
+	pub async fn list_interfaces(&self, peer_id: PeerId) -> Result<Vec<InterfaceInfo>> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::ListInterfaces { tx, peer_id })
+			.map_err(|e| anyhow!("failed to send ListInterfaces command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("ListInterfaces response channel closed: {e}"))?
+	}
+
+	pub fn list_interfaces_blocking(&self, peer_id: PeerId) -> Result<Vec<InterfaceInfo>> {
+		block_on(self.list_interfaces(peer_id))
 	}
 
 	pub fn list_granted_permissions(&self, peer: PeerId) -> Result<Vec<Permission>> {
