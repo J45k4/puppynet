@@ -26,6 +26,7 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
 use uuid::Uuid;
 
+use crate::db::FileEntry;
 use crate::types::FileChunk;
 use crate::wait_group::WaitGroupGuard;
 
@@ -56,6 +57,10 @@ pub enum PeerReq {
 	ListCpus,
 	ListDisks,
 	ListInterfaces,
+	FileEntries {
+		offset: u64,
+		limit: u64,
+	},
 	Authenticate {
 		method: AuthMethod,
 	},
@@ -98,6 +103,7 @@ pub enum PeerRes {
 	Cpus(Vec<CpuInfo>),
 	Disks(Vec<DiskInfo>),
 	Interfaces(Vec<InterfaceInfo>),
+	FileEntries(Vec<FileEntry>),
 	AuthSuccess {
 		session: SessionInfo,
 	},

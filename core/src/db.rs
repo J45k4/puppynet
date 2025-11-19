@@ -8,7 +8,7 @@ use libp2p::PeerId;
 use rusqlite::Connection;
 use rusqlite::ToSql;
 use rusqlite::params;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::scan::FileHash;
@@ -226,7 +226,7 @@ pub fn save_temperature(conn: &Connection, temp: &Temperature) -> anyhow::Result
 	Ok(())
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FileEntry {
 	pub hash: FileHash,
 	pub size: i64,
@@ -610,6 +610,34 @@ pub fn get_file_entry(conn: &Connection, hash: &[u8]) -> anyhow::Result<Option<F
 		Ok(entry) => Ok(Some(entry)),
 		Err(e) => Err(e.into()),
 	}
+}
+
+pub fn fetch_file_entries_paginated(
+	conn: &Connection,
+	offset: u64,
+	limit: u64,
+) -> anyhow::Result<Vec<FileEntry>> {
+	let mut stmt = conn.prepare(
+		"SELECT hash, size, mime_type, first_datetime, latest_datetime \
+		FROM file_entries \
+		ORDER BY latest_datetime DESC \
+		LIMIT ?1 OFFSET ?2",
+	)?;
+	let rows = stmt.query_map(params![limit as i64, offset as i64], |row| {
+		Ok(FileEntry {
+			hash: row.get(0)?,
+			size: row.get(1)?,
+			mime_type: row.get(2)?,
+			first_datetime: row.get(3)?,
+			latest_datetime: row.get(4)?,
+		})
+	})?;
+
+	let mut entries = Vec::new();
+	for entry in rows {
+		entries.push(entry?);
+	}
+	Ok(entries)
 }
 
 pub fn get_file_location(

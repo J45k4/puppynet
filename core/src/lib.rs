@@ -8,3 +8,4 @@ pub use state::{FLAG_READ, FLAG_SEARCH, FLAG_WRITE, FolderRule, Permission, Rule
 pub use types::FileChunk;
 pub mod wait_group;
 pub use app::{PuppyNet, ScanResultRow};
+pub use db::FileEntry;

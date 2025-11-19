@@ -4,8 +4,9 @@ use crate::p2p::{
 use crate::types::FileChunk;
 use crate::{
 	db::{
-		Cpu as DbCpu, Interface as DbInterface, NodeID, load_peer_permissions, open_db,
-		remove_stale_cpus, remove_stale_interfaces, run_migrations, save_cpu, save_interface,
+		Cpu as DbCpu, FileEntry, Interface as DbInterface, NodeID, fetch_file_entries_paginated,
+		load_peer_permissions, open_db, remove_stale_cpus, remove_stale_interfaces, run_migrations,
+		save_cpu, save_interface,
 	},
 	p2p::{AgentBehaviour, AgentEvent, build_swarm, load_or_generate_keypair},
 	scan::{self, ScanEvent},
@@ -66,6 +67,12 @@ pub enum Command {
 	ListInterfaces {
 		tx: oneshot::Sender<Result<Vec<InterfaceInfo>>>,
 		peer_id: PeerId,
+	},
+	ListFileEntries {
+		peer: PeerId,
+		offset: u64,
+		limit: u64,
+		tx: oneshot::Sender<Result<Vec<FileEntry>>>,
 	},
 	ListPermissions {
 		peer: PeerId,
@@ -182,6 +189,15 @@ impl ResponseDecoder for Vec<DiskInfo> {
 	fn decode(response: PeerRes) -> anyhow::Result<Self> {
 		match response {
 			PeerRes::Disks(disks) => Ok(disks),
+			other => Err(anyhow!("unexpected response: {:?}", other)),
+		}
+	}
+}
+
+impl ResponseDecoder for Vec<FileEntry> {
+	fn decode(response: PeerRes) -> anyhow::Result<Self> {
+		match response {
+			PeerRes::FileEntries(entries) => Ok(entries),
 			other => Err(anyhow!("unexpected response: {:?}", other)),
 		}
 	}
@@ -479,6 +495,15 @@ impl App {
 				let interfaces = self.collect_interface_info();
 				PeerRes::Interfaces(interfaces)
 			}
+			PeerReq::FileEntries { offset, limit } => {
+				match self.fetch_file_entries(offset, limit) {
+					Ok(entries) => PeerRes::FileEntries(entries),
+					Err(err) => {
+						log::error!("failed to load file entries: {err}");
+						PeerRes::Error(format!("failed to load file entries: {err}"))
+					}
+				}
+			}
 			PeerReq::ListPermissions => {
 				log::info!("[{}] ListPermissions", peer);
 				let permissions = match self.state.lock() {
@@ -645,6 +670,15 @@ impl App {
 		if let Err(err) = remove_stale_interfaces(&conn, &node_id, &current_names) {
 			log::error!("failed to prune stale interface entries: {err}");
 		}
+	}
+
+	fn fetch_file_entries(&self, offset: u64, limit: u64) -> Result<Vec<FileEntry>, String> {
+		let conn = self
+			.db
+			.lock()
+			.map_err(|err| format!("db lock poisoned: {err}"))?;
+		fetch_file_entries_paginated(&conn, offset, limit)
+			.map_err(|err| format!("failed to fetch file entries: {err}"))
 	}
 
 	fn local_node_id(&self) -> Option<NodeID> {
@@ -996,6 +1030,27 @@ impl App {
 				self.pending_requests
 					.insert(request_id, Pending::<Vec<InterfaceInfo>>::new(tx));
 			}
+			Command::ListFileEntries {
+				peer,
+				offset,
+				limit,
+				tx,
+			} => {
+				if self.state.lock().unwrap().me == peer {
+					let result = self
+						.fetch_file_entries(offset, limit)
+						.map_err(|err| anyhow!(err));
+					let _ = tx.send(result);
+					return;
+				}
+				let request_id = self
+					.swarm
+					.behaviour_mut()
+					.puppypeer
+					.send_request(&peer, PeerReq::FileEntries { offset, limit });
+				self.pending_requests
+					.insert(request_id, Pending::<Vec<FileEntry>>::new(tx));
+			}
 			Command::ListPermissions { peer, tx } => {
 				let local_permissions = match self.state.lock() {
 					Ok(state) => {
@@ -1283,6 +1338,34 @@ impl PuppyNet {
 
 	pub fn list_interfaces_blocking(&self, peer_id: PeerId) -> Result<Vec<InterfaceInfo>> {
 		block_on(self.list_interfaces(peer_id))
+	}
+
+	pub async fn list_file_entries(
+		&self,
+		peer: PeerId,
+		offset: u64,
+		limit: u64,
+	) -> Result<Vec<FileEntry>> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::ListFileEntries {
+				peer,
+				offset,
+				limit,
+				tx,
+			})
+			.map_err(|e| anyhow!("failed to send ListFileEntries command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("ListFileEntries response channel closed: {e}"))?
+	}
+
+	pub fn list_file_entries_blocking(
+		&self,
+		peer: PeerId,
+		offset: u64,
+		limit: u64,
+	) -> Result<Vec<FileEntry>> {
+		block_on(self.list_file_entries(peer, offset, limit))
 	}
 
 	pub fn list_granted_permissions(&self, peer: PeerId) -> Result<Vec<Permission>> {
