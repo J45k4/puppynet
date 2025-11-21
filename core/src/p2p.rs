@@ -291,7 +291,9 @@ impl AgentBehaviour {
 			StreamProtocol::new(PUPPYNET_PROTOCOL),
 			ProtocolSupport::Full,
 		));
-		let puppynet: request_response::Behaviour<request_response::json::codec::Codec<PeerReq, PeerRes>> = request_response::json::Behaviour::new(
+		let puppynet: request_response::Behaviour<
+			request_response::json::codec::Codec<PeerReq, PeerRes>,
+		> = request_response::json::Behaviour::new(
 			puppynet_protocol,
 			RequestResponseConfig::default(),
 		);

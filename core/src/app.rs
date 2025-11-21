@@ -4,9 +4,9 @@ use crate::p2p::{
 use crate::types::FileChunk;
 use crate::{
 	db::{
-		Cpu as DbCpu, FileEntry, Interface as DbInterface, NodeID, fetch_file_entries_paginated,
-		load_peer_permissions, open_db, remove_stale_cpus, remove_stale_interfaces, run_migrations,
-		save_cpu, save_interface,
+		Cpu as DbCpu, FileEntry, Interface as DbInterface, Node, NodeID, StorageUsageFile,
+		fetch_file_entries_paginated, load_peer_permissions, open_db, remove_stale_cpus,
+		remove_stale_interfaces, run_migrations, save_cpu, save_interface, save_node,
 	},
 	p2p::{AgentBehaviour, AgentEvent, build_swarm, load_or_generate_keypair},
 	scan::{self, ScanEvent},
@@ -74,6 +74,9 @@ pub enum Command {
 		offset: u64,
 		limit: u64,
 		tx: oneshot::Sender<Result<Vec<FileEntry>>>,
+	},
+	ListStorageFiles {
+		tx: oneshot::Sender<Result<Vec<StorageUsageFile>>>,
 	},
 	ListPermissions {
 		peer: PeerId,
@@ -386,20 +389,20 @@ impl App {
 				}
 			}
 		}
-		(
-			App {
-				state,
-				swarm,
-				rx,
-				internal_rx,
-				internal_tx,
-				pending_requests: HashMap::new(),
-				system: System::new(),
-				db,
-				remote_scans,
-			},
-			tx,
-		)
+		let mut app = App {
+			state,
+			swarm,
+			rx,
+			internal_rx,
+			internal_tx,
+			pending_requests: HashMap::new(),
+			system: System::new(),
+			db,
+			remote_scans,
+		};
+		app.normalize_file_location_node_ids();
+		app.persist_local_node();
+		(app, tx)
 	}
 
 	async fn handle_puppy_peer_req(
@@ -725,6 +728,54 @@ impl App {
 		cpus
 	}
 
+	fn persist_local_node(&mut self) {
+		let node_id = match self.local_node_id() {
+			Some(id) => id,
+			None => return,
+		};
+		self.system.refresh_memory();
+		let now = Utc::now();
+		let node = Node {
+			id: node_id,
+			name: System::host_name().unwrap_or_else(|| String::from("local-node")),
+			you: true,
+			total_memory: self.system.total_memory(),
+			system_name: System::name().unwrap_or_else(|| String::from("unknown")),
+			kernel_version: System::kernel_version().unwrap_or_default(),
+			os_version: System::os_version().unwrap_or_default(),
+			created_at: now,
+			modified_at: now,
+			accessed_at: now,
+		};
+		let conn = match self.db.lock() {
+			Ok(conn) => conn,
+			Err(err) => {
+				log::error!("failed to lock database for node persistence: {err}");
+				return;
+			}
+		};
+		if let Err(err) = save_node(&conn, &node) {
+			log::error!("failed to persist local node: {err}");
+		}
+	}
+
+	fn normalize_file_location_node_ids(&self) {
+		const NODE_ID_LEN: i64 = std::mem::size_of::<NodeID>() as i64;
+		let conn = match self.db.lock() {
+			Ok(conn) => conn,
+			Err(err) => {
+				log::error!("failed to lock database to normalize node ids: {err}");
+				return;
+			}
+		};
+		if let Err(err) = conn.execute(
+			"UPDATE file_locations SET node_id = substr(node_id, 1, ?) WHERE length(node_id) != ?",
+			params![NODE_ID_LEN, NODE_ID_LEN],
+		) {
+			log::error!("failed to normalize legacy node ids: {err}");
+		}
+	}
+
 	fn persist_local_cpus(&self, cpus: &[CpuInfo]) {
 		if cpus.is_empty() {
 			return;
@@ -823,6 +874,63 @@ impl App {
 		if let Err(err) = remove_stale_interfaces(&conn, &node_id, &current_names) {
 			log::error!("failed to prune stale interface entries: {err}");
 		}
+	}
+
+	fn fetch_storage_files(&self) -> Result<Vec<StorageUsageFile>> {
+		let conn = self
+			.db
+			.lock()
+			.map_err(|err| anyhow!("db lock poisoned: {err}"))?;
+		let mut stmt = conn
+			.prepare("SELECT id, name FROM nodes")
+			.map_err(|err| anyhow!("failed to prepare nodes query: {err}"))?;
+		let rows = stmt
+			.query_map([], |row| {
+				let id: Vec<u8> = row.get(0)?;
+				let name: String = row.get(1)?;
+				Ok((id, name))
+			})
+			.map_err(|err| anyhow!("failed to query nodes: {err}"))?;
+		let mut files = Vec::new();
+		for row in rows {
+			let (node_id, node_name) =
+				row.map_err(|err| anyhow!("failed to read node row: {err}"))?;
+			files.extend(Self::load_files_for_node(&conn, &node_id, &node_name)?);
+		}
+		Ok(files)
+	}
+
+	fn load_files_for_node(
+		conn: &SqliteConnection,
+		node_id: &[u8],
+		node_name: &str,
+	) -> Result<Vec<StorageUsageFile>> {
+		let mut stmt = conn
+			.prepare(
+				"SELECT path, size, timestamp, modified_at \
+				FROM file_locations WHERE node_id = ?1",
+			)
+			.map_err(|err| anyhow!("failed to prepare file_locations query: {err}"))?;
+		let rows = stmt
+			.query_map(params![node_id], |row| {
+				let path: String = row.get(0)?;
+				let size = row.get::<_, i64>(1)?.max(0) as u64;
+				let timestamp: Option<DateTime<Utc>> = row.get(2)?;
+				let modified: Option<DateTime<Utc>> = row.get(3)?;
+				Ok(StorageUsageFile {
+					node_id: node_id.to_vec(),
+					node_name: node_name.to_string(),
+					path,
+					size,
+					last_changed: modified.or(timestamp),
+				})
+			})
+			.map_err(|err| anyhow!("failed to query file_locations: {err}"))?;
+		let mut files = Vec::new();
+		for row in rows {
+			files.push(row.map_err(|err| anyhow!("failed to read file row: {err}"))?);
+		}
+		Ok(files)
 	}
 
 	fn fetch_file_entries(&self, offset: u64, limit: u64) -> Result<Vec<FileEntry>, String> {
@@ -939,70 +1047,67 @@ impl App {
 			AgentEvent::Ping(event) => {
 				log::info!("Ping event: {:?}", event);
 			}
-			AgentEvent::PuppyNet(event) => {
-				match event {
-					libp2p::request_response::Event::Message {
-						peer,
-						connection_id: _,
-						message,
+			AgentEvent::PuppyNet(event) => match event {
+				libp2p::request_response::Event::Message {
+					peer,
+					connection_id: _,
+					message,
+				} => match message {
+					libp2p::request_response::Message::Request {
+						request_id: _,
+						request,
+						channel,
 					} => {
-						match message {
-							libp2p::request_response::Message::Request {
-								request_id: _,
-								request,
-								channel,
-							} => {
-								if let Ok(res) = self.handle_puppy_peer_req(peer, request).await {
-									let _ = self
-										.swarm
-										.behaviour_mut()
-										.puppynet
-										.send_response(channel, res);
-								} else {
-									let _ = self.swarm.behaviour_mut().puppynet.send_response(
-										channel,
-										PeerRes::Error("Internal error".into()),
-									);
-								}
-							}
-							libp2p::request_response::Message::Response {
-								request_id,
-								response,
-							} => {
-								if let Some(pending) = self.pending_requests.remove(&request_id) {
-									pending.complete(response);
-								}
-							}
+						if let Ok(res) = self.handle_puppy_peer_req(peer, request).await {
+							let _ = self
+								.swarm
+								.behaviour_mut()
+								.puppynet
+								.send_response(channel, res);
+						} else {
+							let _ = self
+								.swarm
+								.behaviour_mut()
+								.puppynet
+								.send_response(channel, PeerRes::Error("Internal error".into()));
 						}
 					}
-					libp2p::request_response::Event::OutboundFailure {
-						peer,
-						connection_id: _,
+					libp2p::request_response::Message::Response {
 						request_id,
-						error,
+						response,
 					} => {
-						log::warn!("outbound request to {} failed: {error}", peer);
 						if let Some(pending) = self.pending_requests.remove(&request_id) {
-							pending.fail(anyhow!("request failed: {error}"));
+							pending.complete(response);
 						}
 					}
-					libp2p::request_response::Event::InboundFailure {
-						peer,
-						connection_id: _,
-						request_id: _,
-						error,
-					} => {
-						log::warn!("inbound failure from {}: {error}", peer);
-					}
-					libp2p::request_response::Event::ResponseSent {
-						peer,
-						connection_id: _,
-						request_id: _,
-					} => {
-						log::debug!("response sent to {}", peer);
+				},
+				libp2p::request_response::Event::OutboundFailure {
+					peer,
+					connection_id: _,
+					request_id,
+					error,
+				} => {
+					log::warn!("outbound request to {} failed: {error}", peer);
+					if let Some(pending) = self.pending_requests.remove(&request_id) {
+						pending.fail(anyhow!("request failed: {error}"));
 					}
 				}
-			}
+				libp2p::request_response::Event::InboundFailure {
+					peer,
+					connection_id: _,
+					request_id: _,
+					error,
+				} => {
+					log::warn!("inbound failure from {}: {error}", peer);
+				}
+				libp2p::request_response::Event::ResponseSent {
+					peer,
+					connection_id: _,
+					request_id: _,
+				} => {
+					log::debug!("response sent to {}", peer);
+				}
+			},
 			AgentEvent::Mdns(event) => match event {
 				mdns::Event::Discovered(items) => {
 					for (peer_id, multiaddr) in items {
@@ -1251,12 +1356,11 @@ impl App {
 					.insert(request_id, Pending::<FileChunk>::new(req.tx));
 			}
 			Command::Scan { path, tx } => {
-				let node_id = match self.state.lock() {
-					Ok(state) => state.me.to_bytes(),
-					Err(err) => {
-						let _ = tx.send(ScanEvent::Finished(Err(format!(
-							"state lock poisoned: {}",
-							err
+				let node_id = match self.local_node_id() {
+					Some(id) => id,
+					None => {
+						let _ = tx.send(ScanEvent::Finished(Err(String::from(
+							"failed to determine node id",
 						))));
 						return;
 					}
@@ -1292,6 +1396,10 @@ impl App {
 					request_id,
 					PendingRemoteScanStart::new(scan_id, Arc::clone(&self.remote_scans)),
 				);
+			}
+			Command::ListStorageFiles { tx } => {
+				let result = self.fetch_storage_files();
+				let _ = tx.send(result);
 			}
 		}
 	}
@@ -1603,6 +1711,19 @@ impl PuppyNet {
 		limit: u64,
 	) -> Result<Vec<FileEntry>> {
 		block_on(self.list_file_entries(peer, offset, limit))
+	}
+
+	pub async fn list_storage_files(&self) -> Result<Vec<StorageUsageFile>> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::ListStorageFiles { tx })
+			.map_err(|e| anyhow!("failed to send ListStorageFiles command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("ListStorageFiles response channel closed: {e}"))?
+	}
+
+	pub fn list_storage_files_blocking(&self) -> Result<Vec<StorageUsageFile>> {
+		block_on(self.list_storage_files())
 	}
 
 	pub fn list_granted_permissions(&self, peer: PeerId) -> Result<Vec<Permission>> {

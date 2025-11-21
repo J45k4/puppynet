@@ -235,6 +235,15 @@ pub struct FileEntry {
 	pub latest_datetime: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct StorageUsageFile {
+	pub node_id: Vec<u8>,
+	pub node_name: String,
+	pub path: String,
+	pub size: u64,
+	pub last_changed: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Default, Serialize)]
 pub struct ListArgs {
 	search_word: Option<String>,

@@ -5,6 +5,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use iced::alignment::{Horizontal, Vertical};
 use iced::executor;
 use iced::theme;
@@ -20,6 +21,7 @@ use puppynet_core::p2p::{CpuInfo, DirEntry, DiskInfo, InterfaceInfo};
 use puppynet_core::scan::ScanEvent;
 use puppynet_core::{
 	FLAG_READ, FLAG_SEARCH, FLAG_WRITE, FileChunk, FolderRule, Permission, PuppyNet, Rule, State,
+	StorageUsageFile,
 };
 use tokio::task;
 
@@ -33,15 +35,17 @@ pub enum MenuItem {
 	PeersGraph,
 	CreateUser,
 	FileSearch,
+	StorageUsage,
 	ScanResults,
 	Quit,
 }
 
-const MENU_ITEMS: [MenuItem; 6] = [
+const MENU_ITEMS: [MenuItem; 7] = [
 	MenuItem::Peers,
 	MenuItem::PeersGraph,
 	MenuItem::CreateUser,
 	MenuItem::FileSearch,
+	MenuItem::StorageUsage,
 	MenuItem::ScanResults,
 	MenuItem::Quit,
 ];
@@ -53,6 +57,7 @@ impl MenuItem {
 			MenuItem::PeersGraph => "Peers Graph",
 			MenuItem::CreateUser => "Create User",
 			MenuItem::FileSearch => "File Search",
+			MenuItem::StorageUsage => "Storage Usage",
 			MenuItem::ScanResults => "Scan Results",
 			MenuItem::Quit => "Quit",
 		}
@@ -374,10 +379,38 @@ struct ScanResultsState {
 	total_entries: usize,
 }
 
+#[derive(Debug, Clone)]
+struct StorageUsageState {
+	nodes: Vec<StorageNodeView>,
+	loading: bool,
+	error: Option<String>,
+}
+
 #[derive(Clone)]
 struct ActiveScan {
 	id: u64,
 	receiver: Arc<Mutex<mpsc::Receiver<ScanEvent>>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StorageNodeView {
+	name: String,
+	id: String,
+	total_size: u64,
+	entries: Vec<StorageEntryView>,
+	expanded: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StorageEntryView {
+	path: String,
+	name: String,
+	size: u64,
+	item_count: u64,
+	last_changed: String,
+	percent: f32,
+	children: Vec<StorageEntryView>,
+	expanded: bool,
 }
 
 impl FileSearchState {
@@ -432,6 +465,16 @@ impl ScanResultsState {
 			page,
 			page_size,
 			total_entries: 0,
+		}
+	}
+}
+
+impl StorageUsageState {
+	fn loading() -> Self {
+		Self {
+			nodes: Vec::new(),
+			loading: true,
+			error: None,
 		}
 	}
 }
@@ -535,6 +578,7 @@ enum Mode {
 	PeerActions { peer_id: String },
 	PeerPermissions(PeerPermissionsState),
 	PeerCpus(PeerCpuState),
+	StorageUsage(StorageUsageState),
 	PeerInterfaces(PeerInterfacesState),
 	FileBrowser(FileBrowserState),
 	FileViewer(FileViewerState),
@@ -634,6 +678,12 @@ pub enum GuiMessage {
 	},
 	ScanResultsNextPage,
 	ScanResultsPrevPage,
+	StorageUsageLoaded(Result<Vec<StorageNodeView>, String>),
+	StorageUsageToggleNode(usize),
+	StorageUsageToggleEntry {
+		node_index: usize,
+		path: String,
+	},
 	InterfacesFieldEdited,
 }
 
@@ -722,6 +772,16 @@ impl Application for GuiApp {
 						self.menu = item;
 						self.mode = Mode::FileSearch(FileSearchState::new());
 						self.status = String::from("File search");
+					}
+					MenuItem::StorageUsage => {
+						self.menu = item;
+						self.mode = Mode::StorageUsage(StorageUsageState::loading());
+						self.status = String::from("Loading storage usage...");
+						let peer = self.peer.clone();
+						return Command::perform(
+							load_storage_usage(peer),
+							GuiMessage::StorageUsageLoaded,
+						);
 					}
 					MenuItem::ScanResults => {
 						self.menu = item;
@@ -1567,6 +1627,31 @@ impl Application for GuiApp {
 				}
 				Command::none()
 			}
+			GuiMessage::StorageUsageLoaded(result) => {
+				if let Mode::StorageUsage(state) = &mut self.mode {
+					state.loading = false;
+					match result {
+						Ok(nodes) => {
+							state.nodes = nodes;
+							state.error = None;
+							self.status = String::from("Storage usage loaded");
+						}
+						Err(err) => {
+							state.error = Some(err.clone());
+							self.status = format!("Failed to load storage usage: {}", err);
+						}
+					}
+				}
+				Command::none()
+			}
+			GuiMessage::StorageUsageToggleNode(index) => {
+				self.toggle_storage_node(index);
+				Command::none()
+			}
+			GuiMessage::StorageUsageToggleEntry { node_index, path } => {
+				self.toggle_storage_entry(node_index, &path);
+				Command::none()
+			}
 			GuiMessage::InterfacesFieldEdited => Command::none(),
 		}
 	}
@@ -1592,6 +1677,7 @@ impl Application for GuiApp {
 			Mode::PeerActions { peer_id } => self.view_peer_actions(peer_id),
 			Mode::PeerPermissions(state) => self.view_peer_permissions(state),
 			Mode::PeerCpus(state) => self.view_peer_cpus(state),
+			Mode::StorageUsage(state) => self.view_storage_usage(state),
 			Mode::PeerInterfaces(state) => self.view_peer_interfaces(state),
 			Mode::FileBrowser(state) => self.view_file_browser(state),
 			Mode::FileViewer(state) => self.view_file_viewer(state),
@@ -2364,6 +2450,174 @@ impl GuiApp {
 			.into()
 	}
 
+	fn view_storage_usage(&self, state: &StorageUsageState) -> Element<'_, GuiMessage> {
+		let mut layout = iced::widget::Column::new().spacing(12);
+		layout = layout.push(text("Storage Usage").size(24));
+		if state.loading {
+			return scrollable(
+				layout.push(text("Loading storage usage...").size(16))
+			)
+			.height(Length::Fill)
+			.into();
+		}
+		if let Some(err) = &state.error {
+			return scrollable(
+				layout.push(text(format!("Failed to load storage usage: {}", err)).size(16))
+			)
+			.height(Length::Fill)
+			.into();
+		}
+		if state.nodes.is_empty() {
+			return scrollable(
+				layout.push(text("No storage data available.").size(16))
+			)
+			.height(Length::Fill)
+			.into();
+		}
+		layout = layout.push(self.storage_header_row());
+		for (index, node) in state.nodes.iter().enumerate() {
+			layout = layout.push(self.view_storage_node(node, index));
+		}
+		scrollable(layout).height(Length::Fill).into()
+	}
+
+	fn storage_header_row(&self) -> Element<'_, GuiMessage> {
+		let row = iced::widget::Row::new()
+			.spacing(8)
+			.push(text("Name").size(14).width(Length::FillPortion(4)))
+			.push(text("% of node").size(14).width(Length::FillPortion(1)))
+			.push(text("Size").size(14).width(Length::FillPortion(1)))
+			.push(text("Items").size(14).width(Length::FillPortion(1)))
+			.push(text("Last changed").size(14).width(Length::FillPortion(2)));
+		container(row)
+			.padding(8)
+			.style(theme::Container::Box)
+			.into()
+	}
+
+	fn view_storage_node(&self, node: &StorageNodeView, index: usize) -> Element<'_, GuiMessage> {
+		let toggle_label = if node.entries.is_empty() {
+			String::new()
+		} else if node.expanded {
+			String::from("▾")
+		} else {
+			String::from("▸")
+		};
+		let mut row = iced::widget::Row::new().spacing(8);
+		let toggle_element: Element<_> = if node.entries.is_empty() {
+			text("").width(Length::Shrink).into()
+		} else {
+			button(text(toggle_label))
+				.on_press(GuiMessage::StorageUsageToggleNode(index))
+				.style(theme::Button::Text)
+				.into()
+		};
+		row = row
+			.push(toggle_element)
+			.push(
+				text(format!(
+					"{} [{}] (total: {})",
+					node.name,
+					node.id,
+					format_size(node.total_size)
+				))
+				.size(16)
+				.width(Length::FillPortion(4)),
+			)
+			.push(text("100%").size(14).width(Length::FillPortion(1)))
+			.push(
+				text(format_size(node.total_size))
+					.size(14)
+					.width(Length::FillPortion(1)),
+			)
+			.push(text("-").size(14).width(Length::FillPortion(1)))
+			.push(text("-").size(14).width(Length::FillPortion(2)));
+		let mut column = iced::widget::Column::new()
+			.spacing(4)
+			.push(container(row).padding(6).style(theme::Container::Box));
+		if node.expanded {
+			column = column.push(self.render_storage_entries(&node.entries, index, 1));
+		}
+		column.into()
+	}
+
+	fn render_storage_entries(
+		&self,
+		entries: &[StorageEntryView],
+		node_index: usize,
+		depth: usize,
+	) -> Element<'_, GuiMessage> {
+		let mut column = iced::widget::Column::new().spacing(4);
+		for entry in entries {
+			let indent = " ".repeat(depth * 2);
+			let mut row = iced::widget::Row::new().spacing(8);
+			let toggle_element: Element<_> = if entry.children.is_empty() {
+				text("").width(Length::Shrink).into()
+			} else {
+				let symbol = if entry.expanded { "▾" } else { "▸" };
+				button(text(symbol))
+					.on_press(GuiMessage::StorageUsageToggleEntry {
+						node_index,
+						path: entry.path.clone(),
+					})
+					.style(theme::Button::Text)
+					.into()
+			};
+			row = row
+				.push(toggle_element)
+				.push(
+					text(format!("{}{}", indent, entry.name))
+						.size(14)
+						.width(Length::FillPortion(4)),
+				)
+				.push(
+					text(format!("{:.1}%", entry.percent))
+						.size(14)
+						.width(Length::FillPortion(1)),
+				)
+				.push(
+					text(format_size(entry.size))
+						.size(14)
+						.width(Length::FillPortion(1)),
+				)
+				.push(
+					text(entry.item_count.to_string())
+						.size(14)
+						.width(Length::FillPortion(1)),
+				)
+				.push(
+					text(entry.last_changed.clone())
+						.size(14)
+						.width(Length::FillPortion(2)),
+				);
+			column = column.push(container(row).padding(4).style(theme::Container::Box));
+			if entry.expanded && !entry.children.is_empty() {
+				column = column.push(self.render_storage_entries(
+					&entry.children,
+					node_index,
+					depth + 1,
+				));
+			}
+		}
+		column.into()
+	}
+
+	fn toggle_storage_node(&mut self, index: usize) {
+		if let Mode::StorageUsage(state) = &mut self.mode {
+			if let Some(node) = state.nodes.get_mut(index) {
+				node.expanded = !node.expanded;
+			}
+		}
+	}
+
+	fn toggle_storage_entry(&mut self, index: usize, path: &str) {
+		if let Mode::StorageUsage(state) = &mut self.mode {
+			if let Some(node) = state.nodes.get_mut(index) {
+				toggle_storage_entry_recursive(&mut node.entries, path);
+			}
+		}
+	}
+
 	fn gather_known_addresses(&self, peer_id: &str) -> Vec<String> {
 		if let Some(state) = &self.latest_state {
 			if let Ok(target) = PeerId::from_str(peer_id) {
@@ -2570,6 +2824,21 @@ fn default_browser_path(permissions: &[Permission]) -> Option<String> {
 	})
 }
 
+fn toggle_storage_entry_recursive(entries: &mut [StorageEntryView], path: &str) -> bool {
+	for entry in entries {
+		if entry.path == path {
+			if !entry.children.is_empty() {
+				entry.expanded = !entry.expanded;
+			}
+			return true;
+		}
+		if toggle_storage_entry_recursive(&mut entry.children, path) {
+			return true;
+		}
+	}
+	false
+}
+
 fn join_child_path(base: &str, child: &str) -> String {
 	let trimmed_child = child.trim_matches(|c| path_separators().contains(&c));
 	if base.is_empty() {
@@ -2724,6 +2993,165 @@ async fn load_scan_results_page(
 		})
 		.collect();
 	Ok((entries, total))
+}
+
+async fn load_storage_usage(peer: Arc<PuppyNet>) -> Result<Vec<StorageNodeView>, String> {
+	let files = peer
+		.list_storage_files()
+		.await
+		.map_err(|err| err.to_string())?;
+	Ok(build_storage_nodes(files))
+}
+
+fn build_storage_nodes(files: Vec<StorageUsageFile>) -> Vec<StorageNodeView> {
+	let mut grouped: HashMap<Vec<u8>, (String, Vec<FileRecord>)> = HashMap::new();
+	for file in files {
+		let entry = grouped
+			.entry(file.node_id.clone())
+			.or_insert_with(|| (file.node_name.clone(), Vec::new()));
+		entry.1.push(FileRecord {
+			path: PathBuf::from(file.path),
+			size: file.size,
+			last_changed: file.last_changed,
+		});
+	}
+	let mut nodes: Vec<StorageNodeView> = grouped
+		.into_iter()
+		.map(|(node_id, (name, records))| {
+			let (entries, total_size) = build_storage_tree(records);
+			StorageNodeView {
+				name,
+				id: bytes_to_hex(&node_id),
+				total_size,
+				entries,
+				expanded: false,
+			}
+		})
+		.collect();
+	nodes.sort_by(|a, b| a.name.cmp(&b.name));
+	nodes
+}
+
+fn build_storage_tree(files: Vec<FileRecord>) -> (Vec<StorageEntryView>, u64) {
+	let mut stats: HashMap<PathBuf, EntryStats> = HashMap::new();
+	let mut children: HashMap<PathBuf, BTreeSet<PathBuf>> = HashMap::new();
+	for file in files {
+		let mut ancestors = Vec::new();
+		let mut current = Some(file.path.as_path());
+		while let Some(path) = current {
+			ancestors.push(path.to_path_buf());
+			current = path.parent();
+		}
+		ancestors.push(PathBuf::new());
+		for path in ancestors.iter() {
+			let entry = stats.entry(path.clone()).or_insert_with(EntryStats::new);
+			entry.size += file.size;
+			entry.item_count += 1;
+			if let Some(last) = file.last_changed {
+				entry.last_changed = match entry.last_changed {
+					Some(existing) if existing >= last => Some(existing),
+					_ => Some(last),
+				};
+			}
+		}
+		for pair in ancestors.windows(2) {
+			if let [child, parent] = pair {
+				children
+					.entry(parent.clone())
+					.or_insert_with(BTreeSet::new)
+					.insert(child.clone());
+			}
+		}
+	}
+	let total_size = stats.get(&PathBuf::new()).map(|s| s.size).unwrap_or(0);
+	let entries = build_storage_entries_for(&PathBuf::new(), &stats, &children, total_size);
+	(entries, total_size)
+}
+
+fn build_storage_entries_for(
+	parent: &PathBuf,
+	stats: &HashMap<PathBuf, EntryStats>,
+	children: &HashMap<PathBuf, BTreeSet<PathBuf>>,
+	total_size: u64,
+) -> Vec<StorageEntryView> {
+	let mut result = Vec::new();
+	if let Some(child_paths) = children.get(parent) {
+		for child_path in child_paths.iter().rev() {
+			if child_path.as_os_str().is_empty() {
+				continue;
+			}
+			if let Some(data) = stats.get(child_path) {
+				let percent = if total_size == 0 {
+					0.0
+				} else {
+					(data.size as f32 / total_size as f32) * 100.0
+				};
+				let mut entry = StorageEntryView {
+					path: child_path.to_string_lossy().into_owned(),
+					name: display_name(child_path),
+					size: data.size,
+					item_count: data.item_count,
+					last_changed: format_timestamp(data.last_changed),
+					percent,
+					children: Vec::new(),
+					expanded: false,
+				};
+				entry.children = build_storage_entries_for(child_path, stats, children, total_size);
+				result.push(entry);
+			}
+		}
+		result.sort_by(|a, b| b.size.cmp(&a.size));
+	}
+	result
+}
+
+fn display_name(path: &Path) -> String {
+	if path.as_os_str().is_empty() {
+		String::from("Root")
+	} else if let Some(name) = path.file_name() {
+		name.to_string_lossy().into_owned()
+	} else {
+		path.to_string_lossy().into_owned()
+	}
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+	let mut s = String::with_capacity(bytes.len() * 2);
+	for b in bytes {
+		use std::fmt::Write;
+		let _ = write!(&mut s, "{:02x}", b);
+	}
+	s
+}
+
+fn format_timestamp(value: Option<DateTime<Utc>>) -> String {
+	value
+		.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+		.unwrap_or_else(|| String::from("-"))
+}
+
+#[derive(Debug, Clone)]
+struct FileRecord {
+	path: PathBuf,
+	size: u64,
+	last_changed: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+struct EntryStats {
+	size: u64,
+	item_count: u64,
+	last_changed: Option<DateTime<Utc>>,
+}
+
+impl EntryStats {
+	fn new() -> Self {
+		Self {
+			size: 0,
+			item_count: 0,
+			last_changed: None,
+		}
+	}
 }
 
 pub fn run(app_title: String) -> iced::Result {
