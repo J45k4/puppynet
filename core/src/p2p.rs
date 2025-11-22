@@ -29,6 +29,7 @@ use uuid::Uuid;
 use crate::db::FileEntry;
 use crate::scan::{ScanEvent, ScanResult};
 use crate::types::FileChunk;
+use crate::updater::UpdateProgress;
 use crate::wait_group::WaitGroupGuard;
 
 const PUPPYNET_PROTOCOL: &str = "/puppynet/0.0.1";
@@ -106,6 +107,16 @@ pub enum PeerReq {
 		max_width: u32,
 		max_height: u32,
 	},
+	/// Request the peer to update itself to a specific version (or latest if None)
+	UpdateSelf {
+		id: u64,
+		version: Option<String>,
+	},
+	/// Progress event from a remote update operation
+	UpdateEvent {
+		id: u64,
+		event: UpdateProgress,
+	},
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +162,10 @@ pub enum PeerRes {
 	Error(String),
 	Permissions(Vec<crate::state::Permission>),
 	Thumbnail(Thumbnail),
+	/// Acknowledgment that update has started
+	UpdateStarted(Result<(), String>),
+	/// Acknowledgment for update progress event
+	UpdateEventAck,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

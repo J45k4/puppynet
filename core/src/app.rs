@@ -3,6 +3,7 @@ use crate::p2p::{
 	Thumbnail,
 };
 use crate::types::FileChunk;
+use crate::updater::{self, UpdateProgress, UpdateResult};
 use crate::{
 	db::{
 		Cpu as DbCpu, FileEntry, Interface as DbInterface, Node, NodeID, StorageUsageFile,
@@ -99,6 +100,12 @@ pub enum Command {
 		max_width: u32,
 		max_height: u32,
 		tx: oneshot::Sender<Result<Thumbnail>>,
+	},
+	/// Request a remote peer to update itself
+	RemoteUpdate {
+		peer: PeerId,
+		version: Option<String>,
+		update_id: u64,
 	},
 }
 
@@ -238,6 +245,7 @@ pub struct App {
 	system: System,
 	db: Arc<Mutex<SqliteConnection>>,
 	remote_scans: Arc<Mutex<HashMap<u64, mpsc::Sender<ScanEvent>>>>,
+	remote_updates: Arc<Mutex<HashMap<u64, mpsc::Sender<UpdateProgress>>>>,
 }
 
 trait ResponseDecoder: Sized + Send + 'static {
@@ -316,6 +324,24 @@ impl ResponseDecoder for Thumbnail {
 	}
 }
 
+impl ResponseDecoder for UpdateResult {
+	fn decode(response: PeerRes) -> anyhow::Result<Self> {
+		match response {
+			PeerRes::UpdateStarted(Ok(())) => Ok(UpdateResult {
+				success: true,
+				message: "Update started".to_string(),
+				new_version: None,
+			}),
+			PeerRes::UpdateStarted(Err(err)) => Ok(UpdateResult {
+				success: false,
+				message: err,
+				new_version: None,
+			}),
+			other => Err(anyhow!("unexpected response: {:?}", other)),
+		}
+	}
+}
+
 trait PendingResponseHandler: Send {
 	fn complete(self: Box<Self>, response: PeerRes);
 	fn fail(self: Box<Self>, error: anyhow::Error);
@@ -361,6 +387,60 @@ impl PendingResponseHandler for PendingScanEventAck {
 	}
 }
 
+struct PendingRemoteUpdateStart {
+	update_id: u64,
+	channels: Arc<Mutex<HashMap<u64, mpsc::Sender<UpdateProgress>>>>,
+}
+
+impl PendingRemoteUpdateStart {
+	fn new(
+		update_id: u64,
+		channels: Arc<Mutex<HashMap<u64, mpsc::Sender<UpdateProgress>>>>,
+	) -> PendingRequest {
+		Box::new(Self { update_id, channels })
+	}
+}
+
+impl PendingResponseHandler for PendingRemoteUpdateStart {
+	fn complete(self: Box<Self>, response: PeerRes) {
+		match response {
+			PeerRes::UpdateStarted(Ok(())) => {}
+			PeerRes::UpdateStarted(Err(err)) => {
+				if let Some(tx) = self.channels.lock().unwrap().remove(&self.update_id) {
+					let _ = tx.send(UpdateProgress::Failed { error: err });
+				}
+			}
+			other => {
+				log::warn!("unexpected response for remote update start {:?}", other);
+			}
+		}
+	}
+
+	fn fail(self: Box<Self>, error: anyhow::Error) {
+		if let Some(tx) = self.channels.lock().unwrap().remove(&self.update_id) {
+			let _ = tx.send(UpdateProgress::Failed {
+				error: error.to_string(),
+			});
+		}
+	}
+}
+
+struct PendingUpdateEventAck;
+
+impl PendingUpdateEventAck {
+	fn new() -> PendingRequest {
+		Box::new(Self)
+	}
+}
+
+impl PendingResponseHandler for PendingUpdateEventAck {
+	fn complete(self: Box<Self>, _response: PeerRes) {}
+
+	fn fail(self: Box<Self>, error: anyhow::Error) {
+		log::warn!("update event delivery failed: {}", error);
+	}
+}
+
 impl PendingResponseHandler for PendingRemoteScanStart {
 	fn complete(self: Box<Self>, response: PeerRes) {
 		match response {
@@ -403,6 +483,11 @@ enum InternalCommand {
 		scan_id: u64,
 		event: ScanEvent,
 	},
+	SendUpdateEvent {
+		target: PeerId,
+		update_id: u64,
+		event: UpdateProgress,
+	},
 }
 
 type PendingRequest = Box<dyn PendingResponseHandler>;
@@ -419,6 +504,7 @@ impl App {
 		state: Arc<Mutex<State>>,
 		db: Arc<Mutex<SqliteConnection>>,
 		remote_scans: Arc<Mutex<HashMap<u64, mpsc::Sender<ScanEvent>>>>,
+		remote_updates: Arc<Mutex<HashMap<u64, mpsc::Sender<UpdateProgress>>>>,
 	) -> (Self, tokio::sync::mpsc::UnboundedSender<Command>) {
 		let key_path = env::var("KEYPAIR").unwrap_or_else(|_| String::from("peer_keypair.bin"));
 		let key_path = Path::new(&key_path);
@@ -473,6 +559,7 @@ impl App {
 			system: System::new(),
 			db,
 			remote_scans,
+			remote_updates,
 		};
 		app.normalize_file_location_node_ids();
 		app.persist_local_node();
@@ -816,6 +903,56 @@ impl App {
 						PeerRes::Error(format!("Failed to generate thumbnail: {err}"))
 					}
 				}
+			}
+			PeerReq::UpdateSelf { id, version } => {
+				log::info!("[{}] UpdateSelf (id: {}, version: {:?})", peer, id, version);
+
+				// Get current version (0 if unknown)
+				let current_version = 0u32; // TODO: Get actual version from build info
+
+				let internal_tx = self.internal_tx.clone();
+				let target = peer;
+				let version_clone = version.clone();
+
+				let internal_tx_for_error = internal_tx.clone();
+				tokio::spawn(async move {
+					let result = updater::update_with_progress(
+						version_clone.as_deref(),
+						current_version,
+						move |progress| {
+							let _ = internal_tx.send(InternalCommand::SendUpdateEvent {
+								target,
+								update_id: id,
+								event: progress,
+							});
+						},
+					).await;
+
+					// If update_with_progress failed with an error (not a result),
+					// send a failure event
+					if let Err(err) = result {
+						let _ = internal_tx_for_error.send(InternalCommand::SendUpdateEvent {
+							target,
+							update_id: id,
+							event: UpdateProgress::Failed { error: err.to_string() },
+						});
+					}
+				});
+
+				PeerRes::UpdateStarted(Ok(()))
+			}
+			PeerReq::UpdateEvent { id, event } => {
+				log::debug!("[{}] UpdateEvent (id: {})", peer, id);
+				let mut map = self.remote_updates.lock().unwrap();
+				if let Some(tx) = map.get(&id) {
+					let _ = tx.send(event.clone());
+					if matches!(event, UpdateProgress::Completed { .. } | UpdateProgress::Failed { .. } | UpdateProgress::AlreadyUpToDate { .. }) {
+						map.remove(&id);
+					}
+				} else {
+					log::warn!("received update event for unknown id {}", id);
+				}
+				PeerRes::UpdateEventAck
 			}
 		};
 		Ok(res)
@@ -1539,6 +1676,21 @@ impl App {
 				self.pending_requests
 					.insert(request_id, Pending::<Thumbnail>::new(tx));
 			}
+			Command::RemoteUpdate {
+				peer,
+				version,
+				update_id,
+			} => {
+				let request_id = self
+					.swarm
+					.behaviour_mut()
+					.puppynet
+					.send_request(&peer, PeerReq::UpdateSelf { id: update_id, version });
+				self.pending_requests.insert(
+					request_id,
+					PendingRemoteUpdateStart::new(update_id, Arc::clone(&self.remote_updates)),
+				);
+			}
 		}
 	}
 
@@ -1574,6 +1726,19 @@ impl App {
 					.send_request(&target, PeerReq::ScanEvent { id: scan_id, event });
 				self.pending_requests
 					.insert(request_id, PendingScanEventAck::new());
+			}
+			InternalCommand::SendUpdateEvent {
+				target,
+				update_id,
+				event,
+			} => {
+				let request_id = self
+					.swarm
+					.behaviour_mut()
+					.puppynet
+					.send_request(&target, PeerReq::UpdateEvent { id: update_id, event });
+				self.pending_requests
+					.insert(request_id, PendingUpdateEventAck::new());
 			}
 		}
 	}
@@ -1645,6 +1810,8 @@ pub struct PuppyNet {
 	db: Arc<Mutex<SqliteConnection>>,
 	remote_scans: Arc<Mutex<HashMap<u64, mpsc::Sender<ScanEvent>>>>,
 	remote_scan_counter: AtomicU64,
+	remote_updates: Arc<Mutex<HashMap<u64, mpsc::Sender<UpdateProgress>>>>,
+	remote_update_counter: AtomicU64,
 }
 
 impl PuppyNet {
@@ -1661,7 +1828,8 @@ impl PuppyNet {
 		let (shutdown_tx, shutdown_rx) = oneshot::channel();
 		let state_clone = state.clone();
 		let remote_scans = Arc::new(Mutex::new(HashMap::new()));
-		let (mut app, cmd_tx) = App::new(state_clone, db.clone(), remote_scans.clone());
+		let remote_updates = Arc::new(Mutex::new(HashMap::new()));
+		let (mut app, cmd_tx) = App::new(state_clone, db.clone(), remote_scans.clone(), remote_updates.clone());
 		let mut shutdown_rx = shutdown_rx;
 		let handle: JoinHandle<()> = tokio::spawn(async move {
 			loop {
@@ -1683,6 +1851,8 @@ impl PuppyNet {
 			db,
 			remote_scans,
 			remote_scan_counter: AtomicU64::new(1),
+			remote_updates,
+			remote_update_counter: AtomicU64::new(1),
 		}
 	}
 
@@ -2003,6 +2173,70 @@ impl PuppyNet {
 		max_height: u32,
 	) -> Result<Thumbnail> {
 		block_on(self.get_thumbnail(peer, path, max_width, max_height))
+	}
+
+	/// Request a remote peer to update itself.
+	/// Returns a receiver that will receive UpdateProgress events as the update proceeds.
+	/// If the target peer is the local peer, performs a local self-update instead.
+	pub fn update_remote_peer(
+		&self,
+		peer: PeerId,
+		version: Option<String>,
+	) -> Result<Arc<Mutex<mpsc::Receiver<UpdateProgress>>>, String> {
+		let (tx, rx) = mpsc::channel();
+		let update_id = self.remote_update_counter.fetch_add(1, Ordering::SeqCst);
+
+		// Check if the target peer is self - if so, perform a local update
+		let is_self = {
+			let state = self.state.lock().unwrap();
+			peer == state.me
+		};
+
+		if is_self {
+			// Perform local self-update
+			let tx_clone = tx.clone();
+			let version_clone = version.clone();
+			// Use current_version = 0 for core library (actual version comes from CLI build)
+			let current_version = 0u32;
+
+			std::thread::spawn(move || {
+				let rt = tokio::runtime::Runtime::new().unwrap();
+				rt.block_on(async move {
+					let result = updater::update_with_progress(
+						version_clone.as_deref(),
+						current_version,
+						move |progress| {
+							let _ = tx_clone.send(progress);
+						},
+					)
+					.await;
+
+					if let Err(e) = result {
+						let _ = tx.send(UpdateProgress::Failed {
+							error: e.to_string(),
+						});
+					}
+				});
+			});
+		} else {
+			// Remote update - send command to dial peer
+			self.remote_updates
+				.lock()
+				.unwrap()
+				.insert(update_id, tx.clone());
+			self.cmd_tx
+				.send(Command::RemoteUpdate {
+					peer,
+					version,
+					update_id,
+				})
+				.map_err(|e| {
+					self.remote_updates.lock().unwrap().remove(&update_id);
+					format!("failed to send RemoteUpdate command: {e}")
+				})?;
+		}
+
+		Ok(Arc::new(Mutex::new(rx)))
 	}
 
 	/// Wait for the peer until Ctrl+C (SIGINT) then perform a graceful shutdown.

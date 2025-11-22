@@ -18,9 +18,17 @@ mime_guess = "2"
 rayon = { version = "1", optional = true }
 rusqlite = { version = "0.33", features = ["bundled", "chrono"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 blake3 = "1"
 sysinfo = "0.35"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+reqwest = { version = "0.12", features = ["json", "gzip", "rustls-tls"] }
+flate2 = "1"
+tar = "0.4"
+zip = "2"
+sha2 = { version = "0.10", features = ["oid"] }
+rsa = { version = "0.9", default-features = false, features = ["sha2", "pem"] }
+homedir = "0.3"
