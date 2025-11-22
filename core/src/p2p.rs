@@ -101,6 +101,11 @@ pub enum PeerReq {
 		username: String,
 	},
 	ListPermissions,
+	GetThumbnail {
+		path: String,
+		max_width: u32,
+		max_height: u32,
+	},
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,6 +150,15 @@ pub enum PeerRes {
 	Tokens(Vec<TokenInfo>),
 	Error(String),
 	Permissions(Vec<crate::state::Permission>),
+	Thumbnail(Thumbnail),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Thumbnail {
+	pub data: Vec<u8>,
+	pub width: u32,
+	pub height: u32,
+	pub mime_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -13,6 +13,7 @@ ratatui = "0.27"
 crossterm = "0.27"
 puppynet_core = { path = "../core" }
 iced = { version = "0.12", features = ["tokio", "image"] }
+mime_guess = "2"
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = { version = "0.10", features = ["oid"], optional = true }
 rsa = { version = "0.9", default-features = false, features = ["sha2", "pem"], optional = true }

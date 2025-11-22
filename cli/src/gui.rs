@@ -21,13 +21,14 @@ use puppynet_core::p2p::{CpuInfo, DirEntry, DiskInfo, InterfaceInfo};
 use puppynet_core::scan::ScanEvent;
 use puppynet_core::{
 	FLAG_READ, FLAG_SEARCH, FLAG_WRITE, FileChunk, FolderRule, Permission, PuppyNet, Rule, State,
-	StorageUsageFile,
+	StorageUsageFile, Thumbnail,
 };
 use tokio::task;
 
 const LOCAL_LISTEN_MULTIADDR: &str = "/ip4/0.0.0.0:8336";
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const FILE_VIEW_CHUNK_SIZE: u64 = 64 * 1024;
+const THUMBNAIL_MAX_SIZE: u32 = 128;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum MenuItem {
@@ -186,6 +187,14 @@ struct FileBrowserState {
 	available_roots: Vec<String>,
 	disks: Vec<DiskInfo>,
 	showing_disks: bool,
+	thumbnails: HashMap<String, ThumbnailState>,
+}
+
+#[derive(Debug, Clone)]
+enum ThumbnailState {
+	Loading,
+	Loaded(Vec<u8>),
+	Failed,
 }
 
 impl FileBrowserState {
@@ -199,7 +208,16 @@ impl FileBrowserState {
 			available_roots: Vec::new(),
 			disks: Vec::new(),
 			showing_disks: should_list_disks_first(),
+			thumbnails: HashMap::new(),
 		}
+	}
+
+	fn is_image_entry(entry: &DirEntry) -> bool {
+		entry
+			.mime
+			.as_deref()
+			.map(|m| m.starts_with("image/"))
+			.unwrap_or(false)
 	}
 
 	fn display_path(&self) -> String {
@@ -233,31 +251,41 @@ struct FileViewerState {
 }
 
 impl FileViewerState {
+	fn guess_mime(path: &str) -> Option<String> {
+		mime_guess::from_path(path)
+			.first_raw()
+			.map(|s| s.to_string())
+	}
+
 	fn from_browser(browser: FileBrowserState, peer_id: String, path: String, mime: Option<String>) -> Self {
+		// Use provided mime, or guess from path
+		let detected_mime = mime.or_else(|| Self::guess_mime(&path));
 		Self {
 			peer_id,
-			path,
-			mime,
+			mime: detected_mime,
 			source: FileViewerSource::FileBrowser(browser),
 			data: Vec::new(),
 			offset: 0,
 			eof: false,
 			loading: true,
 			error: None,
+			path,
 		}
 	}
 
 	fn from_storage(storage: StorageUsageState, peer_id: String, path: String) -> Self {
+		// Guess mime from path for storage files
+		let detected_mime = Self::guess_mime(&path);
 		Self {
 			peer_id,
-			path,
-			mime: None,
+			mime: detected_mime,
 			source: FileViewerSource::StorageUsage(storage),
 			data: Vec::new(),
 			offset: 0,
 			eof: false,
 			loading: true,
 			error: None,
+			path,
 		}
 	}
 
@@ -563,6 +591,18 @@ async fn read_file(
 	(peer_id, path, offset, map_result(result))
 }
 
+async fn fetch_thumbnail(
+	peer: Arc<PuppyNet>,
+	peer_id: String,
+	path: String,
+) -> (String, Result<Thumbnail, String>) {
+	let target = PeerId::from_str(&peer_id).unwrap();
+	let result = peer
+		.get_thumbnail(target, path.clone(), THUMBNAIL_MAX_SIZE, THUMBNAIL_MAX_SIZE)
+		.await;
+	(path, map_result(result))
+}
+
 pub struct GuiApp {
 	peer: Arc<PuppyNet>,
 	latest_state: Option<State>,
@@ -709,6 +749,10 @@ pub enum GuiMessage {
 		path: String,
 	},
 	InterfacesFieldEdited,
+	ThumbnailLoaded {
+		path: String,
+		result: Result<Thumbnail, String>,
+	},
 }
 
 impl Application for GuiApp {
@@ -1166,11 +1210,29 @@ impl Application for GuiApp {
 					Mode::FileBrowser(state) if state.peer_id == peer_id => {
 						state.path = path.clone();
 						state.loading = false;
+						state.thumbnails.clear();
 						match entries {
 							Ok(entries) => {
+								// Collect image entries that need thumbnails
+								let mut thumbnail_commands = Vec::new();
+								for entry in &entries {
+									if !entry.is_dir && FileBrowserState::is_image_entry(entry) {
+										let full_path = join_child_path(&path, &entry.name);
+										state.thumbnails.insert(full_path.clone(), ThumbnailState::Loading);
+										let peer = self.peer.clone();
+										let p_id = peer_id.clone();
+										thumbnail_commands.push(Command::perform(
+											fetch_thumbnail(peer, p_id, full_path.clone()),
+											|(path, result)| GuiMessage::ThumbnailLoaded { path, result },
+										));
+									}
+								}
 								state.entries = entries;
 								state.error = None;
 								self.status = format!("Loaded {} entries", state.entries.len());
+								if !thumbnail_commands.is_empty() {
+									return Command::batch(thumbnail_commands);
+								}
 							}
 							Err(err) => {
 								state.entries.clear();
@@ -1707,6 +1769,19 @@ impl Application for GuiApp {
 				Command::none()
 			}
 			GuiMessage::InterfacesFieldEdited => Command::none(),
+			GuiMessage::ThumbnailLoaded { path, result } => {
+				if let Mode::FileBrowser(state) = &mut self.mode {
+					match result {
+						Ok(thumb) => {
+							state.thumbnails.insert(path, ThumbnailState::Loaded(thumb.data));
+						}
+						Err(_) => {
+							state.thumbnails.insert(path, ThumbnailState::Failed);
+						}
+					}
+				}
+				Command::none()
+			}
 		}
 	}
 
@@ -2150,17 +2225,66 @@ impl GuiApp {
 			} else if state.entries.is_empty() {
 				layout = layout.push(text("Directory is empty").size(16));
 			} else {
-				let mut list = iced::widget::Column::new().spacing(4);
+				let mut list = iced::widget::Column::new().spacing(8);
 				for entry in &state.entries {
+					let full_path = join_child_path(&state.path, &entry.name);
+					let is_image = FileBrowserState::is_image_entry(entry);
+
+					// Create the content row
+					let mut row = iced::widget::Row::new().spacing(8).align_items(iced::Alignment::Center);
+
+					// Add thumbnail for images if available
+					if is_image {
+						match state.thumbnails.get(&full_path) {
+							Some(ThumbnailState::Loaded(data)) => {
+								let handle = ImageHandle::from_memory(data.clone());
+								let thumb_image = Image::new(handle)
+									.width(Length::Fixed(64.0))
+									.height(Length::Fixed(64.0));
+								row = row.push(
+									container(thumb_image)
+										.width(Length::Fixed(68.0))
+										.height(Length::Fixed(68.0))
+										.align_x(Horizontal::Center)
+										.align_y(Vertical::Center),
+								);
+							}
+							Some(ThumbnailState::Loading) => {
+								row = row.push(
+									container(text("...").size(12))
+										.width(Length::Fixed(68.0))
+										.height(Length::Fixed(68.0))
+										.align_x(Horizontal::Center)
+										.align_y(Vertical::Center)
+										.style(theme::Container::Box),
+								);
+							}
+							Some(ThumbnailState::Failed) | None => {
+								row = row.push(
+									container(text("?").size(12))
+										.width(Length::Fixed(68.0))
+										.height(Length::Fixed(68.0))
+										.align_x(Horizontal::Center)
+										.align_y(Vertical::Center)
+										.style(theme::Container::Box),
+								);
+							}
+						}
+					}
+
+					// Add the file info
 					let label = if entry.is_dir {
 						format!("[DIR] {}", entry.name)
 					} else {
 						format!("{} ({})", entry.name, format_size(entry.size))
 					};
-					let button = button(text(label))
+					row = row.push(text(label).width(Length::Fill));
+
+					let entry_button = button(row)
 						.width(Length::Fill)
+						.padding(4)
 						.on_press(GuiMessage::FileEntryActivated(entry.clone()));
-					list = list.push(button);
+					list = list.push(entry_button);
 				}
 				layout = layout.push(scrollable(list).height(Length::Fill));
 			}
