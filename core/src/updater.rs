@@ -12,6 +12,7 @@ use serde_json::Value;
 use sha2::Sha256;
 use tar::Archive;
 use tokio::{fs::File, io::AsyncWriteExt};
+use zip::ZipArchive;
 
 /// Path resolution: this file is core/src/updater.rs; the key lives at repository root.
 pub const PUBLIC_KEY: &str = include_str!("../../public_key.pem");
@@ -198,30 +199,67 @@ where
 
 	// Use spawn_blocking for the synchronous archive extraction
 	let path_clone = path.clone();
+	let filename_clone = filename.clone();
 	tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
 		let file = std::fs::File::open(&path_clone)?;
-		let buf_reader = BufReader::new(file);
-		let decoder = GzDecoder::new(buf_reader);
-		let mut archive = Archive::new(decoder);
-		let mut entries = archive.entries()?;
-		while let Some(file) = entries.next() {
-			let mut file = file?;
-			let name = match file.path() {
-				Ok(name) => name,
-				Err(_) => continue,
-			};
-			log::info!("unpacking: {:?}", name);
-			let dst = app_dir().join(name);
-			log::info!("unpacking to {:?}", dst);
-			file.unpack(dst)?;
+
+		// Detect archive format based on filename extension
+		if filename_clone.ends_with(".zip") {
+			// Extract ZIP archive (Windows)
+			log::info!("extracting ZIP archive");
+			let mut archive = ZipArchive::new(file)?;
+			for i in 0..archive.len() {
+				let mut entry = archive.by_index(i)?;
+				let name = match entry.enclosed_name() {
+					Some(name) => name.to_path_buf(),
+					None => continue,
+				};
+				log::info!("unpacking: {:?}", name);
+				let dst = app_dir().join(&name);
+				log::info!("unpacking to {:?}", dst);
+
+				if entry.is_dir() {
+					std::fs::create_dir_all(&dst)?;
+				} else {
+					if let Some(parent) = dst.parent() {
+						std::fs::create_dir_all(parent)?;
+					}
+					let mut outfile = std::fs::File::create(&dst)?;
+					std::io::copy(&mut entry, &mut outfile)?;
+				}
+			}
+		} else {
+			// Extract tar.gz archive (Linux/macOS)
+			log::info!("extracting tar.gz archive");
+			let buf_reader = BufReader::new(file);
+			let decoder = GzDecoder::new(buf_reader);
+			let mut archive = Archive::new(decoder);
+			let mut entries = archive.entries()?;
+			while let Some(file) = entries.next() {
+				let mut file = file?;
+				let name = match file.path() {
+					Ok(name) => name,
+					Err(_) => continue,
+				};
+				log::info!("unpacking: {:?}", name);
+				let dst = app_dir().join(name);
+				log::info!("unpacking to {:?}", dst);
+				file.unpack(dst)?;
+			}
 		}
 		Ok(())
 	}).await??;
 
 	progress_callback(UpdateProgress::Verifying);
 
-	let bin_path = app_dir().join("puppynet");
-	let sig_path = bin_path.with_extension("sig");
+	// Use platform-specific binary name
+	let bin_name = if cfg!(windows) { "puppynet.exe" } else { "puppynet" };
+	let bin_path = app_dir().join(bin_name);
+	let sig_path = if cfg!(windows) {
+		app_dir().join("puppynet.exe.sig")
+	} else {
+		bin_path.with_extension("sig")
+	};
 
 	// Verify signature in blocking context
 	let bin_path_clone = bin_path.clone();
@@ -240,7 +278,7 @@ where
 
 	progress_callback(UpdateProgress::Installing);
 
-	tokio::fs::copy(&bin_path, bin_dir().join("puppynet")).await?;
+	tokio::fs::copy(&bin_path, bin_dir().join(bin_name)).await?;
 	tokio::fs::remove_file(&bin_path).await?;
 	tokio::fs::remove_file(&sig_path).await?;
 
