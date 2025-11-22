@@ -261,28 +261,48 @@ where
 	// Use platform-specific binary name
 	let bin_name = if cfg!(windows) { "puppynet.exe" } else { "puppynet" };
 	let bin_path = app_dir().join(bin_name);
-	let sig_path = if cfg!(windows) {
-		app_dir().join("puppynet.exe.sig")
+
+	// Try multiple possible signature file names
+	let possible_sig_names = if cfg!(windows) {
+		vec!["puppynet.exe.sig", "puppynet.sig"]
 	} else {
-		bin_path.with_extension("sig")
+		vec!["puppynet.sig"]
 	};
 
-	// Check that both files exist before verification
+	// List directory contents for debugging
+	let entries: Vec<_> = std::fs::read_dir(app_dir())
+		.map(|rd| rd.filter_map(|e| e.ok().map(|e| e.file_name())).collect())
+		.unwrap_or_default();
+	log::info!("app_dir contents after extraction: {:?}", entries);
+
+	// Check that binary exists
 	if !bin_path.exists() {
-		// List directory contents for debugging
-		let entries: Vec<_> = std::fs::read_dir(app_dir())
-			.map(|rd| rd.filter_map(|e| e.ok().map(|e| e.file_name())).collect())
-			.unwrap_or_default();
 		log::error!("Binary not found at {:?}, directory contains: {:?}", bin_path, entries);
 		let error = format!("Binary not found: {:?}. Directory contains: {:?}", bin_path, entries);
 		progress_callback(UpdateProgress::Failed { error: error.clone() });
 		bail!("{}", error);
 	}
-	if !sig_path.exists() {
-		let error = format!("Signature file not found: {:?}", sig_path);
-		progress_callback(UpdateProgress::Failed { error: error.clone() });
-		bail!("{}", error);
-	}
+
+	// Find the signature file
+	let sig_path = possible_sig_names
+		.iter()
+		.map(|name| app_dir().join(name))
+		.find(|p| p.exists());
+
+	let sig_path = match sig_path {
+		Some(p) => {
+			log::info!("Found signature file: {:?}", p);
+			p
+		}
+		None => {
+			let error = format!(
+				"Signature file not found. Tried: {:?}. Directory contains: {:?}",
+				possible_sig_names, entries
+			);
+			progress_callback(UpdateProgress::Failed { error: error.clone() });
+			bail!("{}", error);
+		}
+	};
 
 	// Verify signature in blocking context
 	let bin_path_clone = bin_path.clone();
