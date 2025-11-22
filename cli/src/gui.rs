@@ -3092,7 +3092,7 @@ fn build_storage_entries_for(
 					children: Vec::new(),
 					expanded: false,
 				};
-				entry.children = build_storage_entries_for(child_path, stats, children, total_size);
+				entry.children = build_storage_entries_for(child_path, stats, children, data.size);
 				result.push(entry);
 			}
 		}
