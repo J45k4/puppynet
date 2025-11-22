@@ -21,7 +21,7 @@ use puppynet_core::p2p::{CpuInfo, DirEntry, DiskInfo, InterfaceInfo};
 use puppynet_core::scan::ScanEvent;
 use puppynet_core::{
 	FLAG_READ, FLAG_SEARCH, FLAG_WRITE, FileChunk, FolderRule, Permission, PuppyNet, Rule, State,
-	StorageUsageFile, Thumbnail,
+	StorageUsageFile, Thumbnail, UpdateProgress,
 };
 use tokio::task;
 
@@ -440,6 +440,13 @@ struct ActiveScan {
 	receiver: Arc<Mutex<mpsc::Receiver<ScanEvent>>>,
 }
 
+#[derive(Clone)]
+struct ActiveUpdate {
+	id: u64,
+	peer_id: String,
+	receiver: Arc<Mutex<mpsc::Receiver<UpdateProgress>>>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct StorageNodeView {
 	name: String,
@@ -617,6 +624,8 @@ pub struct GuiApp {
 	scan_state: ScanState,
 	active_scan: Option<ActiveScan>,
 	next_scan_id: u64,
+	active_update: Option<ActiveUpdate>,
+	next_update_id: u64,
 }
 
 impl GuiApp {
@@ -753,6 +762,13 @@ pub enum GuiMessage {
 		path: String,
 		result: Result<Thumbnail, String>,
 	},
+	/// Request to update a remote peer
+	UpdatePeerRequested(String),
+	/// Progress event from remote peer update
+	UpdatePeerProgress {
+		peer_id: String,
+		event: UpdateProgress,
+	},
 }
 
 impl Application for GuiApp {
@@ -784,6 +800,8 @@ impl Application for GuiApp {
 			scan_state: ScanState::new(),
 			active_scan: None,
 			next_scan_id: 1,
+			active_update: None,
+			next_update_id: 1,
 		};
 		(app, Command::none())
 	}
@@ -1782,6 +1800,93 @@ impl Application for GuiApp {
 				}
 				Command::none()
 			}
+			GuiMessage::UpdatePeerRequested(peer_id) => {
+				if self.active_update.is_some() {
+					self.status = String::from("An update is already in progress");
+					return Command::none();
+				}
+				let target = match PeerId::from_str(&peer_id) {
+					Ok(id) => id,
+					Err(err) => {
+						self.status = format!("Invalid peer id: {}", err);
+						return Command::none();
+					}
+				};
+				let receiver = match self.peer.update_remote_peer(target, None) {
+					Ok(recv) => recv,
+					Err(err) => {
+						self.status = format!("Failed to start update: {}", err);
+						return Command::none();
+					}
+				};
+				let update_id = self.next_update_id;
+				self.next_update_id += 1;
+				self.active_update = Some(ActiveUpdate {
+					id: update_id,
+					peer_id: peer_id.clone(),
+					receiver: receiver.clone(),
+				});
+				self.status = format!("Starting update for peer {}...", peer_id);
+				Command::perform(wait_for_update_event(receiver), move |event| {
+					GuiMessage::UpdatePeerProgress {
+						peer_id: peer_id.clone(),
+						event,
+					}
+				})
+			}
+			GuiMessage::UpdatePeerProgress { peer_id, event } => {
+				if self.active_update.as_ref().map(|u| &u.peer_id) != Some(&peer_id) {
+					return Command::none();
+				}
+				let mut should_poll = false;
+				match &event {
+					UpdateProgress::FetchingRelease => {
+						self.status = format!("Fetching release info for {}...", peer_id);
+						should_poll = true;
+					}
+					UpdateProgress::Downloading { filename } => {
+						self.status = format!("Downloading {} for {}...", filename, peer_id);
+						should_poll = true;
+					}
+					UpdateProgress::Unpacking => {
+						self.status = format!("Unpacking update for {}...", peer_id);
+						should_poll = true;
+					}
+					UpdateProgress::Verifying => {
+						self.status = format!("Verifying update for {}...", peer_id);
+						should_poll = true;
+					}
+					UpdateProgress::Installing => {
+						self.status = format!("Installing update for {}...", peer_id);
+						should_poll = true;
+					}
+					UpdateProgress::Completed { version } => {
+						self.status = format!("Peer {} updated to version {}", peer_id, version);
+						self.active_update = None;
+					}
+					UpdateProgress::Failed { error } => {
+						self.status = format!("Update failed for {}: {}", peer_id, error);
+						self.active_update = None;
+					}
+					UpdateProgress::AlreadyUpToDate { current_version } => {
+						self.status = format!("Peer {} is already up to date (version {})", peer_id, current_version);
+						self.active_update = None;
+					}
+				}
+				if should_poll {
+					if let Some(update) = &self.active_update {
+						let receiver = update.receiver.clone();
+						let p_id = peer_id.clone();
+						return Command::perform(wait_for_update_event(receiver), move |event| {
+							GuiMessage::UpdatePeerProgress {
+								peer_id: p_id,
+								event,
+							}
+						});
+					}
+				}
+				Command::none()
+			}
 		}
 	}
 
@@ -1967,6 +2072,10 @@ impl GuiApp {
 				.push(
 					button(text("Permissions"))
 						.on_press(GuiMessage::PeerPermissionsRequested(peer.id.clone())),
+				)
+				.push(
+					button(text("Update Peer"))
+						.on_press(GuiMessage::UpdatePeerRequested(peer.id.clone())),
 				)
 				.push(button(text("Back")).on_press(GuiMessage::BackToPeers));
 			layout = layout.push(controls);
@@ -3145,6 +3254,14 @@ async fn wait_for_scan_event(receiver: Arc<Mutex<mpsc::Receiver<ScanEvent>>>) ->
 		Ok(Ok(event)) => event,
 		Ok(Err(_)) => ScanEvent::Finished(Err(String::from("Scan worker stopped"))),
 		Err(err) => ScanEvent::Finished(Err(format!("Scan wait failed: {err}"))),
+	}
+}
+
+async fn wait_for_update_event(receiver: Arc<Mutex<mpsc::Receiver<UpdateProgress>>>) -> UpdateProgress {
+	match task::spawn_blocking(move || receiver.lock().unwrap().recv()).await {
+		Ok(Ok(event)) => event,
+		Ok(Err(_)) => UpdateProgress::Failed { error: String::from("Update worker stopped") },
+		Err(err) => UpdateProgress::Failed { error: format!("Update wait failed: {err}") },
 	}
 }
 
