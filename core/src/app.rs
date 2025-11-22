@@ -1,5 +1,6 @@
 use crate::p2p::{
 	AuthMethod, CpuInfo, DirEntry, DiskInfo, FileWriteAck, InterfaceInfo, PeerReq, PeerRes,
+	Thumbnail,
 };
 use crate::types::FileChunk;
 use crate::{
@@ -92,6 +93,13 @@ pub enum Command {
 		path: String,
 		scan_id: u64,
 	},
+	GetThumbnail {
+		peer: PeerId,
+		path: String,
+		max_width: u32,
+		max_height: u32,
+		tx: oneshot::Sender<Result<Thumbnail>>,
+	},
 }
 
 async fn read_file(path: &Path, offset: u64, length: Option<u64>) -> Result<FileChunk> {
@@ -161,6 +169,63 @@ async fn write_file(path: &Path, offset: u64, data: &[u8]) -> Result<FileWriteAc
 	Ok(FileWriteAck {
 		bytes_written: data.len() as u64,
 	})
+}
+
+async fn generate_thumbnail(path: &Path, max_width: u32, max_height: u32) -> Result<Thumbnail> {
+	use image::ImageReader;
+	use std::io::Cursor;
+
+	// Read the file data
+	let data = fs::read(path).await?;
+
+	// Use spawn_blocking for CPU-intensive image processing
+	let result = tokio::task::spawn_blocking(move || -> Result<Thumbnail> {
+		// Load the image
+		let reader = ImageReader::new(Cursor::new(&data))
+			.with_guessed_format()
+			.map_err(|e| anyhow!("failed to guess image format: {}", e))?;
+
+		let format = reader.format();
+		let img = reader
+			.decode()
+			.map_err(|e| anyhow!("failed to decode image: {}", e))?;
+
+		// Calculate thumbnail dimensions maintaining aspect ratio
+		let (orig_width, orig_height) = (img.width(), img.height());
+		let (thumb_width, thumb_height) = if orig_width <= max_width && orig_height <= max_height {
+			// Image is already smaller than requested thumbnail size
+			(orig_width, orig_height)
+		} else {
+			let width_ratio = max_width as f64 / orig_width as f64;
+			let height_ratio = max_height as f64 / orig_height as f64;
+			let ratio = width_ratio.min(height_ratio);
+			(
+				(orig_width as f64 * ratio).round() as u32,
+				(orig_height as f64 * ratio).round() as u32,
+			)
+		};
+
+		// Resize the image
+		let thumbnail = img.thumbnail(thumb_width, thumb_height);
+
+		// Encode the thumbnail as JPEG for smaller size
+		let mut output = Vec::new();
+		let mut cursor = Cursor::new(&mut output);
+		thumbnail
+			.write_to(&mut cursor, image::ImageFormat::Jpeg)
+			.map_err(|e| anyhow!("failed to encode thumbnail: {}", e))?;
+
+		Ok(Thumbnail {
+			data: output,
+			width: thumbnail.width(),
+			height: thumbnail.height(),
+			mime_type: String::from("image/jpeg"),
+		})
+	})
+	.await
+	.map_err(|e| anyhow!("thumbnail task panicked: {}", e))??;
+
+	Ok(result)
 }
 
 pub struct App {
@@ -237,6 +302,15 @@ impl ResponseDecoder for FileChunk {
 	fn decode(response: PeerRes) -> anyhow::Result<Self> {
 		match response {
 			PeerRes::FileChunk(chunk) => Ok(chunk),
+			other => Err(anyhow!("unexpected response: {:?}", other)),
+		}
+	}
+}
+
+impl ResponseDecoder for Thumbnail {
+	fn decode(response: PeerRes) -> anyhow::Result<Self> {
+		match response {
+			PeerRes::Thumbnail(thumb) => Ok(thumb),
 			other => Err(anyhow!("unexpected response: {:?}", other)),
 		}
 	}
@@ -708,6 +782,41 @@ impl App {
 			PeerReq::ListTokens { .. } => PeerRes::Error("ListTokens not implemented".into()),
 			PeerReq::RevokeToken { .. } => PeerRes::Error("RevokeToken not implemented".into()),
 			PeerReq::RevokeUser { .. } => PeerRes::Error("RevokeUser not implemented".into()),
+			PeerReq::GetThumbnail {
+				path,
+				max_width,
+				max_height,
+			} => {
+				log::info!(
+					"[{}] GetThumbnail {} ({}x{})",
+					peer,
+					path,
+					max_width,
+					max_height
+				);
+				let canonical = match fs::canonicalize(&path).await {
+					Ok(p) => p,
+					Err(err) => {
+						log::warn!("failed to canonicalize thumbnail path {}: {err}", path);
+						return Ok(PeerRes::Error(format!("Failed to access file: {err}")));
+					}
+				};
+				if !self.can_access(peer, &canonical, FLAG_READ | FLAG_SEARCH) {
+					log::warn!(
+						"peer {} denied thumbnail access for {}",
+						peer,
+						canonical.display()
+					);
+					return Ok(PeerRes::Error("Access denied".into()));
+				}
+				match generate_thumbnail(&canonical, max_width, max_height).await {
+					Ok(thumb) => PeerRes::Thumbnail(thumb),
+					Err(err) => {
+						log::warn!("failed to generate thumbnail for {}: {err}", path);
+						PeerRes::Error(format!("Failed to generate thumbnail: {err}"))
+					}
+				}
+			}
 		};
 		Ok(res)
 	}
@@ -1401,6 +1510,35 @@ impl App {
 				let result = self.fetch_storage_files();
 				let _ = tx.send(result);
 			}
+			Command::GetThumbnail {
+				peer,
+				path,
+				max_width,
+				max_height,
+				tx,
+			} => {
+				let is_self = {
+					self.state
+						.lock()
+						.map(|state| state.me == peer)
+						.unwrap_or(false)
+				};
+				if is_self {
+					let result = generate_thumbnail(Path::new(&path), max_width, max_height).await;
+					let _ = tx.send(result);
+					return;
+				}
+				let request_id = self.swarm.behaviour_mut().puppynet.send_request(
+					&peer,
+					PeerReq::GetThumbnail {
+						path,
+						max_width,
+						max_height,
+					},
+				);
+				self.pending_requests
+					.insert(request_id, Pending::<Thumbnail>::new(tx));
+			}
 		}
 	}
 
@@ -1833,6 +1971,38 @@ impl PuppyNet {
 		length: Option<u64>,
 	) -> Result<FileChunk> {
 		block_on(self.read_file(peer, path, offset, length))
+	}
+
+	pub async fn get_thumbnail(
+		&self,
+		peer: libp2p::PeerId,
+		path: impl Into<String>,
+		max_width: u32,
+		max_height: u32,
+	) -> Result<Thumbnail> {
+		let path = path.into();
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::GetThumbnail {
+				peer,
+				path,
+				max_width,
+				max_height,
+				tx,
+			})
+			.map_err(|e| anyhow!("failed to send GetThumbnail command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("GetThumbnail response channel closed: {e}"))?
+	}
+
+	pub fn get_thumbnail_blocking(
+		&self,
+		peer: libp2p::PeerId,
+		path: impl Into<String>,
+		max_width: u32,
+		max_height: u32,
+	) -> Result<Thumbnail> {
+		block_on(self.get_thumbnail(peer, path, max_width, max_height))
 	}
 
 	/// Wait for the peer until Ctrl+C (SIGINT) then perform a graceful shutdown.

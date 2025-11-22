@@ -9,3 +9,4 @@ pub use types::FileChunk;
 pub mod wait_group;
 pub use app::{PuppyNet, ScanResultRow};
 pub use db::{FileEntry, StorageUsageFile};
+pub use p2p::Thumbnail;
