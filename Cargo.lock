@@ -4390,6 +4390,7 @@ dependencies = [
  "iced",
  "libp2p",
  "log",
+ "mime_guess",
  "puppynet_core",
  "ratatui",
  "rayon",
