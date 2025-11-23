@@ -57,7 +57,7 @@ impl MenuItem {
 			MenuItem::Peers => "Peers",
 			MenuItem::PeersGraph => "Peers Graph",
 			MenuItem::CreateUser => "Create User",
-			MenuItem::FileSearch => "File Search",
+			MenuItem::FileSearch => "Files",
 			MenuItem::StorageUsage => "Storage Usage",
 			MenuItem::ScanResults => "Scan Results",
 			MenuItem::Quit => "Quit",
@@ -386,9 +386,28 @@ impl CreateUserForm {
 	}
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FilesViewMode {
+	Thumbnails,
+	Table,
+}
+
+impl FilesViewMode {
+	fn label(self) -> &'static str {
+		match self {
+			FilesViewMode::Thumbnails => "Thumbnails",
+			FilesViewMode::Table => "Table",
+		}
+	}
+}
+
 #[derive(Debug, Clone)]
 struct FileSearchState {
-	query: String,
+	view_mode: FilesViewMode,
+	name_query: String,
+	content_query: String,
+	date_from: String,
+	date_to: String,
 	selected_mime: String,
 	mime_filter_input: String,
 	available_mime_types: Vec<String>,
@@ -401,8 +420,10 @@ struct FileSearchState {
 #[derive(Debug, Clone)]
 pub struct FileSearchEntry {
 	hash: String,
+	name: String,
 	size: u64,
 	mime_type: Option<String>,
+	replicas: u64,
 	first: String,
 	latest: String,
 }
@@ -471,7 +492,11 @@ pub(crate) struct StorageEntryView {
 impl FileSearchState {
 	fn new() -> Self {
 		Self {
-			query: String::new(),
+			view_mode: FilesViewMode::Table,
+			name_query: String::new(),
+			content_query: String::new(),
+			date_from: String::new(),
+			date_to: String::new(),
 			selected_mime: String::new(),
 			mime_filter_input: String::new(),
 			available_mime_types: Vec::new(),
@@ -730,7 +755,11 @@ pub enum GuiMessage {
 	UsernameChanged(String),
 	PasswordChanged(String),
 	CreateUserSubmit,
-	FileSearchQueryChanged(String),
+	FilesViewModeChanged(FilesViewMode),
+	FilesNameQueryChanged(String),
+	FilesContentQueryChanged(String),
+	FilesDateFromChanged(String),
+	FilesDateToChanged(String),
 	FileSearchMimeChanged(String),
 	FileSearchToggleSort,
 	FileSearchExecute,
@@ -1506,9 +1535,33 @@ impl Application for GuiApp {
 				}
 				Command::none()
 			}
-			GuiMessage::FileSearchQueryChanged(q) => {
+			GuiMessage::FilesViewModeChanged(mode) => {
 				if let Mode::FileSearch(state) = &mut self.mode {
-					state.query = q;
+					state.view_mode = mode;
+				}
+				Command::none()
+			}
+			GuiMessage::FilesNameQueryChanged(q) => {
+				if let Mode::FileSearch(state) = &mut self.mode {
+					state.name_query = q;
+				}
+				Command::none()
+			}
+			GuiMessage::FilesContentQueryChanged(q) => {
+				if let Mode::FileSearch(state) = &mut self.mode {
+					state.content_query = q;
+				}
+				Command::none()
+			}
+			GuiMessage::FilesDateFromChanged(d) => {
+				if let Mode::FileSearch(state) = &mut self.mode {
+					state.date_from = d;
+				}
+				Command::none()
+			}
+			GuiMessage::FilesDateToChanged(d) => {
+				if let Mode::FileSearch(state) = &mut self.mode {
+					state.date_to = d;
 				}
 				Command::none()
 			}
@@ -1529,7 +1582,10 @@ impl Application for GuiApp {
 					state.loading = true;
 					state.error = None;
 					state.results.clear();
-					let query = state.query.clone();
+					let name_query = state.name_query.clone();
+					let content_query = state.content_query.clone();
+					let date_from = state.date_from.clone();
+					let date_to = state.date_to.clone();
 					let mime = if state.selected_mime.trim().is_empty() {
 						None
 					} else {
@@ -1538,7 +1594,7 @@ impl Application for GuiApp {
 					let sort_desc = state.sort_desc;
 					let peer = self.peer.clone();
 					return Command::perform(
-						search_files(peer, query, mime, sort_desc),
+						search_files(peer, name_query, content_query, date_from, date_to, mime, sort_desc),
 						GuiMessage::FileSearchLoaded,
 					);
 				}
@@ -2540,38 +2596,94 @@ impl GuiApp {
 
 	fn view_file_search(&self, state: &FileSearchState) -> Element<'_, GuiMessage> {
 		let mut layout = iced::widget::Column::new().spacing(12);
-		layout = layout.push(text("File Search").size(24));
-		// query input
-		layout = layout.push(
-			text_input("Search text (substring)", &state.query)
-				.on_input(GuiMessage::FileSearchQueryChanged),
-		);
-		// mime pick list (simple typed filter) using available list; allow empty selection
+
+		// Title and view mode toggle
+		let title_row = iced::widget::Row::new()
+			.spacing(12)
+			.align_items(iced::Alignment::Center)
+			.push(text("Files").size(24))
+			.push(iced::widget::Space::with_width(Length::Fill))
+			.push(
+				button(text("Thumbnails"))
+					.style(if state.view_mode == FilesViewMode::Thumbnails {
+						theme::Button::Primary
+					} else {
+						theme::Button::Secondary
+					})
+					.on_press(GuiMessage::FilesViewModeChanged(FilesViewMode::Thumbnails)),
+			)
+			.push(
+				button(text("Table"))
+					.style(if state.view_mode == FilesViewMode::Table {
+						theme::Button::Primary
+					} else {
+						theme::Button::Secondary
+					})
+					.on_press(GuiMessage::FilesViewModeChanged(FilesViewMode::Table)),
+			);
+		layout = layout.push(title_row);
+
+		// Search options section
+		layout = layout.push(text("Search Options").size(18));
+
+		// Name and content search inputs (side by side)
+		let search_row1 = iced::widget::Row::new()
+			.spacing(12)
+			.push(
+				text_input("Name search", &state.name_query)
+					.on_input(GuiMessage::FilesNameQueryChanged)
+					.width(Length::FillPortion(1)),
+			)
+			.push(
+				text_input("Content search", &state.content_query)
+					.on_input(GuiMessage::FilesContentQueryChanged)
+					.width(Length::FillPortion(1)),
+			);
+		layout = layout.push(search_row1);
+
+		// Date range and mime type (side by side)
 		let mut mime_options = state.available_mime_types.clone();
 		mime_options.sort();
-		layout = layout.push(
-			pick_list(
-				mime_options,
-				if state.selected_mime.is_empty() {
-					None
-				} else {
-					Some(state.selected_mime.clone())
-				},
-				|v| GuiMessage::FileSearchMimeChanged(v),
+		let search_row2 = iced::widget::Row::new()
+			.spacing(12)
+			.push(
+				text_input("Date from (YYYY-MM-DD)", &state.date_from)
+					.on_input(GuiMessage::FilesDateFromChanged)
+					.width(Length::FillPortion(1)),
 			)
-			.placeholder("(any mime type)"),
-		);
-		// sort toggle
+			.push(
+				text_input("Date to (YYYY-MM-DD)", &state.date_to)
+					.on_input(GuiMessage::FilesDateToChanged)
+					.width(Length::FillPortion(1)),
+			)
+			.push(
+				pick_list(
+					mime_options,
+					if state.selected_mime.is_empty() {
+						None
+					} else {
+						Some(state.selected_mime.clone())
+					},
+					|v| GuiMessage::FileSearchMimeChanged(v),
+				)
+				.placeholder("(any mime type)")
+				.width(Length::FillPortion(1)),
+			);
+		layout = layout.push(search_row2);
+
+		// Sort toggle and search button
 		let sort_label = if state.sort_desc {
-			"Sort: Latest ↓"
+			"Sort: Latest desc"
 		} else {
-			"Sort: Latest ↑"
+			"Sort: Latest asc"
 		};
 		let controls_row = iced::widget::Row::new()
 			.spacing(12)
 			.push(button(text(sort_label)).on_press(GuiMessage::FileSearchToggleSort))
 			.push(button(text("Search")).on_press(GuiMessage::FileSearchExecute));
 		layout = layout.push(controls_row);
+
+		// Loading/error states
 		if state.loading {
 			return layout.push(text("Searching...")).into();
 		}
@@ -2581,33 +2693,51 @@ impl GuiApp {
 		if state.results.is_empty() {
 			return layout.push(text("No results (run a search)")).into();
 		}
-		let mut list = iced::widget::Column::new().spacing(4);
-		for entry in &state.results {
-			let row = iced::widget::Row::new()
-				.spacing(8)
-				.push(
-					text(&abbreviate_hash(&entry.hash))
-						.size(14)
-						.width(Length::FillPortion(2)),
-				)
-				.push(
-					text(entry.mime_type.clone().unwrap_or_else(|| "?".into()))
-						.size(14)
-						.width(Length::FillPortion(2)),
-				)
-				.push(
-					text(format_size(entry.size))
-						.size(14)
-						.width(Length::FillPortion(1)),
-				)
-				.push(
-					text(entry.latest.clone())
-						.size(14)
-						.width(Length::FillPortion(2)),
-				);
-			list = list.push(container(row).padding(4).style(theme::Container::Box));
+
+		// Results display based on view mode
+		match state.view_mode {
+			FilesViewMode::Table => {
+				// Table header
+				let header = iced::widget::Row::new()
+					.spacing(8)
+					.push(text("Name").size(14).width(Length::FillPortion(3)))
+					.push(text("Size").size(14).width(Length::FillPortion(1)))
+					.push(text("Mime Type").size(14).width(Length::FillPortion(2)))
+					.push(text("Replicas").size(14).width(Length::FillPortion(1)))
+					.push(text("First Date").size(14).width(Length::FillPortion(2)))
+					.push(text("Last Date").size(14).width(Length::FillPortion(2)));
+				layout = layout.push(container(header).padding(4).style(theme::Container::Box));
+
+				// Table rows
+				let mut list = iced::widget::Column::new().spacing(2);
+				for entry in &state.results {
+					let display_name = if entry.name.is_empty() {
+						abbreviate_hash(&entry.hash)
+					} else {
+						entry.name.clone()
+					};
+					let row = iced::widget::Row::new()
+						.spacing(8)
+						.push(text(display_name).size(14).width(Length::FillPortion(3)))
+						.push(text(format_size(entry.size)).size(14).width(Length::FillPortion(1)))
+						.push(
+							text(entry.mime_type.clone().unwrap_or_else(|| "?".into()))
+								.size(14)
+								.width(Length::FillPortion(2)),
+						)
+						.push(text(entry.replicas.to_string()).size(14).width(Length::FillPortion(1)))
+						.push(text(&entry.first).size(14).width(Length::FillPortion(2)))
+						.push(text(&entry.latest).size(14).width(Length::FillPortion(2)));
+					list = list.push(container(row).padding(4));
+				}
+				layout.push(scrollable(list).height(Length::Fill)).into()
+			}
+			FilesViewMode::Thumbnails => {
+				// Placeholder for thumbnails view - will show a simple message for now
+				layout = layout.push(text("Thumbnails view coming soon...").size(16));
+				layout.into()
+			}
 		}
-		layout.push(scrollable(list).height(Length::Fill)).into()
 	}
 
 	fn view_scan_controls(&self) -> Element<'_, GuiMessage> {
@@ -3267,13 +3397,16 @@ async fn wait_for_update_event(receiver: Arc<Mutex<mpsc::Receiver<UpdateProgress
 
 async fn search_files(
 	_peer: Arc<PuppyNet>,
-	_query: String,
+	_name_query: String,
+	_content_query: String,
+	_date_from: String,
+	_date_to: String,
 	mime: Option<String>,
 	sort_desc: bool,
 ) -> Result<(Vec<FileSearchEntry>, Vec<String>), String> {
 	// Placeholder in-memory search over local sqlite not yet wired: return empty until DB API exposed.
 	// For now, we just simulate no results but allow UI to function.
-	let _ = (_query, mime, sort_desc); // suppress warnings
+	let _ = (mime, sort_desc); // suppress warnings
 	Ok((Vec::new(), Vec::new()))
 }
 
@@ -3291,8 +3424,10 @@ async fn load_scan_results_page(
 			let hash = row.hash.iter().map(|b| format!("{:02x}", b)).collect();
 			FileSearchEntry {
 				hash,
+				name: String::new(), // TODO: populate from database
 				size: row.size,
 				mime_type: row.mime_type,
+				replicas: 0, // TODO: populate from database
 				first: row.first_datetime.unwrap_or_else(|| String::from("-")),
 				latest: row.latest_datetime.unwrap_or_else(|| String::from("-")),
 			}
