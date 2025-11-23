@@ -457,6 +457,138 @@ impl CreateUserForm {
 	}
 }
 
+/// Represents a tab in the UI - each tab has its own independent state
+#[derive(Debug, Clone)]
+struct Tab {
+	id: usize,
+	title: String,
+	mode: Mode,
+	menu: MenuItem,
+}
+
+impl Tab {
+	fn new(id: usize, title: String, mode: Mode, menu: MenuItem) -> Self {
+		Self { id, title, mode, menu }
+	}
+
+	/// Create a new tab with Peers view
+	fn peers(id: usize) -> Self {
+		Self::new(id, "Peers".to_string(), Mode::Peers, MenuItem::Peers)
+	}
+
+	/// Create a new tab with Files search view
+	fn file_search(id: usize, state: FileSearchState) -> Self {
+		Self::new(id, "Files".to_string(), Mode::FileSearch(state), MenuItem::FileSearch)
+	}
+
+	/// Create a new tab with File browser view
+	fn file_browser(id: usize, state: FileBrowserState) -> Self {
+		let title = if state.showing_disks {
+			"Disks".to_string()
+		} else if state.path.is_empty() {
+			"/".to_string()
+		} else {
+			state
+				.path
+				.split(['/', '\\'])
+				.filter(|s| !s.is_empty())
+				.last()
+				.unwrap_or("Root")
+				.to_string()
+		};
+		Self::new(id, title, Mode::FileBrowser(state), MenuItem::FileSearch)
+	}
+
+	/// Create a new tab with File viewer view
+	fn file_viewer(id: usize, state: FileViewerState) -> Self {
+		let title = state
+			.path
+			.split(['/', '\\'])
+			.filter(|s| !s.is_empty())
+			.last()
+			.unwrap_or("File")
+			.to_string();
+		Self::new(id, title, Mode::FileViewer(state), MenuItem::FileSearch)
+	}
+
+	/// Create a new tab with Peer actions view
+	fn peer_actions(id: usize, peer_id: String) -> Self {
+		let title = format!("Peer {}", abbreviate_peer_id(&peer_id));
+		Self::new(id, title, Mode::PeerActions { peer_id }, MenuItem::Peers)
+	}
+
+	/// Create a new tab with Storage usage view
+	fn storage_usage(id: usize, state: StorageUsageState) -> Self {
+		Self::new(id, "Storage".to_string(), Mode::StorageUsage(state), MenuItem::StorageUsage)
+	}
+
+	/// Create a new tab with Peers graph view
+	fn peers_graph(id: usize) -> Self {
+		Self::new(id, "Graph".to_string(), Mode::PeersGraph, MenuItem::PeersGraph)
+	}
+
+	/// Create a new tab with Scan results view
+	fn scan_results(id: usize, state: ScanResultsState) -> Self {
+		Self::new(id, "Scan Results".to_string(), Mode::ScanResults(state), MenuItem::ScanResults)
+	}
+
+	/// Get icon for the tab based on mode
+	fn icon(&self) -> &'static str {
+		match &self.mode {
+			Mode::Peers => "👥",
+			Mode::PeerActions { .. } => "⚙",
+			Mode::PeerPermissions(_) => "🔐",
+			Mode::PeerCpus(_) => "💻",
+			Mode::StorageUsage(_) => "💾",
+			Mode::PeerInterfaces(_) => "🌐",
+			Mode::FileBrowser(_) => "📁",
+			Mode::FileViewer(_) => "📄",
+			Mode::PeersGraph => "🔗",
+			Mode::CreateUser(_) => "👤",
+			Mode::FileSearch(_) => "🔍",
+			Mode::ScanResults(_) => "📊",
+		}
+	}
+
+	/// Update the tab title based on current mode
+	fn update_title(&mut self) {
+		self.title = match &self.mode {
+			Mode::Peers => "Peers".to_string(),
+			Mode::PeerActions { peer_id } => format!("Peer {}", abbreviate_peer_id(peer_id)),
+			Mode::PeerPermissions(state) => format!("Perms {}", abbreviate_peer_id(&state.peer_id)),
+			Mode::PeerCpus(state) => format!("CPUs {}", abbreviate_peer_id(&state.peer_id)),
+			Mode::StorageUsage(_) => "Storage".to_string(),
+			Mode::PeerInterfaces(state) => format!("Net {}", abbreviate_peer_id(&state.peer_id)),
+			Mode::FileBrowser(state) => {
+				if state.showing_disks {
+					"Disks".to_string()
+				} else if state.path.is_empty() {
+					"/".to_string()
+				} else {
+					state
+						.path
+						.split(['/', '\\'])
+						.filter(|s| !s.is_empty())
+						.last()
+						.unwrap_or("Root")
+						.to_string()
+				}
+			}
+			Mode::FileViewer(state) => state
+				.path
+				.split(['/', '\\'])
+				.filter(|s| !s.is_empty())
+				.last()
+				.unwrap_or("File")
+				.to_string(),
+			Mode::PeersGraph => "Graph".to_string(),
+			Mode::CreateUser(_) => "Create User".to_string(),
+			Mode::FileSearch(_) => "Files".to_string(),
+			Mode::ScanResults(_) => "Scan Results".to_string(),
+		};
+	}
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FilesViewMode {
 	Thumbnails,
@@ -783,6 +915,10 @@ pub struct GuiApp {
 	next_scan_id: u64,
 	active_update: Option<ActiveUpdate>,
 	next_update_id: u64,
+	// Tab system
+	tabs: Vec<Tab>,
+	active_tab_id: Option<usize>,
+	next_tab_id: usize,
 }
 
 impl GuiApp {
@@ -944,6 +1080,15 @@ pub enum GuiMessage {
 		peer_id: String,
 		event: UpdateProgress,
 	},
+	// Tab system messages
+	/// Switch to a tab by ID
+	TabSelect(usize),
+	/// Close a tab by ID
+	TabClose(usize),
+	/// Create a new tab (opens Files search)
+	TabNew,
+	/// Open a file browser in a new tab
+	TabOpenFileBrowser { peer_id: String },
 }
 
 impl Application for GuiApp {
@@ -977,6 +1122,10 @@ impl Application for GuiApp {
 			next_scan_id: 1,
 			active_update: None,
 			next_update_id: 1,
+			// Initialize tab system with a default Peers tab
+			tabs: vec![Tab::peers(1)],
+			active_tab_id: Some(1),
+			next_tab_id: 2,
 		};
 		(app, Command::none())
 	}
@@ -1007,6 +1156,14 @@ impl Application for GuiApp {
 					MenuItem::Peers => {
 						self.menu = item;
 						self.refresh_from_state();
+						// Update active tab's mode
+						if let Some(active_id) = self.active_tab_id {
+							if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == active_id) {
+								tab.mode = Mode::Peers;
+								tab.menu = item;
+								tab.update_title();
+							}
+						}
 						self.mode = Mode::Peers;
 						self.status = if self.peers.is_empty() {
 							String::from("Showing peers — none discovered")
@@ -1016,9 +1173,17 @@ impl Application for GuiApp {
 					}
 					MenuItem::PeersGraph => {
 						self.menu = item;
-						self.mode = Mode::PeersGraph;
 						self.refresh_from_state();
 						self.selected_peer_id = self.graph.selected_id().map(|id| id.to_string());
+						// Update active tab's mode
+						if let Some(active_id) = self.active_tab_id {
+							if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == active_id) {
+								tab.mode = Mode::PeersGraph;
+								tab.menu = item;
+								tab.update_title();
+							}
+						}
+						self.mode = Mode::PeersGraph;
 						self.status = match self.selected_peer_id.as_deref() {
 							Some(id) => format!("Graph overview — focused on {}", id),
 							None => String::from("Graph overview — no peers"),
@@ -1026,12 +1191,30 @@ impl Application for GuiApp {
 					}
 					MenuItem::CreateUser => {
 						self.menu = item;
-						self.mode = Mode::CreateUser(CreateUserForm::new());
+						let form = CreateUserForm::new();
+						// Update active tab's mode
+						if let Some(active_id) = self.active_tab_id {
+							if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == active_id) {
+								tab.mode = Mode::CreateUser(form.clone());
+								tab.menu = item;
+								tab.update_title();
+							}
+						}
+						self.mode = Mode::CreateUser(form);
 						self.status = String::from("Create user form");
 					}
 					MenuItem::FileSearch => {
 						self.menu = item;
-						self.mode = Mode::FileSearch(FileSearchState::new());
+						let state = FileSearchState::new();
+						// Update active tab's mode
+						if let Some(active_id) = self.active_tab_id {
+							if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == active_id) {
+								tab.mode = Mode::FileSearch(state.clone());
+								tab.menu = item;
+								tab.update_title();
+							}
+						}
+						self.mode = Mode::FileSearch(state);
 						self.status = String::from("Loading mime types...");
 						let peer = self.peer.clone();
 						return Command::perform(
@@ -1041,7 +1224,16 @@ impl Application for GuiApp {
 					}
 					MenuItem::StorageUsage => {
 						self.menu = item;
-						self.mode = Mode::StorageUsage(StorageUsageState::loading());
+						let state = StorageUsageState::loading();
+						// Update active tab's mode
+						if let Some(active_id) = self.active_tab_id {
+							if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == active_id) {
+								tab.mode = Mode::StorageUsage(state.clone());
+								tab.menu = item;
+								tab.update_title();
+							}
+						}
+						self.mode = Mode::StorageUsage(state);
 						self.status = String::from("Loading storage usage...");
 						let peer = self.peer.clone();
 						return Command::perform(
@@ -1052,8 +1244,16 @@ impl Application for GuiApp {
 					MenuItem::ScanResults => {
 						self.menu = item;
 						let state = ScanResultsState::loading(0, 25);
-						self.status = String::from("Loading scan results...");
+						// Update active tab's mode
+						if let Some(active_id) = self.active_tab_id {
+							if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == active_id) {
+								tab.mode = Mode::ScanResults(state.clone());
+								tab.menu = item;
+								tab.update_title();
+							}
+						}
 						self.mode = Mode::ScanResults(state);
+						self.status = String::from("Loading scan results...");
 						let peer = self.peer.clone();
 						return Command::perform(
 							load_scan_results_page(peer, 0, 25),
@@ -1069,6 +1269,12 @@ impl Application for GuiApp {
 				Command::none()
 			}
 			GuiMessage::PeerActionsRequested(peer_id) => {
+				// Create a new tab for peer actions
+				let tab_id = self.next_tab_id;
+				self.next_tab_id += 1;
+				let tab = Tab::peer_actions(tab_id, peer_id.clone());
+				self.tabs.push(tab);
+				self.active_tab_id = Some(tab_id);
 				self.mode = Mode::PeerActions {
 					peer_id: peer_id.clone(),
 				};
@@ -1537,75 +1743,103 @@ impl Application for GuiApp {
 				result,
 			} => {
 				let mut next_command = Command::none();
-				match &mut self.mode {
-					Mode::FileViewer(state) if state.peer_id == peer_id && state.path == path => {
-						state.loading = false;
-						match result {
-							Ok(chunk) => {
-								let prev_offset = state.offset;
-								let chunk_len = chunk.data.len();
-								state.error = None;
-								state.apply_chunk(chunk);
-								let mime_label =
-									state.mime.clone().unwrap_or_else(|| String::from("?"));
-								let base_status = if state.is_image()
-									&& state.eof && !state.data.is_empty()
-								{
-									format!(
-										"Image loaded: {} bytes | {}",
-										state.data.len(),
-										mime_label
-									)
-								} else {
-									let eof_note = if state.eof { " (end of file)" } else { "" };
-									format!(
-										"Loaded {} bytes{} | {}",
-										state.data.len(),
-										eof_note,
-										mime_label
-									)
-								};
-								let progressed = state.offset > prev_offset;
-								if state.eof {
-									self.status = base_status;
-								} else if progressed {
-									self.status = format!("{}; fetching more...", base_status);
-									state.loading = true;
-									let peer_id = state.peer_id.clone();
-									let path = state.path.clone();
-									let offset = state.offset;
-									let peer = self.peer.clone();
-									next_command = Command::perform(
-										read_file(peer, peer_id.clone(), path.clone(), offset),
-										|(peer_id, path, offset, result)| {
-											GuiMessage::FileReadLoaded {
-												peer_id,
-												path,
-												offset,
-												result,
-											}
-										},
-									);
-								} else {
-									// No progress in this chunk; leave loading stopped for manual retry.
-									self.status = format!(
-										"{}; waiting for more data at offset {} (received {} bytes)",
-										base_status, state.offset, chunk_len,
-									);
-								}
+
+				// Helper to process file read result
+				let process_result = |state: &mut FileViewerState, status: &mut String, peer: &Arc<PuppyNet>, result: Result<FileChunk, String>| -> Command<GuiMessage> {
+					state.loading = false;
+					match result {
+						Ok(chunk) => {
+							let prev_offset = state.offset;
+							let chunk_len = chunk.data.len();
+							state.error = None;
+							state.apply_chunk(chunk);
+							let mime_label =
+								state.mime.clone().unwrap_or_else(|| String::from("?"));
+							let base_status = if state.is_image()
+								&& state.eof && !state.data.is_empty()
+							{
+								format!(
+									"Image loaded: {} bytes | {}",
+									state.data.len(),
+									mime_label
+								)
+							} else {
+								let eof_note = if state.eof { " (end of file)" } else { "" };
+								format!(
+									"Loaded {} bytes{} | {}",
+									state.data.len(),
+									eof_note,
+									mime_label
+								)
+							};
+							let progressed = state.offset > prev_offset;
+							if state.eof {
+								*status = base_status;
+							} else if progressed {
+								*status = format!("{}; fetching more...", base_status);
+								state.loading = true;
+								let peer_id = state.peer_id.clone();
+								let path = state.path.clone();
+								let offset = state.offset;
+								let peer = peer.clone();
+								return Command::perform(
+									read_file(peer, peer_id.clone(), path.clone(), offset),
+									|(peer_id, path, offset, result)| {
+										GuiMessage::FileReadLoaded {
+											peer_id,
+											path,
+											offset,
+											result,
+										}
+									},
+								);
+							} else {
+								// No progress in this chunk; leave loading stopped for manual retry.
+								*status = format!(
+									"{}; waiting for more data at offset {} (received {} bytes)",
+									base_status, state.offset, chunk_len,
+								);
 							}
-							Err(err) => {
-								state.error = Some(err.clone());
-								self.status = format!("Failed to load file chunk: {}", err);
+						}
+						Err(err) => {
+							state.error = Some(err.clone());
+							*status = format!("Failed to load file chunk: {}", err);
+						}
+					}
+					Command::none()
+				};
+
+				// First try to update active tab's FileViewer state
+				let mut found_in_tab = false;
+				if let Some(active_id) = self.active_tab_id {
+					for tab in &mut self.tabs {
+						if tab.id == active_id {
+							if let Mode::FileViewer(state) = &mut tab.mode {
+								if state.peer_id == peer_id && state.path == path {
+									found_in_tab = true;
+									let peer = self.peer.clone();
+									next_command = process_result(state, &mut self.status, &peer, result.clone());
+									break;
+								}
 							}
 						}
 					}
-					_ => {}
 				}
+
+				// Fall back to mode state if not found in tab
+				if !found_in_tab {
+					if let Mode::FileViewer(state) = &mut self.mode {
+						if state.peer_id == peer_id && state.path == path {
+							let peer = self.peer.clone();
+							next_command = process_result(state, &mut self.status, &peer, result);
+						}
+					}
+				}
+
 				next_command
 			}
 			GuiMessage::FileReadMore => {
-				if let Mode::FileViewer(state) = &mut self.mode {
+				if let Some(state) = self.active_file_viewer_mut() {
 					if state.loading {
 						return Command::none();
 					}
@@ -1632,6 +1866,26 @@ impl Application for GuiApp {
 				Command::none()
 			}
 			GuiMessage::FileViewerBack => {
+				// When going back from file viewer in a tab, close the tab
+				if let Some(active_id) = self.active_tab_id {
+					if let Some(pos) = self.tabs.iter().position(|t| t.id == active_id) {
+						if let Mode::FileViewer(_) = &self.tabs[pos].mode {
+							// Close this tab
+							self.tabs.remove(pos);
+							// Switch to another tab or clear
+							if self.tabs.is_empty() {
+								self.active_tab_id = None;
+							} else {
+								let new_pos = pos.min(self.tabs.len().saturating_sub(1));
+								self.active_tab_id = self.tabs.get(new_pos).map(|t| t.id);
+							}
+							self.status = String::from("Tab closed");
+							return Command::none();
+						}
+					}
+				}
+
+				// Fall back to old behavior for mode-based file viewer
 				if let Mode::FileViewer(state) = mem::replace(&mut self.mode, Mode::Peers) {
 					match state.source {
 						FileViewerSource::FileBrowser(browser) => {
@@ -1696,22 +1950,25 @@ impl Application for GuiApp {
 				Command::none()
 			}
 			GuiMessage::FilesViewModeChanged(mode) => {
-				if let Mode::FileSearch(state) = &mut self.mode {
+				// Capture immutable borrows first
+				let local_id = self.local_peer_id.clone();
+				let peer = self.peer.clone();
+
+				if let Some(state) = self.active_file_search_mut() {
 					let old_mode = state.view_mode;
 					state.view_mode = mode;
 					// When switching to Thumbnails mode, fetch thumbnails for existing results
 					if mode == FilesViewMode::Thumbnails && old_mode != FilesViewMode::Thumbnails && !state.results.is_empty() {
-						if let Some(local_id) = &self.local_peer_id {
+						if let Some(local_id) = local_id {
 							state.thumbnails.clear();
 							let mut thumbnail_commands = Vec::new();
 							for entry in &state.results {
 								if FileSearchState::is_image_entry(entry) {
 									let key = FileSearchState::thumbnail_key(&entry.node_id, &entry.path);
 									state.thumbnails.insert(key.clone(), ThumbnailState::Loading);
-									let peer = self.peer.clone();
 									thumbnail_commands.push(Command::perform(
 										fetch_files_page_thumbnail(
-											peer,
+											peer.clone(),
 											local_id.clone(),
 											entry.path.clone(),
 											key,
@@ -1730,43 +1987,43 @@ impl Application for GuiApp {
 				Command::none()
 			}
 			GuiMessage::FilesNameQueryChanged(q) => {
-				if let Mode::FileSearch(state) = &mut self.mode {
+				if let Some(state) = self.active_file_search_mut() {
 					state.name_query = q;
 				}
 				Command::none()
 			}
 			GuiMessage::FilesContentQueryChanged(q) => {
-				if let Mode::FileSearch(state) = &mut self.mode {
+				if let Some(state) = self.active_file_search_mut() {
 					state.content_query = q;
 				}
 				Command::none()
 			}
 			GuiMessage::FilesDateFromChanged(d) => {
-				if let Mode::FileSearch(state) = &mut self.mode {
+				if let Some(state) = self.active_file_search_mut() {
 					state.date_from = d;
 				}
 				Command::none()
 			}
 			GuiMessage::FilesDateToChanged(d) => {
-				if let Mode::FileSearch(state) = &mut self.mode {
+				if let Some(state) = self.active_file_search_mut() {
 					state.date_to = d;
 				}
 				Command::none()
 			}
 			GuiMessage::FileSearchMimeChanged(m) => {
-				if let Mode::FileSearch(state) = &mut self.mode {
+				if let Some(state) = self.active_file_search_mut() {
 					state.selected_mime = m;
 				}
 				Command::none()
 			}
 			GuiMessage::FileSearchToggleSort => {
-				if let Mode::FileSearch(state) = &mut self.mode {
+				if let Some(state) = self.active_file_search_mut() {
 					state.sort_desc = !state.sort_desc;
 				}
 				Command::none()
 			}
 			GuiMessage::FileSearchExecute => {
-				if let Mode::FileSearch(state) = &mut self.mode {
+				if let Some(state) = self.active_file_search_mut() {
 					state.loading = true;
 					state.error = None;
 					state.results.clear();
@@ -1792,7 +2049,11 @@ impl Application for GuiApp {
 				Command::none()
 			}
 			GuiMessage::FileSearchLoaded(result) => {
-				if let Mode::FileSearch(state) = &mut self.mode {
+				// Capture immutable borrows first
+				let local_id = self.local_peer_id.clone();
+				let peer = self.peer.clone();
+
+				if let Some(state) = self.active_file_search_mut() {
 					state.loading = false;
 					state.thumbnails.clear();
 					match result {
@@ -1800,15 +2061,14 @@ impl Application for GuiApp {
 							// Collect thumbnail commands for image files when in Thumbnails mode
 							let mut thumbnail_commands = Vec::new();
 							if state.view_mode == FilesViewMode::Thumbnails {
-								if let Some(local_id) = &self.local_peer_id {
+								if let Some(local_id) = local_id {
 									for entry in &entries {
 										if FileSearchState::is_image_entry(entry) {
 											let key = FileSearchState::thumbnail_key(&entry.node_id, &entry.path);
 											state.thumbnails.insert(key.clone(), ThumbnailState::Loading);
-											let peer = self.peer.clone();
 											thumbnail_commands.push(Command::perform(
 												fetch_files_page_thumbnail(
-													peer,
+													peer.clone(),
 													local_id.clone(),
 													entry.path.clone(),
 													key,
@@ -1820,11 +2080,11 @@ impl Application for GuiApp {
 									}
 								}
 							}
+							let start = state.page * state.page_size + 1;
+							let end = (start + entries.len()).saturating_sub(1);
 							state.results = entries;
 							state.available_mime_types = mimes;
 							state.total_count = total;
-							let start = state.page * state.page_size + 1;
-							let end = (start + state.results.len()).saturating_sub(1);
 							self.status = format!("Showing {}-{} of {} files", start, end, total);
 							if !thumbnail_commands.is_empty() {
 								return Command::batch(thumbnail_commands);
@@ -1839,7 +2099,7 @@ impl Application for GuiApp {
 				Command::none()
 			}
 			GuiMessage::FilesNextPage => {
-				if let Mode::FileSearch(state) = &mut self.mode {
+				if let Some(state) = self.active_file_search_mut() {
 					let max_page = state.total_count.saturating_sub(1) / state.page_size;
 					if state.page < max_page {
 						state.page += 1;
@@ -1867,7 +2127,7 @@ impl Application for GuiApp {
 				Command::none()
 			}
 			GuiMessage::FilesPrevPage => {
-				if let Mode::FileSearch(state) = &mut self.mode {
+				if let Some(state) = self.active_file_search_mut() {
 					if state.page > 0 {
 						state.page -= 1;
 						state.loading = true;
@@ -1893,17 +2153,36 @@ impl Application for GuiApp {
 				}
 				Command::none()
 			}
-			GuiMessage::FilesOpenFile { node_id: _, path, mime } => {
-				if let Mode::FileSearch(state) = &self.mode {
-					// Use local peer ID for reading local files
-					let peer_id = match &self.local_peer_id {
-						Some(id) => id.clone(),
-						None => {
-							self.status = String::from("Error: Local peer ID not available");
-							return Command::none();
+			GuiMessage::FilesOpenFile { node_id, path, mime } => {
+				// Get current FileSearch state from active tab or mode
+				let files_state = if let Some(active_id) = self.active_tab_id {
+					self.tabs
+						.iter()
+						.find(|t| t.id == active_id)
+						.and_then(|t| match &t.mode {
+							Mode::FileSearch(state) => Some(state.clone()),
+							_ => None,
+						})
+				} else if let Mode::FileSearch(state) = &self.mode {
+					Some(state.clone())
+				} else {
+					None
+				};
+
+				if let Some(files_snapshot) = files_state {
+					// Use provided node_id or fall back to local peer ID
+					let peer_id = if !node_id.is_empty() {
+						node_id
+					} else {
+						match &self.local_peer_id {
+							Some(id) => id.clone(),
+							None => {
+								self.status = String::from("Error: Local peer ID not available");
+								return Command::none();
+							}
 						}
 					};
-					let files_snapshot = state.clone();
+
 					self.status = format!("Reading {}...", path);
 					let peer = self.peer.clone();
 					let command = Command::perform(
@@ -1915,21 +2194,32 @@ impl Application for GuiApp {
 							result,
 						},
 					);
-					self.mode = Mode::FileViewer(FileViewerState::from_files(
+
+					// Create a new tab for the file viewer
+					let viewer_state = FileViewerState::from_files(
 						files_snapshot,
 						peer_id,
 						path,
 						mime,
-					));
+					);
+					let tab_id = self.next_tab_id;
+					self.next_tab_id += 1;
+					let tab = Tab::file_viewer(tab_id, viewer_state.clone());
+					self.tabs.push(tab);
+					self.active_tab_id = Some(tab_id);
+
+					// Also update mode for compatibility
+					self.mode = Mode::FileViewer(viewer_state);
 					return command;
 				}
 				Command::none()
 			}
 			GuiMessage::FilesMimeTypesLoaded(result) => {
+				// Update mode state
 				if let Mode::FileSearch(state) = &mut self.mode {
-					match result {
+					match &result {
 						Ok(mimes) => {
-							state.available_mime_types = mimes;
+							state.available_mime_types = mimes.clone();
 							self.status = String::from("Files");
 						}
 						Err(err) => {
@@ -1937,10 +2227,20 @@ impl Application for GuiApp {
 						}
 					}
 				}
+				// Also update active tab's FileSearch state
+				if let Some(active_id) = self.active_tab_id {
+					if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == active_id) {
+						if let Mode::FileSearch(state) = &mut tab.mode {
+							if let Ok(mimes) = result {
+								state.available_mime_types = mimes;
+							}
+						}
+					}
+				}
 				Command::none()
 			}
 			GuiMessage::FilesScrolled(viewport) => {
-				if let Mode::FileSearch(state) = &mut self.mode {
+				if let Some(state) = self.active_file_search_mut() {
 					state.scroll_offset = viewport.relative_offset();
 				}
 				Command::none()
@@ -2185,7 +2485,7 @@ impl Application for GuiApp {
 				Command::none()
 			}
 			GuiMessage::FilesPageThumbnailLoaded { key, result } => {
-				if let Mode::FileSearch(state) = &mut self.mode {
+				if let Some(state) = self.active_file_search_mut() {
 					match result {
 						Ok(thumb) => {
 							state.thumbnails.insert(key, ThumbnailState::Loaded(thumb.data));
@@ -2284,18 +2584,84 @@ impl Application for GuiApp {
 				}
 				Command::none()
 			}
+			// Tab system message handlers
+			GuiMessage::TabSelect(tab_id) => {
+				if self.tabs.iter().any(|t| t.id == tab_id) {
+					self.active_tab_id = Some(tab_id);
+					if let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) {
+						self.status = format!("Switched to tab: {}", tab.title);
+					}
+				}
+				Command::none()
+			}
+			GuiMessage::TabClose(tab_id) => {
+				if let Some(pos) = self.tabs.iter().position(|t| t.id == tab_id) {
+					self.tabs.remove(pos);
+					// If we closed the active tab, switch to another tab
+					if self.active_tab_id == Some(tab_id) {
+						if self.tabs.is_empty() {
+							self.active_tab_id = None;
+						} else {
+							// Switch to the tab at the same position or the last tab
+							let new_pos = pos.min(self.tabs.len().saturating_sub(1));
+							self.active_tab_id = self.tabs.get(new_pos).map(|t| t.id);
+						}
+					}
+					self.status = String::from("Tab closed");
+				}
+				Command::none()
+			}
+			GuiMessage::TabNew => {
+				// Create a new Peers tab
+				let tab_id = self.next_tab_id;
+				self.next_tab_id += 1;
+				let tab = Tab::peers(tab_id);
+				self.tabs.push(tab);
+				self.active_tab_id = Some(tab_id);
+				self.refresh_from_state();
+				self.status = String::from("New tab created");
+				Command::none()
+			}
+			GuiMessage::TabOpenFileBrowser { peer_id } => {
+				let tab_id = self.next_tab_id;
+				self.next_tab_id += 1;
+				let browser_state = FileBrowserState::new(peer_id.clone(), String::new());
+				let tab = Tab::file_browser(tab_id, browser_state);
+				self.tabs.push(tab);
+				self.active_tab_id = Some(tab_id);
+				self.status = format!("Opening file browser for {}...", peer_id);
+				// Load disks for the file browser
+				let peer = self.peer.clone();
+				Command::perform(
+					list_disks(peer, peer_id),
+					|(peer_id, disks)| GuiMessage::FileBrowserDisksLoaded {
+						peer_id,
+						disks,
+					},
+				)
+			}
 		}
 	}
 
 	fn view(&self) -> Element<'_, Self::Message> {
+		// Get current menu from active tab or default
+		let current_menu = if let Some(active_id) = self.active_tab_id {
+			self.tabs
+				.iter()
+				.find(|t| t.id == active_id)
+				.map(|t| t.menu)
+				.unwrap_or(self.menu)
+		} else {
+			self.menu
+		};
+
 		let mut menu_column = iced::widget::Column::new().spacing(8);
 		for item in MENU_ITEMS.iter() {
 			let mut label = item.label().to_string();
-			if self.menu == *item {
+			if current_menu == *item {
 				label = format!("▶ {}", label);
 			}
 			let button = button(text(label).size(16))
-				// .width(Length::Fill)
 				.on_press(GuiMessage::MenuSelected(*item));
 			menu_column = menu_column.push(button);
 		}
@@ -2303,29 +2669,45 @@ impl Application for GuiApp {
 			.width(Length::Shrink)
 			.padding(16)
 			.style(theme::Container::Box);
-		let content: Element<_> = match &self.mode {
-			Mode::Peers => self.view_peers(),
-			Mode::PeerActions { peer_id } => self.view_peer_actions(peer_id),
-			Mode::PeerPermissions(state) => self.view_peer_permissions(state),
-			Mode::PeerCpus(state) => self.view_peer_cpus(state),
-			Mode::StorageUsage(state) => self.view_storage_usage(state),
-			Mode::PeerInterfaces(state) => self.view_peer_interfaces(state),
-			Mode::FileBrowser(state) => self.view_file_browser(state),
-			Mode::FileViewer(state) => self.view_file_viewer(state),
-			Mode::PeersGraph => self.view_graph(),
-			Mode::CreateUser(form) => self.view_create_user(form),
-			Mode::FileSearch(state) => self.view_file_search(state),
-			Mode::ScanResults(state) => self.view_scan_results(state),
+
+		// Always show content from active tab if we have tabs
+		let content: Element<_> = if let Some(active_id) = self.active_tab_id {
+			if let Some(tab) = self.tabs.iter().find(|t| t.id == active_id) {
+				self.view_mode(&tab.mode)
+			} else {
+				self.view_mode_content()
+			}
+		} else {
+			self.view_mode_content()
 		};
-		let content_container = container(content)
-			.width(Length::Fill)
-			.height(Length::Fill)
-			.padding(16)
-			.style(theme::Container::Box);
+
+		// Always show tab bar when we have tabs
+		let content_area: Element<_> = if !self.tabs.is_empty() {
+			let tab_bar = self.view_tab_bar();
+			iced::widget::Column::new()
+				.spacing(0)
+				.push(tab_bar)
+				.push(
+					container(content)
+						.width(Length::Fill)
+						.height(Length::Fill)
+						.padding(16)
+						.style(theme::Container::Box),
+				)
+				.into()
+		} else {
+			container(content)
+				.width(Length::Fill)
+				.height(Length::Fill)
+				.padding(16)
+				.style(theme::Container::Box)
+				.into()
+		};
+
 		let main = iced::widget::Row::new()
 			.spacing(16)
 			.push(sidebar)
-			.push(content_container)
+			.push(content_area)
 			.height(Length::Fill);
 		let status = container(text(&self.status).size(16))
 			.width(Length::Fill)
@@ -2341,6 +2723,127 @@ impl Application for GuiApp {
 }
 
 impl GuiApp {
+	/// Get mutable reference to active FileSearch state (from tab or mode)
+	fn active_file_search_mut(&mut self) -> Option<&mut FileSearchState> {
+		// First try to get from active tab
+		if let Some(active_id) = self.active_tab_id {
+			for tab in &mut self.tabs {
+				if tab.id == active_id {
+					if let Mode::FileSearch(ref mut state) = tab.mode {
+						return Some(state);
+					}
+				}
+			}
+		}
+		// Fall back to mode
+		if let Mode::FileSearch(ref mut state) = self.mode {
+			return Some(state);
+		}
+		None
+	}
+
+	/// Get mutable reference to active FileViewer state (from tab or mode)
+	fn active_file_viewer_mut(&mut self) -> Option<&mut FileViewerState> {
+		// First try to get from active tab
+		if let Some(active_id) = self.active_tab_id {
+			for tab in &mut self.tabs {
+				if tab.id == active_id {
+					if let Mode::FileViewer(ref mut state) = tab.mode {
+						return Some(state);
+					}
+				}
+			}
+		}
+		// Fall back to mode
+		if let Mode::FileViewer(ref mut state) = self.mode {
+			return Some(state);
+		}
+		None
+	}
+
+	/// Render content for a given mode
+	fn view_mode(&self, mode: &Mode) -> Element<'_, GuiMessage> {
+		match mode {
+			Mode::Peers => self.view_peers(),
+			Mode::PeerActions { peer_id } => self.view_peer_actions(peer_id),
+			Mode::PeerPermissions(state) => self.view_peer_permissions(state),
+			Mode::PeerCpus(state) => self.view_peer_cpus(state),
+			Mode::StorageUsage(state) => self.view_storage_usage(state),
+			Mode::PeerInterfaces(state) => self.view_peer_interfaces(state),
+			Mode::FileBrowser(state) => self.view_file_browser(state),
+			Mode::FileViewer(state) => self.view_file_viewer(state),
+			Mode::PeersGraph => self.view_graph(),
+			Mode::CreateUser(form) => self.view_create_user(form),
+			Mode::FileSearch(state) => self.view_file_search(state),
+			Mode::ScanResults(state) => self.view_scan_results(state),
+		}
+	}
+
+	/// Render content based on current mode (without tabs)
+	fn view_mode_content(&self) -> Element<'_, GuiMessage> {
+		self.view_mode(&self.mode)
+	}
+
+	/// Render the tab bar
+	fn view_tab_bar(&self) -> Element<'_, GuiMessage> {
+		let mut tabs_row = iced::widget::Row::new().spacing(2);
+
+		for tab in &self.tabs {
+			let is_active = self.active_tab_id == Some(tab.id);
+
+			// Use tab's icon method
+			let icon = tab.icon();
+
+			// Truncate title if too long
+			let title = if tab.title.len() > 20 {
+				format!("{}...", &tab.title[..17])
+			} else {
+				tab.title.clone()
+			};
+
+			// Tab label with icon
+			let tab_label = text(format!("{} {}", icon, title)).size(14);
+
+			// Close button (X)
+			let close_btn = button(text("×").size(14))
+				.padding([2, 6])
+				.style(theme::Button::Text)
+				.on_press(GuiMessage::TabClose(tab.id));
+
+			// Tab content row (label + close button)
+			let tab_content = iced::widget::Row::new()
+				.spacing(4)
+				.align_items(iced::Alignment::Center)
+				.push(tab_label)
+				.push(close_btn);
+
+			// Tab button with different style for active/inactive
+			let tab_btn = button(tab_content)
+				.padding([8, 12])
+				.style(if is_active {
+					theme::Button::Primary
+				} else {
+					theme::Button::Secondary
+				})
+				.on_press(GuiMessage::TabSelect(tab.id));
+
+			tabs_row = tabs_row.push(tab_btn);
+		}
+
+		// Add "+" button to create new tab
+		let new_tab_btn = button(text("+").size(16))
+			.padding([8, 12])
+			.style(theme::Button::Secondary)
+			.on_press(GuiMessage::TabNew);
+		tabs_row = tabs_row.push(new_tab_btn);
+
+		container(tabs_row)
+			.width(Length::Fill)
+			.padding([8, 8])
+			.style(theme::Container::Box)
+			.into()
+	}
+
 	fn refresh_from_state(&mut self) {
 		if let Ok(state_guard) = self.peer.state().lock() {
 			let snapshot = state_guard.clone();
