@@ -796,6 +796,7 @@ pub enum GuiMessage {
 		path: String,
 		mime: Option<String>,
 	},
+	FilesMimeTypesLoaded(Result<Vec<String>, String>),
 	ScanPathChanged(String),
 	ScanRequested,
 	ScanEventReceived {
@@ -918,7 +919,12 @@ impl Application for GuiApp {
 					MenuItem::FileSearch => {
 						self.menu = item;
 						self.mode = Mode::FileSearch(FileSearchState::new());
-						self.status = String::from("File search");
+						self.status = String::from("Loading mime types...");
+						let peer = self.peer.clone();
+						return Command::perform(
+							load_mime_types(peer),
+							GuiMessage::FilesMimeTypesLoaded,
+						);
 					}
 					MenuItem::StorageUsage => {
 						self.menu = item;
@@ -1735,6 +1741,20 @@ impl Application for GuiApp {
 						mime,
 					));
 					return command;
+				}
+				Command::none()
+			}
+			GuiMessage::FilesMimeTypesLoaded(result) => {
+				if let Mode::FileSearch(state) = &mut self.mode {
+					match result {
+						Ok(mimes) => {
+							state.available_mime_types = mimes;
+							self.status = String::from("Files");
+						}
+						Err(err) => {
+							self.status = format!("Failed to load mime types: {}", err);
+						}
+					}
 				}
 				Command::none()
 			}
@@ -3627,6 +3647,12 @@ async fn search_files(
 		.collect();
 
 	Ok((entries, mimes, total))
+}
+
+async fn load_mime_types(peer: Arc<PuppyNet>) -> Result<Vec<String>, String> {
+	task::spawn_blocking(move || peer.get_mime_types())
+		.await
+		.map_err(|err| format!("mime types task failed: {err}"))?
 }
 
 async fn load_scan_results_page(
