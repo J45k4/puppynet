@@ -2111,6 +2111,18 @@ impl PuppyNet {
 		Ok((entries, total_entries.max(0) as usize))
 	}
 
+	/// Search files using file_entries and file_locations tables
+	pub fn search_files(
+		&self,
+		args: crate::db::SearchFilesArgs,
+	) -> Result<(Vec<crate::db::FileSearchResult>, Vec<String>), String> {
+		let conn = self
+			.db
+			.lock()
+			.map_err(|err| format!("db lock poisoned: {err}"))?;
+		crate::db::search_files(&conn, args).map_err(|err| format!("search failed: {err}"))
+	}
+
 	pub async fn read_file(
 		&self,
 		peer: libp2p::PeerId,

@@ -3396,18 +3396,56 @@ async fn wait_for_update_event(receiver: Arc<Mutex<mpsc::Receiver<UpdateProgress
 }
 
 async fn search_files(
-	_peer: Arc<PuppyNet>,
-	_name_query: String,
+	peer: Arc<PuppyNet>,
+	name_query: String,
 	_content_query: String,
-	_date_from: String,
-	_date_to: String,
+	date_from: String,
+	date_to: String,
 	mime: Option<String>,
 	sort_desc: bool,
 ) -> Result<(Vec<FileSearchEntry>, Vec<String>), String> {
-	// Placeholder in-memory search over local sqlite not yet wired: return empty until DB API exposed.
-	// For now, we just simulate no results but allow UI to function.
-	let _ = (mime, sort_desc); // suppress warnings
-	Ok((Vec::new(), Vec::new()))
+	let args = puppynet_core::SearchFilesArgs {
+		name_query: if name_query.trim().is_empty() {
+			None
+		} else {
+			Some(name_query)
+		},
+		content_query: None, // Content search not yet implemented
+		date_from: if date_from.trim().is_empty() {
+			None
+		} else {
+			Some(date_from)
+		},
+		date_to: if date_to.trim().is_empty() {
+			None
+		} else {
+			Some(date_to)
+		},
+		mime_type: mime,
+		sort_desc,
+	};
+
+	let (results, mimes) = task::spawn_blocking(move || peer.search_files(args))
+		.await
+		.map_err(|err| format!("search task failed: {err}"))??;
+
+	let entries = results
+		.into_iter()
+		.map(|row| {
+			let hash = row.hash.iter().map(|b| format!("{:02x}", b)).collect();
+			FileSearchEntry {
+				hash,
+				name: row.name,
+				size: row.size,
+				mime_type: row.mime_type,
+				replicas: row.replicas,
+				first: row.first_datetime.unwrap_or_else(|| String::from("-")),
+				latest: row.latest_datetime.unwrap_or_else(|| String::from("-")),
+			}
+		})
+		.collect();
+
+	Ok((entries, mimes))
 }
 
 async fn load_scan_results_page(
