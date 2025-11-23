@@ -846,7 +846,12 @@ async fn read_file(
 	path: String,
 	offset: u64,
 ) -> (String, String, u64, Result<FileChunk, String>) {
-	let target = PeerId::from_str(&peer_id).unwrap();
+	let target = match PeerId::from_str(&peer_id) {
+		Ok(pid) => pid,
+		Err(err) => {
+			return (peer_id, path, offset, Err(format!("Invalid peer ID: {}", err)));
+		}
+	};
 	let result = peer
 		.read_file(target, path.clone(), offset, Some(FILE_VIEW_CHUNK_SIZE))
 		.await;
@@ -4598,16 +4603,20 @@ fn build_storage_nodes(files: Vec<StorageUsageFile>, known_peers: &[PeerId]) -> 
 	}
 	let mut nodes: Vec<StorageNodeView> = grouped
 		.into_iter()
-		.filter_map(|(node_id, (name, records))| {
-			let peer_id = peer_map.get(&node_id)?;
+		.map(|(node_id, (name, records))| {
+			// Try to find the full PeerId, otherwise use hex representation of node_id
+			let id = peer_map
+				.get(&node_id)
+				.map(|pid| pid.to_string())
+				.unwrap_or_else(|| node_id.iter().map(|b| format!("{:02x}", b)).collect());
 			let (entries, total_size) = build_storage_tree(records);
-			Some(StorageNodeView {
+			StorageNodeView {
 				name,
-				id: peer_id.to_string(),
+				id,
 				total_size,
 				entries,
 				expanded: false,
-			})
+			}
 		})
 		.collect();
 	nodes.sort_by(|a, b| a.name.cmp(&b.name));
