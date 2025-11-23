@@ -29,18 +29,21 @@ jobs:
         uses: actions/checkout@v3
         with:
           fetch-depth: 0
+      - name: Compute Cargo.lock hash
+        shell: bash
+        run: echo "CARGO_LOCK_HASH=$(git rev-parse HEAD:Cargo.lock)" >> "$GITHUB_ENV"
       - name: Cache Cargo registry
         uses: actions/cache@v3
         with:
           path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-${{ env.CARGO_LOCK_HASH }}
           restore-keys: |
             ${{ runner.os }}-cargo-registry-
       - name: Cache Cargo build
         uses: actions/cache@v3
         with:
           path: target
-          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-build-${{ env.CARGO_LOCK_HASH }}
           restore-keys: |
             ${{ runner.os }}-cargo-build-
       - name: Set up Rust
