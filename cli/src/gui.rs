@@ -435,6 +435,8 @@ struct FileSearchState {
 	page: usize,
 	page_size: usize,
 	total_count: usize,
+	// Scroll state
+	scroll_offset: scrollable::RelativeOffset,
 }
 
 #[derive(Debug, Clone)]
@@ -529,6 +531,7 @@ impl FileSearchState {
 			page: 0,
 			page_size: 50,
 			total_count: 0,
+			scroll_offset: scrollable::RelativeOffset::START,
 		}
 	}
 }
@@ -797,6 +800,7 @@ pub enum GuiMessage {
 		mime: Option<String>,
 	},
 	FilesMimeTypesLoaded(Result<Vec<String>, String>),
+	FilesScrolled(scrollable::Viewport),
 	ScanPathChanged(String),
 	ScanRequested,
 	ScanEventReceived {
@@ -1531,7 +1535,12 @@ impl Application for GuiApp {
 						}
 						FileViewerSource::Files(files) => {
 							self.status = String::from("Files");
+							let scroll_offset = files.scroll_offset;
 							self.mode = Mode::FileSearch(files);
+							return scrollable::snap_to(
+								scrollable::Id::new("files_table"),
+								scroll_offset,
+							);
 						}
 					}
 				}
@@ -1763,6 +1772,12 @@ impl Application for GuiApp {
 							self.status = format!("Failed to load mime types: {}", err);
 						}
 					}
+				}
+				Command::none()
+			}
+			GuiMessage::FilesScrolled(viewport) => {
+				if let Mode::FileSearch(state) = &mut self.mode {
+					state.scroll_offset = viewport.relative_offset();
 				}
 				Command::none()
 			}
@@ -2894,7 +2909,12 @@ impl GuiApp {
 						list = list.push(container(row).padding(4));
 					}
 				}
-				layout = layout.push(scrollable(list).height(Length::Fill));
+				layout = layout.push(
+					scrollable(list)
+						.height(Length::Fill)
+						.id(scrollable::Id::new("files_table"))
+						.on_scroll(GuiMessage::FilesScrolled),
+				);
 
 				// Pagination controls
 				let total_pages = if state.total_count == 0 {
