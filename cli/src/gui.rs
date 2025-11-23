@@ -1,4 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
+use std::fs;
+use std::io::{Read, Write};
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -29,6 +31,59 @@ const LOCAL_LISTEN_MULTIADDR: &str = "/ip4/0.0.0.0:8336";
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const FILE_VIEW_CHUNK_SIZE: u64 = 64 * 1024;
 const THUMBNAIL_MAX_SIZE: u32 = 128;
+
+/// Get the cache directory path (~/.puppynet/cache)
+fn get_cache_dir() -> Option<PathBuf> {
+	homedir::my_home()
+		.ok()
+		.flatten()
+		.map(|home| home.join(".puppynet").join("cache").join("thumbnails"))
+}
+
+/// Get the cache file path for a given file hash
+fn thumbnail_cache_path(hash: &str) -> Option<PathBuf> {
+	let cache_dir = get_cache_dir()?;
+	// Use first 2 chars as subdirectory for better filesystem performance
+	let subdir = if hash.len() >= 2 { &hash[..2] } else { "00" };
+	Some(cache_dir.join(subdir).join(format!("{}.thumb", hash)))
+}
+
+/// Try to read a cached thumbnail
+fn read_cached_thumbnail(hash: &str) -> Option<Vec<u8>> {
+	let path = thumbnail_cache_path(hash)?;
+	if !path.exists() {
+		return None;
+	}
+	let mut file = fs::File::open(&path).ok()?;
+	let mut data = Vec::new();
+	file.read_to_end(&mut data).ok()?;
+	if data.is_empty() {
+		return None;
+	}
+	Some(data)
+}
+
+/// Save a thumbnail to the cache
+fn save_thumbnail_to_cache(hash: &str, data: &[u8]) -> bool {
+	if data.is_empty() {
+		return false;
+	}
+	let Some(path) = thumbnail_cache_path(hash) else {
+		return false;
+	};
+	// Ensure parent directory exists
+	if let Some(parent) = path.parent() {
+		if !parent.exists() {
+			if fs::create_dir_all(parent).is_err() {
+				return false;
+			}
+		}
+	}
+	let Ok(mut file) = fs::File::create(&path) else {
+		return false;
+	};
+	file.write_all(data).is_ok()
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum MenuItem {
@@ -683,11 +738,32 @@ async fn fetch_files_page_thumbnail(
 	peer_id: String,
 	path: String,
 	key: String,
+	hash: String,
 ) -> (String, Result<Thumbnail, String>) {
+	// Check cache first
+	if let Some(cached_data) = read_cached_thumbnail(&hash) {
+		return (
+			key,
+			Ok(Thumbnail {
+				data: cached_data,
+				width: THUMBNAIL_MAX_SIZE,
+				height: THUMBNAIL_MAX_SIZE,
+				mime_type: String::from("image/jpeg"),
+			}),
+		);
+	}
+
+	// Fetch from peer
 	let target = PeerId::from_str(&peer_id).unwrap();
 	let result = peer
 		.get_thumbnail(target, path, THUMBNAIL_MAX_SIZE, THUMBNAIL_MAX_SIZE)
 		.await;
+
+	// Save to cache if successful
+	if let Ok(ref thumb) = result {
+		save_thumbnail_to_cache(&hash, &thumb.data);
+	}
+
 	(key, map_result(result))
 }
 
@@ -1638,6 +1714,7 @@ impl Application for GuiApp {
 										entry.node_id.clone(),
 										entry.path.clone(),
 										key,
+										entry.hash.clone(),
 									),
 									|(key, result)| GuiMessage::FilesPageThumbnailLoaded { key, result },
 								));
@@ -1732,6 +1809,7 @@ impl Application for GuiApp {
 												entry.node_id.clone(),
 												entry.path.clone(),
 												key,
+												entry.hash.clone(),
 											),
 											|(key, result)| GuiMessage::FilesPageThumbnailLoaded { key, result },
 										));
