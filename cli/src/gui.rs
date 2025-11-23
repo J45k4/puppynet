@@ -1871,21 +1871,42 @@ impl Application for GuiApp {
 				Command::none()
 			}
 			GuiMessage::FileViewerBack => {
-				// When going back from file viewer in a tab, close the tab
+				// When going back from file viewer in a tab, restore the source mode
 				if let Some(active_id) = self.active_tab_id {
-					if let Some(pos) = self.tabs.iter().position(|t| t.id == active_id) {
-						if let Mode::FileViewer(_) = &self.tabs[pos].mode {
-							// Close this tab
-							self.tabs.remove(pos);
-							// Switch to another tab or clear
-							if self.tabs.is_empty() {
-								self.active_tab_id = None;
-							} else {
-								let new_pos = pos.min(self.tabs.len().saturating_sub(1));
-								self.active_tab_id = self.tabs.get(new_pos).map(|t| t.id);
+					if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == active_id) {
+						if let Mode::FileViewer(viewer_state) = &tab.mode {
+							let source = viewer_state.source.clone();
+							match source {
+								FileViewerSource::FileBrowser(browser) => {
+									self.status = format!("Browsing {} on {}", browser.path, browser.peer_id);
+									tab.mode = Mode::FileBrowser(browser);
+									tab.update_title();
+									return Command::none();
+								}
+								FileViewerSource::StorageUsage(storage) => {
+									self.status = String::from("Storage usage");
+									tab.mode = Mode::StorageUsage(storage);
+									tab.menu = MenuItem::StorageUsage;
+									tab.update_title();
+									return Command::none();
+								}
+								FileViewerSource::Files(files) => {
+									self.status = String::from("Files");
+									let scroll_offset = files.scroll_offset;
+									let scroll_id = if files.view_mode == FilesViewMode::Thumbnails {
+										"files_thumbnails_grid"
+									} else {
+										"files_table"
+									};
+									tab.mode = Mode::FileSearch(files);
+									tab.menu = MenuItem::FileSearch;
+									tab.update_title();
+									return scrollable::snap_to(
+										scrollable::Id::new(scroll_id),
+										scroll_offset,
+									);
+								}
 							}
-							self.status = String::from("Tab closed");
-							return Command::none();
 						}
 					}
 				}
@@ -3789,7 +3810,8 @@ impl GuiApp {
 					layout = layout.push(
 						scrollable(grid)
 							.height(Length::Fill)
-							.id(scrollable::Id::new("files_thumbnails_grid")),
+							.id(scrollable::Id::new("files_thumbnails_grid"))
+							.on_scroll(GuiMessage::FilesScrolled),
 					);
 				}
 
