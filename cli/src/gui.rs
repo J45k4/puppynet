@@ -89,6 +89,7 @@ fn save_thumbnail_to_cache(hash: &str, data: &[u8]) -> bool {
 pub enum MenuItem {
 	Peers,
 	PeersGraph,
+	Users,
 	CreateUser,
 	FileSearch,
 	StorageUsage,
@@ -96,9 +97,10 @@ pub enum MenuItem {
 	Quit,
 }
 
-const MENU_ITEMS: [MenuItem; 7] = [
+const MENU_ITEMS: [MenuItem; 8] = [
 	MenuItem::Peers,
 	MenuItem::PeersGraph,
+	MenuItem::Users,
 	MenuItem::CreateUser,
 	MenuItem::FileSearch,
 	MenuItem::StorageUsage,
@@ -111,6 +113,7 @@ impl MenuItem {
 		match self {
 			MenuItem::Peers => "Peers",
 			MenuItem::PeersGraph => "Peers Graph",
+			MenuItem::Users => "Users",
 			MenuItem::CreateUser => "Create User",
 			MenuItem::FileSearch => "Files",
 			MenuItem::StorageUsage => "Storage Usage",
@@ -501,6 +504,32 @@ struct CreateUserForm {
 	username: String,
 	password: String,
 	status: Option<String>,
+	saving: bool,
+}
+
+#[derive(Debug, Clone)]
+struct UsersState {
+	users: Vec<String>,
+	loading: bool,
+	error: Option<String>,
+}
+
+impl UsersState {
+	fn loading() -> Self {
+		Self {
+			users: Vec::new(),
+			loading: true,
+			error: None,
+		}
+	}
+
+	fn from_users(users: Vec<String>) -> Self {
+		Self {
+			users,
+			loading: false,
+			error: None,
+		}
+	}
 }
 
 impl CreateUserForm {
@@ -509,6 +538,7 @@ impl CreateUserForm {
 			username: String::new(),
 			password: String::new(),
 			status: None,
+			saving: false,
 		}
 	}
 }
@@ -601,6 +631,7 @@ impl Tab {
 			Mode::FileBrowser(_) => "Files",
 			Mode::FileViewer(_) => "View",
 			Mode::PeersGraph => "Graph",
+			Mode::Users(_) => "Users",
 			Mode::CreateUser(_) => "User",
 			Mode::FileSearch(_) => "Search",
 			Mode::ScanResults(_) => "Scan",
@@ -642,6 +673,7 @@ impl Tab {
 				.unwrap_or("File")
 				.to_string(),
 			Mode::PeersGraph => "Graph".to_string(),
+			Mode::Users(_) => "Users".to_string(),
 			Mode::CreateUser(_) => "Create User".to_string(),
 			Mode::FileSearch(_) => "Files".to_string(),
 			Mode::ScanResults(_) => "Scan Results".to_string(),
@@ -890,6 +922,23 @@ async fn list_disks(
 	(peer_id, map_result(result))
 }
 
+async fn load_local_users(peer: Arc<PuppyNet>) -> Result<Vec<String>, String> {
+	peer.state()
+		.lock()
+		.map(|s| s.users.iter().map(|u| u.name.clone()).collect())
+		.map_err(|err| format!("state lock poisoned: {}", err))
+}
+
+async fn create_user(
+	peer: Arc<PuppyNet>,
+	username: String,
+	password: String,
+) -> Result<String, String> {
+	peer.create_user(username.clone(), password)
+		.map(|_| username)
+		.map_err(|err| format!("{err}"))
+}
+
 fn shared_folder_suggestions(peer: &Arc<PuppyNet>) -> Vec<EditableFolderPermission> {
 	peer.state()
 		.lock()
@@ -1073,6 +1122,7 @@ enum Mode {
 	FileBrowser(FileBrowserState),
 	FileViewer(FileViewerState),
 	PeersGraph,
+	Users(UsersState),
 	CreateUser(CreateUserForm),
 	FileSearch(FileSearchState),
 	ScanResults(ScanResultsState),
@@ -1083,6 +1133,10 @@ pub enum GuiMessage {
 	Tick,
 	MenuSelected(MenuItem),
 	BackToPeers,
+	UsersRequested,
+	UsersLoaded(Result<Vec<String>, String>),
+	UsersCreateNew,
+	CreateUserSaved(Result<String, String>),
 	PeerActionsRequested(String),
 	PeerPermissionsRequested(String),
 	PeerPermissionsLoaded {
@@ -1346,18 +1400,32 @@ impl Application for GuiApp {
 						};
 					}
 					MenuItem::CreateUser => {
+				self.menu = item;
+				let form = CreateUserForm::new();
+				// Update active tab's mode
+				if let Some(active_id) = self.active_tab_id {
+					if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == active_id) {
+						tab.mode = Mode::CreateUser(form.clone());
+						tab.menu = item;
+						tab.update_title();
+					}
+				}
+				self.mode = Mode::CreateUser(form);
+				self.status = String::from("Create user form");
+			}
+					MenuItem::Users => {
 						self.menu = item;
-						let form = CreateUserForm::new();
-						// Update active tab's mode
+						let state = UsersState::loading();
 						if let Some(active_id) = self.active_tab_id {
 							if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == active_id) {
-								tab.mode = Mode::CreateUser(form.clone());
+								tab.mode = Mode::Users(state.clone());
 								tab.menu = item;
 								tab.update_title();
 							}
 						}
-						self.mode = Mode::CreateUser(form);
-						self.status = String::from("Create user form");
+						self.mode = Mode::Users(state.clone());
+						self.status = String::from("Loading users...");
+						return Command::perform(load_local_users(self.peer.clone()), GuiMessage::UsersLoaded);
 					}
 					MenuItem::FileSearch => {
 						self.menu = item;
@@ -1422,6 +1490,40 @@ impl Application for GuiApp {
 			GuiMessage::BackToPeers => {
 				self.menu = MenuItem::Peers;
 				self.mode = Mode::Peers;
+				Command::none()
+			}
+			GuiMessage::UsersRequested => {
+				self.status = String::from("Loading users...");
+				self.set_active_tab_mode(Mode::Users(UsersState::loading()));
+				Command::perform(load_local_users(self.peer.clone()), GuiMessage::UsersLoaded)
+			}
+			GuiMessage::UsersLoaded(result) => {
+				let mut status_update: Option<String> = None;
+				self.with_active_mode_mut(|mode| {
+					if let Mode::Users(state) = mode {
+						match result.clone() {
+							Ok(users) => {
+								*state = UsersState::from_users(users);
+								status_update = Some(String::from("Users loaded"));
+							}
+							Err(err) => {
+								state.loading = false;
+								state.error = Some(err.clone());
+								status_update = Some(format!("Failed to load users: {}", err));
+							}
+						}
+					}
+				});
+				if let Some(status) = status_update {
+					self.status = status;
+				}
+				Command::none()
+			}
+			GuiMessage::UsersCreateNew => {
+				let form = CreateUserForm::new();
+				self.menu = MenuItem::CreateUser;
+				self.set_active_tab_mode(Mode::CreateUser(form));
+				self.status = String::from("Create user form");
 				Command::none()
 			}
 			GuiMessage::PeerActionsRequested(peer_id) => {
@@ -2307,28 +2409,80 @@ impl Application for GuiApp {
 				Command::none()
 			}
 			GuiMessage::UsernameChanged(value) => {
-				if let Mode::CreateUser(form) = &mut self.mode {
-					form.username = value;
-				}
+				self.with_active_mode_mut(|mode| {
+					if let Mode::CreateUser(form) = mode {
+						form.username = value.clone();
+						form.status = None;
+					}
+				});
 				Command::none()
 			}
 			GuiMessage::PasswordChanged(value) => {
-				if let Mode::CreateUser(form) = &mut self.mode {
-					form.password = value;
-				}
+				self.with_active_mode_mut(|mode| {
+					if let Mode::CreateUser(form) = mode {
+						form.password = value.clone();
+						form.status = None;
+					}
+				});
 				Command::none()
 			}
 			GuiMessage::CreateUserSubmit => {
-				if let Mode::CreateUser(form) = &mut self.mode {
-					if form.username.trim().is_empty() || form.password.trim().is_empty() {
-						form.status = Some(String::from("Both fields are required"));
-					} else {
-						self.status = format!("Created user '{}' (placeholder)", form.username);
-						form.status = Some(self.status.clone());
-						form.password.clear();
+				let mut command = Command::none();
+				let peer = self.peer.clone();
+				self.with_active_mode_mut(|mode| {
+					if let Mode::CreateUser(form) = mode {
+						if form.username.trim().is_empty() || form.password.trim().is_empty() {
+							form.status = Some(String::from("Both fields are required"));
+							form.saving = false;
+						} else {
+							form.saving = true;
+							form.status = Some(String::from("Creating user..."));
+							let username = form.username.clone();
+							let password = form.password.clone();
+							command = Command::perform(
+								create_user(peer.clone(), username, password),
+								GuiMessage::CreateUserSaved,
+							);
+						}
 					}
+				});
+				return command;
+			}
+			GuiMessage::CreateUserSaved(result) => {
+				let mut command = Command::none();
+				let mut switch_to_users = false;
+				let mut status_update: Option<String> = None;
+				self.with_active_mode_mut(|mode| {
+					if let Mode::CreateUser(form) = mode {
+						form.saving = false;
+						match result.clone() {
+							Ok(user) => {
+								let status = format!("Created user '{}'", user);
+								form.status = Some(status.clone());
+								status_update = Some(status);
+								form.password.clear();
+								switch_to_users = true;
+							}
+							Err(err) => {
+								form.status = Some(err.clone());
+								status_update = Some(format!("Failed to create user: {}", err));
+							}
+						}
+					}
+				});
+				if let Some(status) = status_update {
+					self.status = status;
 				}
-				Command::none()
+				if switch_to_users {
+					self.menu = MenuItem::Users;
+					let users_state = UsersState::loading();
+					self.set_active_tab_mode(Mode::Users(users_state));
+					command = Command::perform(
+						load_local_users(self.peer.clone()),
+						GuiMessage::UsersLoaded,
+					);
+				}
+				return command;
 			}
 			GuiMessage::FilesViewModeChanged(mode) => {
 				// Capture immutable borrows first
@@ -3208,6 +3362,7 @@ impl GuiApp {
 			Mode::FileBrowser(state) => self.view_file_browser(state),
 			Mode::FileViewer(state) => self.view_file_viewer(state),
 			Mode::PeersGraph => self.view_graph(),
+			Mode::Users(state) => self.view_users(state),
 			Mode::CreateUser(form) => self.view_create_user(form),
 			Mode::FileSearch(state) => self.view_file_search(state),
 			Mode::ScanResults(state) => self.view_scan_results(state),
@@ -3962,9 +4117,36 @@ impl GuiApp {
 		layout.into()
 	}
 
+	fn view_users(&self, state: &UsersState) -> Element<'_, GuiMessage> {
+		let mut layout = iced::widget::Column::new().spacing(12);
+		layout = layout.push(text("Users").size(24));
+		let mut controls = iced::widget::Row::new().spacing(8);
+		controls = controls.push(button(text("Refresh")).on_press(GuiMessage::UsersRequested));
+		controls = controls.push(button(text("New user")).on_press(GuiMessage::UsersCreateNew));
+		layout = layout.push(controls);
+		if state.loading {
+			layout = layout.push(text("Loading users...").size(16));
+			return layout.into();
+		}
+		if let Some(err) = &state.error {
+			layout = layout.push(text(format!("Error: {}", err)).size(14));
+		}
+		if state.users.is_empty() {
+			layout = layout.push(text("No users found").size(14));
+		} else {
+			let mut list = iced::widget::Column::new().spacing(6);
+			for user in &state.users {
+				let row = iced::widget::Row::new().spacing(8).push(text(user).size(16));
+				list = list.push(container(row).padding(8).style(theme::Container::Box));
+			}
+			layout = layout.push(scrollable(list).height(Length::Fill));
+		}
+		layout.into()
+	}
+
 	fn view_create_user(&self, form: &CreateUserForm) -> Element<'_, GuiMessage> {
 		let mut layout = iced::widget::Column::new().spacing(12);
-		layout = layout.push(text("Create User (placeholder)").size(24));
+		layout = layout.push(text("Create User").size(24));
 		layout = layout
 			.push(text_input("username", &form.username).on_input(GuiMessage::UsernameChanged));
 		layout = layout.push(
@@ -3972,7 +4154,11 @@ impl GuiApp {
 				.secure(true)
 				.on_input(GuiMessage::PasswordChanged),
 		);
-		layout = layout.push(button(text("Submit")).on_press(GuiMessage::CreateUserSubmit));
+		let mut submit = button(text(if form.saving { "Creating..." } else { "Submit" }));
+		if !form.saving {
+			submit = submit.on_press(GuiMessage::CreateUserSubmit);
+		}
+		layout = layout.push(submit);
 		if let Some(status) = &form.status {
 			layout = layout.push(text(status).size(16));
 		}

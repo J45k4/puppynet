@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 
 use crate::scan::FileHash;
 use crate::scan::FileLocation;
-use crate::state::{FolderRule, Permission, Rule};
+use crate::state::{FolderRule, Permission, Rule, User};
 
 pub type NodeID = [u8; 16];
 
@@ -131,6 +131,16 @@ const MIGRATIONS: &[Migration] = &[
 				expires_at integer null
 			);
 			create index if not exists idx_peer_permissions_src_target on peer_permissions(src_peer, target_peer);
+		",
+	},
+	Migration {
+		id: 20250226,
+		name: "users",
+		sql: r"
+			create table users (
+				username text primary key,
+				password text not null
+			);
 		",
 	},
 ];
@@ -920,6 +930,33 @@ pub fn load_peer_permissions(
 		}
 	}
 	Ok(results)
+}
+
+pub fn save_user(conn: &Connection, user: &User) -> anyhow::Result<()> {
+	conn.execute(
+		r#"
+		INSERT INTO users (username, password)
+		VALUES (?1, ?2)
+		ON CONFLICT(username) DO UPDATE SET password = excluded.password
+		"#,
+		params![&user.name, &user.passw],
+	)?;
+	Ok(())
+}
+
+pub fn load_users(conn: &Connection) -> anyhow::Result<Vec<User>> {
+	let mut stmt = conn.prepare("SELECT username, password FROM users ORDER BY username ASC")?;
+	let rows = stmt.query_map([], |row| {
+		Ok(User {
+			name: row.get(0)?,
+			passw: row.get(1)?,
+		})
+	})?;
+	let mut users = Vec::new();
+	for user in rows {
+		users.push(user?);
+	}
+	Ok(users)
 }
 
 /// Runs embedded database migrations.

@@ -7,12 +7,12 @@ use crate::updater::{self, UpdateProgress, UpdateResult};
 use crate::{
 	db::{
 		Cpu as DbCpu, FileEntry, Interface as DbInterface, Node, NodeID, StorageUsageFile,
-		fetch_file_entries_paginated, load_peer_permissions, open_db, remove_stale_cpus,
-		remove_stale_interfaces, run_migrations, save_cpu, save_interface, save_node,
+		fetch_file_entries_paginated, load_peer_permissions, load_users, open_db, remove_stale_cpus,
+		remove_stale_interfaces, run_migrations, save_cpu, save_interface, save_node, save_user,
 	},
 	p2p::{AgentBehaviour, AgentEvent, build_swarm, load_or_generate_keypair},
 	scan::{self, ScanEvent},
-	state::{Connection, FLAG_READ, FLAG_SEARCH, FLAG_WRITE, FolderRule, Permission, State},
+	state::{Connection, FLAG_READ, FLAG_SEARCH, FLAG_WRITE, FolderRule, Permission, State, User},
 };
 use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Utc};
@@ -563,6 +563,16 @@ impl App {
 				}
 			}
 		};
+		let stored_users = {
+			let conn = db.lock().unwrap();
+			match load_users(&conn) {
+				Ok(users) => users,
+				Err(err) => {
+					log::error!("failed to load users: {err}");
+					Vec::new()
+				}
+			}
+		};
 		let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 		let (internal_tx, internal_rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -573,6 +583,7 @@ impl App {
 		{
 			if let Ok(mut s) = state.lock() {
 				s.me = peer_id;
+				s.users = stored_users;
 				for (target, permissions) in stored_permissions {
 					s.set_peer_permissions_from_storage(target, permissions);
 				}
@@ -871,9 +882,38 @@ impl App {
 				roles,
 				permissions,
 			} => {
-				let mut state = self.state.lock().unwrap();
-				state.create_user(username.clone(), password)?;
-				PeerRes::UserCreated { username }
+				let user = User {
+					name: username.clone(),
+					passw: password.clone(),
+				};
+				{
+					let state = self.state.lock().unwrap();
+					if state.users.iter().any(|u| u.name == user.name) {
+						return Ok(PeerRes::Error("User already exists".into()));
+					}
+				}
+				match self.db.lock() {
+					Ok(mut conn) => {
+						if let Err(err) = crate::db::save_user(&mut *conn, &user) {
+							log::error!("failed to persist user {}: {}", user.name, err);
+							return Ok(PeerRes::Error("Failed to save user".into()));
+						}
+					}
+					Err(err) => {
+						log::error!(
+							"db lock poisoned while creating user {}: {}",
+							user.name,
+							err
+						);
+						return Ok(PeerRes::Error("Database unavailable".into()));
+					}
+				}
+				if let Ok(mut state) = self.state.lock() {
+					state.users.push(user.clone());
+				} else {
+					log::error!("state lock poisoned after creating user {}", user.name);
+				}
+				PeerRes::UserCreated { username: user.name }
 			}
 			PeerReq::CreateToken {
 				username,
@@ -2004,6 +2044,25 @@ impl PuppyNet {
 		let canonical = std::fs::canonicalize(path.as_ref())
 			.map_err(|err| anyhow!("failed to canonicalize path: {err}"))?;
 		self.register_shared_folder(canonical, FLAG_READ | FLAG_WRITE | FLAG_SEARCH)
+	}
+
+	pub fn create_user(&self, username: String, password: String) -> anyhow::Result<()> {
+		let user = User {
+			name: username.clone(),
+			passw: password,
+		};
+		{
+			let mut state = self
+				.state
+				.lock()
+				.map_err(|_| anyhow!("state lock poisoned"))?;
+			if state.users.iter().any(|u| u.name == user.name) {
+				bail!("User already exists");
+			}
+			state.users.push(user.clone());
+		}
+		let mut conn = self.db.lock().map_err(|_| anyhow!("db lock poisoned"))?;
+		save_user(&mut *conn, &user)
 	}
 
 	pub fn set_peer_permissions(
