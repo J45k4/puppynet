@@ -19,6 +19,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, UdpSocket};
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use sysinfo::{Disks, Networks, System};
@@ -31,6 +32,7 @@ use crate::scan::{ScanEvent, ScanResult};
 use crate::types::FileChunk;
 use crate::updater::UpdateProgress;
 use crate::wait_group::WaitGroupGuard;
+use crate::state::{FolderRule, Permission, Rule, FLAG_READ, FLAG_SEARCH, FLAG_WRITE};
 
 const PUPPYNET_PROTOCOL: &str = "/puppynet/0.0.1";
 const MAX_FILE_CHUNK: u64 = 4 * 1024 * 1024; // 4 MiB per transfer chunk
@@ -537,6 +539,47 @@ fn path_matches(grant: &str, request: &str) -> bool {
 	let prefix = format!("{}/", grant_norm);
 	let prefix_cmp = format!("{}/", grant_cmp);
 	request_norm.starts_with(&prefix) || request_cmp.starts_with(&prefix_cmp)
+}
+
+pub(crate) fn permission_from_grant(grant: &PermissionGrant) -> Option<Permission> {
+	match grant {
+		PermissionGrant::Owner => Some(Permission::new(Rule::Owner)),
+		PermissionGrant::Viewer => Some(Permission::new(Rule::Folder(FolderRule::new(
+			PathBuf::from("/"),
+			FLAG_READ | FLAG_SEARCH,
+		)))),
+		PermissionGrant::Files { path, access } => {
+			let normalized = normalize_path(path);
+			let mut flags = FLAG_READ | FLAG_SEARCH;
+			if matches!(access, FileAccess::ReadWrite) {
+				flags |= FLAG_WRITE;
+			}
+			Some(Permission::new(Rule::Folder(FolderRule::new(
+				PathBuf::from(normalized),
+				flags,
+			))))
+		}
+		PermissionGrant::SystemInfo | PermissionGrant::DiskInfo | PermissionGrant::NetworkInfo => {
+			None
+		}
+	}
+}
+
+pub(crate) fn grant_from_permission(permission: &Permission) -> Option<PermissionGrant> {
+	match permission.rule() {
+		Rule::Owner => Some(PermissionGrant::Owner),
+		Rule::Folder(rule) => {
+			let access = if rule.can_write() {
+				FileAccess::ReadWrite
+			} else if rule.can_read() {
+				FileAccess::Read
+			} else {
+				return None;
+			};
+			let path = normalize_path(&rule.path().to_string_lossy());
+			Some(PermissionGrant::Files { path, access })
+		}
+	}
 }
 
 /// Load or generate an Ed25519 keypair and persist it to disk.

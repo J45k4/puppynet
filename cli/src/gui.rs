@@ -152,6 +152,16 @@ struct PeerPermissionsState {
 }
 
 #[derive(Debug, Clone)]
+struct AccessRequestState {
+	peer_id: String,
+	owner: bool,
+	folders: Vec<EditableFolderPermission>,
+	merge: bool,
+	saving: bool,
+	error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 struct EditableFolderPermission {
 	path: String,
 	read: bool,
@@ -186,6 +196,46 @@ impl PeerPermissionsState {
 			}
 		}
 		state
+	}
+
+	fn build_permissions(&self) -> Result<Vec<Permission>, String> {
+		let mut permissions = Vec::new();
+		if self.owner {
+			permissions.push(Permission::new(Rule::Owner));
+		}
+		for folder in &self.folders {
+			let permission = folder.to_permission()?;
+			permissions.push(permission);
+		}
+		Ok(permissions)
+	}
+}
+
+impl AccessRequestState {
+	fn new(peer_id: String) -> Self {
+		Self {
+			peer_id,
+			owner: false,
+			folders: vec![EditableFolderPermission {
+				path: String::from("/"),
+				read: true,
+				write: false,
+			}],
+			merge: true,
+			saving: false,
+			error: None,
+		}
+	}
+
+	fn apply_permissions(&mut self, permissions: &[Permission]) {
+		self.owner = permissions.iter().any(|p| matches!(p.rule(), Rule::Owner));
+		self.folders = permissions
+			.iter()
+			.filter_map(|permission| match permission.rule() {
+				Rule::Folder(rule) => Some(EditableFolderPermission::from_rule(rule)),
+				_ => None,
+			})
+			.collect();
 	}
 
 	fn build_permissions(&self) -> Result<Vec<Permission>, String> {
@@ -535,18 +585,19 @@ impl Tab {
 	/// Get icon for the tab based on mode
 	fn icon(&self) -> &'static str {
 		match &self.mode {
-			Mode::Peers => "👥",
-			Mode::PeerActions { .. } => "⚙",
-			Mode::PeerPermissions(_) => "🔐",
-			Mode::PeerCpus(_) => "💻",
-			Mode::StorageUsage(_) => "💾",
-			Mode::PeerInterfaces(_) => "🌐",
-			Mode::FileBrowser(_) => "📁",
-			Mode::FileViewer(_) => "📄",
-			Mode::PeersGraph => "🔗",
-			Mode::CreateUser(_) => "👤",
-			Mode::FileSearch(_) => "🔍",
-			Mode::ScanResults(_) => "📊",
+			Mode::Peers => "P",
+			Mode::PeerActions { .. } => "A",
+			Mode::PeerPermissions(_) => "Perm",
+			Mode::AccessRequest(_) => "Req",
+			Mode::PeerCpus(_) => "CPU",
+			Mode::StorageUsage(_) => "Store",
+			Mode::PeerInterfaces(_) => "Net",
+			Mode::FileBrowser(_) => "Files",
+			Mode::FileViewer(_) => "View",
+			Mode::PeersGraph => "Graph",
+			Mode::CreateUser(_) => "User",
+			Mode::FileSearch(_) => "Search",
+			Mode::ScanResults(_) => "Scan",
 		}
 	}
 
@@ -556,6 +607,9 @@ impl Tab {
 			Mode::Peers => "Peers".to_string(),
 			Mode::PeerActions { peer_id } => format!("Peer {}", abbreviate_peer_id(peer_id)),
 			Mode::PeerPermissions(state) => format!("Perms {}", abbreviate_peer_id(&state.peer_id)),
+			Mode::AccessRequest(state) => {
+				format!("Request {}", abbreviate_peer_id(&state.peer_id))
+			}
 			Mode::PeerCpus(state) => format!("CPUs {}", abbreviate_peer_id(&state.peer_id)),
 			Mode::StorageUsage(_) => "Storage".to_string(),
 			Mode::PeerInterfaces(state) => format!("Net {}", abbreviate_peer_id(&state.peer_id)),
@@ -840,6 +894,32 @@ async fn set_permissions(
 	(peer_id, map_result(result.map(|_| permissions)))
 }
 
+async fn list_effective_permissions(
+	peer: Arc<PuppyNet>,
+	peer_id: String,
+) -> (String, Result<Vec<Permission>, String>) {
+	let target = PeerId::from_str(&peer_id).unwrap();
+	let result = peer
+		.state()
+		.lock()
+		.map(|s| s.permissions_for_peer(&target))
+		.map_err(|e| format!("state lock poisoned: {}", e));
+	(peer_id, result)
+}
+
+async fn request_permissions(
+	peer: Arc<PuppyNet>,
+	peer_id: String,
+	merge: bool,
+	permissions: Vec<Permission>,
+) -> (String, Result<Vec<Permission>, String>) {
+	let target = PeerId::from_str(&peer_id).unwrap();
+	let result = peer
+		.request_permissions(target, permissions.clone(), merge)
+		.await;
+	(peer_id, map_result(result))
+}
+
 async fn read_file(
 	peer: Arc<PuppyNet>,
 	peer_id: String,
@@ -937,6 +1017,30 @@ impl GuiApp {
 				.unwrap_or_default()
 		}
 	}
+
+	fn set_active_tab_mode(&mut self, mode: Mode) {
+		if let Some(active_id) = self.active_tab_id {
+			if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == active_id) {
+				tab.mode = mode.clone();
+				tab.update_title();
+			}
+		}
+		self.mode = mode;
+	}
+
+	fn with_active_mode_mut<F>(&mut self, mut f: F)
+	where
+		F: FnMut(&mut Mode),
+	{
+		if let Some(active_id) = self.active_tab_id {
+			if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == active_id) {
+				f(&mut tab.mode);
+				self.mode = tab.mode.clone();
+				return;
+			}
+		}
+		f(&mut self.mode);
+	}
 }
 
 #[derive(Debug, Clone)]
@@ -944,6 +1048,7 @@ enum Mode {
 	Peers,
 	PeerActions { peer_id: String },
 	PeerPermissions(PeerPermissionsState),
+	AccessRequest(AccessRequestState),
 	PeerCpus(PeerCpuState),
 	StorageUsage(StorageUsageState),
 	PeerInterfaces(PeerInterfacesState),
@@ -983,6 +1088,28 @@ pub enum GuiMessage {
 	PeerPermissionsAddFolder,
 	PeerPermissionsSave,
 	PeerPermissionsSaved {
+		peer_id: String,
+		result: Result<Vec<Permission>, String>,
+	},
+	AccessRequestRequested(String),
+	AccessRequestOwnerToggled(bool),
+	AccessRequestMergeToggled(bool),
+	AccessRequestFolderPathChanged {
+		index: usize,
+		path: String,
+	},
+	AccessRequestFolderReadToggled {
+		index: usize,
+		value: bool,
+	},
+	AccessRequestFolderWriteToggled {
+		index: usize,
+		value: bool,
+	},
+	AccessRequestFolderRemoved(usize),
+	AccessRequestAddFolder,
+	AccessRequestSubmitted,
+	AccessRequestCompleted {
 		peer_id: String,
 		result: Result<Vec<Permission>, String>,
 	},
@@ -1291,10 +1418,29 @@ impl Application for GuiApp {
 			GuiMessage::PeerPermissionsRequested(peer_id) => {
 				self.status = format!("Loading permissions for {}...", peer_id);
 				self.selected_peer_id = Some(peer_id.clone());
-				self.mode = Mode::PeerPermissions(PeerPermissionsState::loading(peer_id.clone()));
+				self.set_active_tab_mode(Mode::PeerPermissions(PeerPermissionsState::loading(
+					peer_id.clone(),
+				)));
 				let peer = self.peer.clone();
+				let local_id = self
+					.peer
+					.state()
+					.lock()
+					.ok()
+					.map(|s| s.me.to_string());
+				if let Some(id) = local_id {
+					if id == peer_id {
+						return Command::perform(
+							list_effective_permissions(peer, peer_id.clone()),
+							|(peer_id, permissions)| GuiMessage::PeerPermissionsLoaded {
+								peer_id,
+								permissions,
+							},
+						);
+					}
+				}
 				Command::perform(
-					list_granted_permissions(peer, peer_id.clone()),
+					list_permissions(peer, peer_id.clone()),
 					|(peer_id, permissions)| GuiMessage::PeerPermissionsLoaded {
 						peer_id,
 						permissions,
@@ -1305,34 +1451,191 @@ impl Application for GuiApp {
 				peer_id,
 				permissions,
 			} => {
-				if let Mode::PeerPermissions(state) = &mut self.mode {
-					if state.peer_id == peer_id {
-						match permissions {
-							Ok(perms) => {
-								*state =
-									PeerPermissionsState::from_permissions(peer_id.clone(), perms);
-								self.status = format!("Permissions loaded for {}", peer_id);
-							}
-							Err(err) => {
-								state.loading = false;
-								state.error = Some(err.clone());
-								self.status =
-									format!("Failed to load permissions for {}: {}", peer_id, err);
+				let is_active_tab = self
+					.active_tab_id
+					.and_then(|id| self.tabs.iter().find(|t| t.id == id))
+					.map(|t| matches!(t.mode, Mode::PeerPermissions(_)))
+					.unwrap_or(false);
+				let mut apply_to_mode = |mode: &mut Mode| {
+					if let Mode::PeerPermissions(state) = mode {
+						if state.peer_id == peer_id {
+							match permissions.clone() {
+								Ok(perms) => {
+									*state = PeerPermissionsState::from_permissions(
+										peer_id.clone(),
+										perms,
+									);
+									self.status =
+										format!("Permissions loaded for {}", peer_id);
+								}
+								Err(err) => {
+									state.loading = false;
+									state.error = Some(err.clone());
+									self.status = format!(
+										"Failed to load permissions for {}: {}",
+										peer_id, err
+									);
+								}
 							}
 						}
 					}
+				};
+				if is_active_tab {
+					if let Some(active_id) = self.active_tab_id {
+						if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == active_id) {
+							apply_to_mode(&mut tab.mode);
+						}
+					}
 				}
+				apply_to_mode(&mut self.mode);
 				Command::none()
 			}
 			GuiMessage::PeerPermissionsOwnerToggled(value) => {
-				if let Mode::PeerPermissions(state) = &mut self.mode {
+				self.with_active_mode_mut(|mode| {
+					if let Mode::PeerPermissions(state) = mode {
+						state.owner = value;
+						state.error = None;
+					}
+				});
+				Command::none()
+			}
+			GuiMessage::PeerPermissionsFolderPathChanged { index, path } => {
+				self.with_active_mode_mut(|mode| {
+					if let Mode::PeerPermissions(state) = mode {
+						if let Some(folder) = state.folders.get_mut(index) {
+							folder.path = path.clone();
+						}
+						state.error = None;
+					}
+				});
+				Command::none()
+			}
+			GuiMessage::PeerPermissionsFolderReadToggled { index, value } => {
+				self.with_active_mode_mut(|mode| {
+					if let Mode::PeerPermissions(state) = mode {
+						if let Some(folder) = state.folders.get_mut(index) {
+							folder.read = value;
+						}
+						state.error = None;
+					}
+				});
+				Command::none()
+			}
+			GuiMessage::PeerPermissionsFolderWriteToggled { index, value } => {
+				self.with_active_mode_mut(|mode| {
+					if let Mode::PeerPermissions(state) = mode {
+						if let Some(folder) = state.folders.get_mut(index) {
+							folder.write = value;
+						}
+						state.error = None;
+					}
+				});
+				Command::none()
+			}
+			GuiMessage::PeerPermissionsFolderRemoved(index) => {
+				self.with_active_mode_mut(|mode| {
+					if let Mode::PeerPermissions(state) = mode {
+						if index < state.folders.len() {
+							state.folders.remove(index);
+						}
+						state.error = None;
+					}
+				});
+				Command::none()
+			}
+			GuiMessage::PeerPermissionsAddFolder => {
+				self.with_active_mode_mut(|mode| {
+					if let Mode::PeerPermissions(state) = mode {
+						state.folders.push(EditableFolderPermission {
+							path: String::from("/"),
+							read: true,
+							write: false,
+						});
+						state.error = None;
+					}
+				});
+				Command::none()
+			}
+			GuiMessage::PeerPermissionsSave => {
+				let mut command = Command::none();
+				let peer = self.peer.clone();
+				let mut status_update: Option<String> = None;
+				self.with_active_mode_mut(|mode| {
+					if let Mode::PeerPermissions(state) = mode {
+						match state.build_permissions() {
+							Ok(permissions) => {
+								let peer_id = state.peer_id.clone();
+								state.saving = true;
+								state.error = None;
+								status_update =
+									Some(format!("Saving permissions for {}...", peer_id));
+								command = Command::perform(
+									set_permissions(peer.clone(), peer_id.clone(), permissions),
+									|(peer_id, result)| GuiMessage::PeerPermissionsSaved {
+										peer_id,
+										result,
+									},
+								);
+							}
+							Err(err) => {
+								state.error = Some(err.clone());
+								status_update =
+									Some(format!("Failed to prepare permissions: {}", err));
+							}
+						}
+					}
+				});
+				if let Some(status) = status_update {
+					self.status = status;
+				}
+				return command;
+				Command::none()
+			}
+			GuiMessage::PeerPermissionsSaved { peer_id, result } => {
+				self.with_active_mode_mut(|mode| {
+					if let Mode::PeerPermissions(state) = mode {
+						if state.peer_id == peer_id {
+							state.saving = false;
+							match result.clone() {
+								Ok(perms) => {
+									*state = PeerPermissionsState::from_permissions(
+										peer_id.clone(),
+										perms,
+									);
+								}
+								Err(err) => {
+									state.error = Some(err.clone());
+								}
+							}
+						}
+					}
+				});
+				Command::none()
+			}
+			GuiMessage::AccessRequestRequested(peer_id) => {
+				self.status = format!("Prepare access request for {}...", peer_id);
+				self.selected_peer_id = Some(peer_id.clone());
+				self.set_active_tab_mode(Mode::AccessRequest(AccessRequestState::new(
+					peer_id,
+				)));
+				Command::none()
+			}
+			GuiMessage::AccessRequestOwnerToggled(value) => {
+				if let Mode::AccessRequest(state) = &mut self.mode {
 					state.owner = value;
 					state.error = None;
 				}
 				Command::none()
 			}
-			GuiMessage::PeerPermissionsFolderPathChanged { index, path } => {
-				if let Mode::PeerPermissions(state) = &mut self.mode {
+			GuiMessage::AccessRequestMergeToggled(value) => {
+				if let Mode::AccessRequest(state) = &mut self.mode {
+					state.merge = value;
+					state.error = None;
+				}
+				Command::none()
+			}
+			GuiMessage::AccessRequestFolderPathChanged { index, path } => {
+				if let Mode::AccessRequest(state) = &mut self.mode {
 					if let Some(folder) = state.folders.get_mut(index) {
 						folder.path = path;
 					}
@@ -1340,8 +1643,8 @@ impl Application for GuiApp {
 				}
 				Command::none()
 			}
-			GuiMessage::PeerPermissionsFolderReadToggled { index, value } => {
-				if let Mode::PeerPermissions(state) = &mut self.mode {
+			GuiMessage::AccessRequestFolderReadToggled { index, value } => {
+				if let Mode::AccessRequest(state) = &mut self.mode {
 					if let Some(folder) = state.folders.get_mut(index) {
 						folder.read = value;
 					}
@@ -1349,8 +1652,8 @@ impl Application for GuiApp {
 				}
 				Command::none()
 			}
-			GuiMessage::PeerPermissionsFolderWriteToggled { index, value } => {
-				if let Mode::PeerPermissions(state) = &mut self.mode {
+			GuiMessage::AccessRequestFolderWriteToggled { index, value } => {
+				if let Mode::AccessRequest(state) = &mut self.mode {
 					if let Some(folder) = state.folders.get_mut(index) {
 						folder.write = value;
 					}
@@ -1358,8 +1661,8 @@ impl Application for GuiApp {
 				}
 				Command::none()
 			}
-			GuiMessage::PeerPermissionsFolderRemoved(index) => {
-				if let Mode::PeerPermissions(state) = &mut self.mode {
+			GuiMessage::AccessRequestFolderRemoved(index) => {
+				if let Mode::AccessRequest(state) = &mut self.mode {
 					if index < state.folders.len() {
 						state.folders.remove(index);
 					}
@@ -1367,8 +1670,8 @@ impl Application for GuiApp {
 				}
 				Command::none()
 			}
-			GuiMessage::PeerPermissionsAddFolder => {
-				if let Mode::PeerPermissions(state) = &mut self.mode {
+			GuiMessage::AccessRequestAddFolder => {
+				if let Mode::AccessRequest(state) = &mut self.mode {
 					state.folders.push(EditableFolderPermission {
 						path: String::from("/"),
 						read: true,
@@ -1378,18 +1681,19 @@ impl Application for GuiApp {
 				}
 				Command::none()
 			}
-			GuiMessage::PeerPermissionsSave => {
-				if let Mode::PeerPermissions(state) = &mut self.mode {
+			GuiMessage::AccessRequestSubmitted => {
+				if let Mode::AccessRequest(state) = &mut self.mode {
 					match state.build_permissions() {
 						Ok(permissions) => {
 							let peer_id = state.peer_id.clone();
+							let merge = state.merge;
 							state.saving = true;
 							state.error = None;
-							self.status = format!("Saving permissions for {}...", peer_id);
+							self.status = format!("Requesting access from {}...", peer_id);
 							let peer = self.peer.clone();
 							return Command::perform(
-								set_permissions(peer, peer_id.clone(), permissions),
-								|(peer_id, result)| GuiMessage::PeerPermissionsSaved {
+								request_permissions(peer, peer_id.clone(), merge, permissions),
+								|(peer_id, result)| GuiMessage::AccessRequestCompleted {
 									peer_id,
 									result,
 								},
@@ -1403,20 +1707,19 @@ impl Application for GuiApp {
 				}
 				Command::none()
 			}
-			GuiMessage::PeerPermissionsSaved { peer_id, result } => {
-				if let Mode::PeerPermissions(state) = &mut self.mode {
+			GuiMessage::AccessRequestCompleted { peer_id, result } => {
+				if let Mode::AccessRequest(state) = &mut self.mode {
 					if state.peer_id == peer_id {
 						state.saving = false;
 						match result {
-							Ok(perms) => {
-								*state =
-									PeerPermissionsState::from_permissions(peer_id.clone(), perms);
-								self.status = format!("Permissions updated for {}", peer_id);
+							Ok(permissions) => {
+								state.apply_permissions(&permissions);
+								self.status = format!("Access updated on {}", peer_id);
 							}
 							Err(err) => {
 								state.error = Some(err.clone());
 								self.status =
-									format!("Failed to save permissions for {}: {}", peer_id, err);
+									format!("Failed to update permissions on {}: {}", peer_id, err);
 							}
 						}
 					}
@@ -2847,6 +3150,7 @@ impl GuiApp {
 			Mode::Peers => self.view_peers(),
 			Mode::PeerActions { peer_id } => self.view_peer_actions(peer_id),
 			Mode::PeerPermissions(state) => self.view_peer_permissions(state),
+			Mode::AccessRequest(state) => self.view_access_request(state),
 			Mode::PeerCpus(state) => self.view_peer_cpus(state),
 			Mode::StorageUsage(state) => self.view_storage_usage(state),
 			Mode::PeerInterfaces(state) => self.view_peer_interfaces(state),
@@ -3054,6 +3358,10 @@ impl GuiApp {
 						.on_press(GuiMessage::PeerPermissionsRequested(peer.id.clone())),
 				)
 				.push(
+					button(text("Request access"))
+						.on_press(GuiMessage::AccessRequestRequested(peer.id.clone())),
+				)
+				.push(
 					button(text("Update Peer"))
 						.on_press(GuiMessage::UpdatePeerRequested(peer.id.clone())),
 				)
@@ -3146,6 +3454,84 @@ impl GuiApp {
 			save_button = save_button.on_press(GuiMessage::PeerPermissionsSave);
 		}
 		controls = controls.push(save_button);
+		controls = controls.push(
+			button(text("Back to actions"))
+				.on_press(GuiMessage::PeerActionsRequested(state.peer_id.clone())),
+		);
+		layout = layout.push(controls);
+		layout.into()
+	}
+
+	fn view_access_request(&self, state: &AccessRequestState) -> Element<'_, GuiMessage> {
+		let mut layout = iced::widget::Column::new().spacing(12);
+		layout = layout.push(text(format!("Request access from {}", state.peer_id)).size(24));
+		if let Some(err) = &state.error {
+			layout = layout.push(text(format!("Error: {}", err)).size(14));
+		}
+		let owner_toggle = checkbox("Request owner access (full control)", state.owner)
+			.on_toggle(GuiMessage::AccessRequestOwnerToggled);
+		let merge_toggle = checkbox("Merge with existing permissions on peer", state.merge)
+			.on_toggle(GuiMessage::AccessRequestMergeToggled);
+		layout = layout.push(owner_toggle);
+		layout = layout.push(merge_toggle);
+		let saving = state.saving;
+		let mut folders_column = iced::widget::Column::new().spacing(8);
+		if state.folders.is_empty() {
+			folders_column = folders_column.push(text("No folder permissions requested.").size(14));
+		} else {
+			for (idx, folder) in state.folders.iter().enumerate() {
+				let path_input = text_input("Folder path on peer", &folder.path)
+					.padding(8)
+					.size(16)
+					.on_input({
+						let index = idx;
+						move |value| GuiMessage::AccessRequestFolderPathChanged {
+							index,
+							path: value,
+						}
+					});
+				let read_toggle = checkbox("Read", folder.read).on_toggle({
+					let index = idx;
+					move |value| GuiMessage::AccessRequestFolderReadToggled { index, value }
+				});
+				let write_toggle = checkbox("Write", folder.write).on_toggle({
+					let index = idx;
+					move |value| GuiMessage::AccessRequestFolderWriteToggled { index, value }
+				});
+				let mut remove_button = button(text("Remove"));
+				if !saving {
+					let index = idx;
+					remove_button =
+						remove_button.on_press(GuiMessage::AccessRequestFolderRemoved(index));
+				}
+				let toggles = iced::widget::Row::new()
+					.spacing(12)
+					.push(read_toggle)
+					.push(write_toggle)
+					.push(remove_button);
+				let card = container(
+					iced::widget::Column::new()
+						.spacing(8)
+						.push(path_input)
+						.push(toggles),
+				)
+				.padding(8)
+				.style(theme::Container::Box);
+				folders_column = folders_column.push(card);
+			}
+		}
+		layout = layout.push(scrollable(folders_column).height(Length::Fill));
+		let mut controls = iced::widget::Row::new().spacing(12);
+		let mut add_button = button(text("Add folder"));
+		if !saving {
+			add_button = add_button.on_press(GuiMessage::AccessRequestAddFolder);
+		}
+		controls = controls.push(add_button);
+		let mut request_button = button(text(if saving { "Requesting..." } else { "Send request" }));
+		if !saving {
+			request_button = request_button.on_press(GuiMessage::AccessRequestSubmitted);
+		}
+		controls = controls.push(request_button);
 		controls = controls.push(
 			button(text("Back to actions"))
 				.on_press(GuiMessage::PeerActionsRequested(state.peer_id.clone())),

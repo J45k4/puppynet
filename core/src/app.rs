@@ -1,6 +1,6 @@
 use crate::p2p::{
 	AuthMethod, CpuInfo, DirEntry, DiskInfo, FileWriteAck, InterfaceInfo, PeerReq, PeerRes,
-	Thumbnail,
+	PermissionGrant, Thumbnail, grant_from_permission, permission_from_grant,
 };
 use crate::types::FileChunk;
 use crate::updater::{self, UpdateProgress, UpdateResult};
@@ -83,6 +83,13 @@ pub enum Command {
 	ListPermissions {
 		peer: PeerId,
 		tx: oneshot::Sender<Result<Vec<Permission>>>,
+	},
+	GrantPermissions {
+		peer: PeerId,
+		username: String,
+		permissions: Vec<PermissionGrant>,
+		merge: bool,
+		tx: oneshot::Sender<Result<AccessGrantAck>>,
 	},
 	ReadFile(ReadFileCmd),
 	Scan {
@@ -253,6 +260,12 @@ trait ResponseDecoder: Sized + Send + 'static {
 	fn decode(response: PeerRes) -> anyhow::Result<Self>;
 }
 
+#[derive(Debug, Clone)]
+struct AccessGrantAck {
+	username: String,
+	permissions: Vec<PermissionGrant>,
+}
+
 impl ResponseDecoder for Vec<DirEntry> {
 	fn decode(response: PeerRes) -> anyhow::Result<Self> {
 		match response {
@@ -337,6 +350,21 @@ impl ResponseDecoder for UpdateResult {
 				success: false,
 				message: err,
 				new_version: None,
+			}),
+			other => Err(anyhow!("unexpected response: {:?}", other)),
+		}
+	}
+}
+
+impl ResponseDecoder for AccessGrantAck {
+	fn decode(response: PeerRes) -> anyhow::Result<Self> {
+		match response {
+			PeerRes::AccessGranted {
+				username,
+				permissions,
+			} => Ok(Self {
+				username,
+				permissions,
 			}),
 			other => Err(anyhow!("unexpected response: {:?}", other)),
 		}
@@ -865,7 +893,62 @@ impl App {
 					expires_at: None,
 				}
 			}
-			PeerReq::GrantAccess { .. } => PeerRes::Error("GrantAccess not implemented".into()),
+			PeerReq::GrantAccess {
+				username,
+				permissions,
+				merge,
+			} => {
+				let mut mapped: Vec<Permission> = permissions
+					.iter()
+					.filter_map(permission_from_grant)
+					.collect();
+				if mapped.is_empty() {
+					return Ok(PeerRes::Error(String::from(
+						"No permissions to grant",
+					)));
+				}
+				let mut state = match self.state.lock() {
+					Ok(state) => state,
+					Err(err) => {
+						log::error!(
+							"state lock poisoned while granting access to {}: {}",
+							peer,
+							err
+						);
+						return Ok(PeerRes::Error("State unavailable".into()));
+					}
+				};
+				if merge {
+					let mut existing = state.permissions_granted_to_peer(&peer);
+					existing.extend(mapped);
+					mapped = existing;
+				}
+				let me = state.me;
+				state.set_peer_permissions(peer, mapped.clone());
+				drop(state);
+				match self.db.lock() {
+					Ok(mut conn) => {
+						if let Err(err) =
+							crate::db::save_peer_permissions(&mut *conn, &me, &peer, &mapped)
+						{
+							log::error!("failed to persist granted permissions: {}", err);
+							return Ok(PeerRes::Error("Failed to save permissions".into()));
+						}
+					}
+					Err(err) => {
+						log::error!(
+							"db lock poisoned while granting access to {}: {}",
+							peer,
+							err
+						);
+						return Ok(PeerRes::Error("Database unavailable".into()));
+					}
+				}
+				PeerRes::AccessGranted {
+					username,
+					permissions,
+				}
+			}
 			PeerReq::ListUsers => PeerRes::Error("ListUsers not implemented".into()),
 			PeerReq::ListTokens { .. } => PeerRes::Error("ListTokens not implemented".into()),
 			PeerReq::RevokeToken { .. } => PeerRes::Error("RevokeToken not implemented".into()),
@@ -1585,6 +1668,28 @@ impl App {
 					prev.fail(anyhow!("pending ListPermissions request was replaced"));
 				}
 			}
+			Command::GrantPermissions {
+				peer,
+				username,
+				permissions,
+				merge,
+				tx,
+			} => {
+				let request_id = self.swarm.behaviour_mut().puppynet.send_request(
+					&peer,
+					PeerReq::GrantAccess {
+						username,
+						permissions,
+						merge,
+					},
+				);
+				if let Some(prev) = self
+					.pending_requests
+					.insert(request_id, Pending::<AccessGrantAck>::new(tx))
+				{
+					prev.fail(anyhow!("pending GrantPermissions request was replaced"));
+				}
+			}
 			Command::ReadFile(req) => {
 				if self.state.lock().unwrap().me == req.peer_id {
 					let chunk = read_file(Path::new(&req.path), req.offset, req.length).await;
@@ -1910,8 +2015,53 @@ impl PuppyNet {
 			.state
 			.lock()
 			.map_err(|_| anyhow!("state lock poisoned"))?;
-		state.set_peer_permissions(peer, permissions);
-		state.save_changes()
+		state.set_peer_permissions(peer, permissions.clone());
+		let me = state.me;
+		drop(state);
+		let mut conn = self.db.lock().map_err(|_| anyhow!("db lock poisoned"))?;
+		crate::db::save_peer_permissions(&mut *conn, &me, &peer, &permissions)
+	}
+
+	pub async fn request_permissions(
+		&self,
+		peer: PeerId,
+		permissions: Vec<Permission>,
+		merge: bool,
+	) -> anyhow::Result<Vec<Permission>> {
+		let grants: Vec<PermissionGrant> = permissions
+			.iter()
+			.filter_map(grant_from_permission)
+			.collect();
+		if grants.is_empty() {
+			bail!("no permissions to request");
+		}
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::GrantPermissions {
+				peer,
+				username: String::from("gui"),
+				permissions: grants,
+				merge,
+				tx,
+			})
+			.map_err(|e| anyhow!("failed to send GrantPermissions command: {e}"))?;
+		let ack = rx
+			.await
+			.map_err(|e| anyhow!("GrantPermissions response channel closed: {e}"))??;
+		Ok(ack
+			.permissions
+			.into_iter()
+			.filter_map(|grant| permission_from_grant(&grant))
+			.collect())
+	}
+
+	pub fn request_permissions_blocking(
+		&self,
+		peer: PeerId,
+		permissions: Vec<Permission>,
+		merge: bool,
+	) -> anyhow::Result<Vec<Permission>> {
+		block_on(self.request_permissions(peer, permissions, merge))
 	}
 
 	pub fn state(&self) -> Arc<Mutex<State>> {
