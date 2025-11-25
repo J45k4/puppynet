@@ -146,6 +146,7 @@ struct PeerPermissionsState {
 	peer_id: String,
 	owner: bool,
 	folders: Vec<EditableFolderPermission>,
+	shared_roots: Vec<EditableFolderPermission>,
 	loading: bool,
 	saving: bool,
 	error: Option<String>,
@@ -169,19 +170,24 @@ struct EditableFolderPermission {
 }
 
 impl PeerPermissionsState {
-	fn loading(peer_id: String) -> Self {
+	fn loading(peer_id: String, shared_roots: Vec<EditableFolderPermission>) -> Self {
 		Self {
 			peer_id,
 			owner: false,
 			folders: Vec::new(),
+			shared_roots,
 			loading: true,
 			saving: false,
 			error: None,
 		}
 	}
 
-	fn from_permissions(peer_id: String, permissions: Vec<Permission>) -> Self {
-		let mut state = Self::loading(peer_id);
+	fn from_permissions(
+		peer_id: String,
+		permissions: Vec<Permission>,
+		shared_roots: Vec<EditableFolderPermission>,
+	) -> Self {
+		let mut state = Self::loading(peer_id, shared_roots);
 		state.loading = false;
 		for permission in permissions {
 			match permission.rule() {
@@ -884,6 +890,18 @@ async fn list_disks(
 	(peer_id, map_result(result))
 }
 
+fn shared_folder_suggestions(peer: &Arc<PuppyNet>) -> Vec<EditableFolderPermission> {
+	peer.state()
+		.lock()
+		.map(|s| {
+			s.shared_folders
+				.iter()
+				.map(EditableFolderPermission::from_rule)
+				.collect()
+		})
+		.unwrap_or_default()
+}
+
 async fn set_permissions(
 	peer: Arc<PuppyNet>,
 	peer_id: String,
@@ -1086,6 +1104,11 @@ pub enum GuiMessage {
 	},
 	PeerPermissionsFolderRemoved(usize),
 	PeerPermissionsAddFolder,
+	PeerPermissionsAddSharedFolder {
+		path: String,
+		read: bool,
+		write: bool,
+	},
 	PeerPermissionsSave,
 	PeerPermissionsSaved {
 		peer_id: String,
@@ -1418,8 +1441,10 @@ impl Application for GuiApp {
 			GuiMessage::PeerPermissionsRequested(peer_id) => {
 				self.status = format!("Loading permissions for {}...", peer_id);
 				self.selected_peer_id = Some(peer_id.clone());
+				let shared_roots = shared_folder_suggestions(&self.peer);
 				self.set_active_tab_mode(Mode::PeerPermissions(PeerPermissionsState::loading(
 					peer_id.clone(),
+					shared_roots,
 				)));
 				let peer = self.peer.clone();
 				let local_id = self
@@ -1459,11 +1484,13 @@ impl Application for GuiApp {
 				let mut apply_to_mode = |mode: &mut Mode| {
 					if let Mode::PeerPermissions(state) = mode {
 						if state.peer_id == peer_id {
+							let shared_roots = state.shared_roots.clone();
 							match permissions.clone() {
 								Ok(perms) => {
 									*state = PeerPermissionsState::from_permissions(
 										peer_id.clone(),
 										perms,
+										shared_roots,
 									);
 									self.status =
 										format!("Permissions loaded for {}", peer_id);
@@ -1556,6 +1583,29 @@ impl Application for GuiApp {
 				});
 				Command::none()
 			}
+			GuiMessage::PeerPermissionsAddSharedFolder { path, read, write } => {
+				let normalized = normalize_path(&path);
+				self.with_active_mode_mut(|mode| {
+					if let Mode::PeerPermissions(state) = mode {
+						if let Some(existing) = state
+							.folders
+							.iter_mut()
+							.find(|f| normalize_path(&f.path) == normalized)
+						{
+							existing.read |= read;
+							existing.write |= write;
+						} else {
+							state.folders.push(EditableFolderPermission {
+								path: normalized.clone(),
+								read,
+								write,
+							});
+						}
+						state.error = None;
+					}
+				});
+				Command::none()
+			}
 			GuiMessage::PeerPermissionsSave => {
 				let mut command = Command::none();
 				let peer = self.peer.clone();
@@ -1589,18 +1639,19 @@ impl Application for GuiApp {
 					self.status = status;
 				}
 				return command;
-				Command::none()
 			}
 			GuiMessage::PeerPermissionsSaved { peer_id, result } => {
 				self.with_active_mode_mut(|mode| {
 					if let Mode::PeerPermissions(state) = mode {
 						if state.peer_id == peer_id {
 							state.saving = false;
+							let shared_roots = state.shared_roots.clone();
 							match result.clone() {
 								Ok(perms) => {
 									*state = PeerPermissionsState::from_permissions(
 										peer_id.clone(),
 										perms,
+										shared_roots,
 									);
 								}
 								Err(err) => {
@@ -3397,6 +3448,30 @@ impl GuiApp {
 			.on_toggle(GuiMessage::PeerPermissionsOwnerToggled);
 		layout = layout.push(owner_toggle);
 		let saving = state.saving;
+		if !state.shared_roots.is_empty() {
+			let mut shared = iced::widget::Column::new().spacing(6);
+			shared = shared.push(text("Shared folders on this node (quick add)").size(16));
+			for folder in &state.shared_roots {
+				let access = if folder.write { "read/write" } else { "read-only" };
+				let mut add_btn = button(text("Add")).padding(6);
+				if !saving {
+					let path = folder.path.clone();
+					let read = folder.read;
+					let write = folder.write;
+					add_btn = add_btn.on_press(GuiMessage::PeerPermissionsAddSharedFolder {
+						path,
+						read,
+						write,
+					});
+				}
+				let row = iced::widget::Row::new()
+					.spacing(12)
+					.push(text(format!("{} ({})", folder.path, access)).size(14))
+					.push(add_btn);
+				shared = shared.push(container(row).padding(6).style(theme::Container::Box));
+			}
+			layout = layout.push(shared);
+		}
 		let mut folders_column = iced::widget::Column::new().spacing(8);
 		if state.folders.is_empty() {
 			folders_column = folders_column.push(text("No folder permissions granted.").size(14));

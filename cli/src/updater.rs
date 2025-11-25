@@ -3,9 +3,6 @@
 use crate::utility::get_version;
 use puppynet_core::updater;
 
-// Re-export the public key and verify_signature for backwards compatibility
-pub use puppynet_core::updater::{PUBLIC_KEY, verify_signature};
-
 /// Perform an update to the specified version (or latest if None).
 /// This is a thin wrapper around the core updater that provides the current version.
 pub async fn update(version: Option<&str>) -> anyhow::Result<()> {
