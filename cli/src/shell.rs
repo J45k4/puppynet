@@ -22,7 +22,6 @@ use ratatui::{
 	style::{Color, Modifier, Style},
 	widgets::{
 		Block, Borders, List, ListItem, ListState, Paragraph, Wrap,
-		canvas::{Canvas, Line, Points},
 	},
 };
 const LOCAL_LISTEN_MULTIADDR: &str = "/ip4/0.0.0.0:8336";
@@ -34,55 +33,6 @@ enum Mode {
 	PeerCpus(PeerCpuView),
 	FileBrowser(FileBrowserView),
 	CreateUser(CreateUserForm),
-	PeersGraph(GraphView),
-}
-
-struct GraphView {
-	peers: Vec<PeerNode>,
-	selected: usize,
-}
-
-struct PeerNode {
-	id: String,
-	// Precomputed polar angle for layout (radians)
-	angle: f64,
-}
-
-impl GraphView {
-	fn new() -> Self {
-		Self {
-			peers: Vec::new(),
-			selected: 0,
-		}
-	}
-	fn next(&mut self) {
-		if !self.peers.is_empty() {
-			self.selected = (self.selected + 1) % self.peers.len();
-		}
-	}
-	fn previous(&mut self) {
-		if !self.peers.is_empty() {
-			if self.selected == 0 {
-				self.selected = self.peers.len() - 1;
-			} else {
-				self.selected -= 1;
-			}
-		}
-	}
-	fn set_peers(&mut self, peer_ids: &[String]) {
-		let count = peer_ids.len().max(1);
-		self.peers = peer_ids
-			.iter()
-			.enumerate()
-			.map(|(i, id)| PeerNode {
-				id: id.clone(),
-				angle: (i as f64) * (std::f64::consts::TAU / count as f64),
-			})
-			.collect();
-		if self.selected >= self.peers.len() {
-			self.selected = 0;
-		}
-	}
 }
 
 struct PeersView {
@@ -439,7 +389,6 @@ impl ShellApp {
 			should_quit: false,
 			menu_items: vec![
 				"peers",
-				"peers graph",
 				"create token",
 				"create user",
 				"quit",
@@ -499,11 +448,6 @@ impl ShellApp {
 					"create user" => {
 						self.mode = Mode::CreateUser(CreateUserForm::new());
 						self.status_line = "Enter username/password, Tab to switch field, Enter to submit, Esc to cancel".into();
-					}
-					"peers graph" => {
-						self.mode = Mode::PeersGraph(GraphView::new());
-						self.status_line =
-							"Graph view. Auto-refresh every 5s. ←/→ select, Esc back".into();
 					}
 					_ => {}
 				}
@@ -665,19 +609,6 @@ impl ShellApp {
 							}
 						}
 					}
-					KeyCode::Char('q') => {
-						self.should_quit = true;
-					}
-					_ => {}
-				},
-				Mode::PeersGraph(graph) => match key.code {
-					KeyCode::Esc => {
-						self.mode = Mode::Menu;
-						self.status_line = "Back to menu".into();
-					}
-					KeyCode::Left => graph.previous(),
-					KeyCode::Right => graph.next(),
-					KeyCode::Char('r') => {}
 					KeyCode::Char('q') => {
 						self.should_quit = true;
 					}
@@ -1147,76 +1078,6 @@ impl ShellApp {
 					.block(Block::default().borders(Borders::ALL).title("Status"));
 				f.render_widget(status, chunks[2]);
 			}
-			Mode::PeersGraph(graph) => {
-				let chunks = Layout::default()
-					.direction(Direction::Vertical)
-					.constraints([
-						Constraint::Length(3), // title
-						Constraint::Min(5),    // canvas
-						Constraint::Length(1), // status
-					])
-					.split(main_area);
-
-				let header = Paragraph::new("Peers Graph")
-					.style(Style::default().fg(Color::Blue))
-					.block(Block::default().borders(Borders::ALL).title("Header"));
-				f.render_widget(header, chunks[0]);
-
-				let peers_clone = graph
-					.peers
-					.iter()
-					.enumerate()
-					.map(|(i, n)| (i, n.id.clone(), n.angle))
-					.collect::<Vec<_>>();
-				let selected = graph.selected;
-				let canvas = Canvas::default()
-					.block(
-						Block::default()
-							.borders(Borders::ALL)
-							.title("Graph (r=refresh, ←/→ select, Esc back)"),
-					)
-					.x_bounds([-1.3, 1.3])
-					.y_bounds([-1.1, 1.1])
-					.paint(move |ctx| {
-						for (i1, _id1, a1) in &peers_clone {
-							let x1 = a1.cos();
-							let y1 = a1.sin();
-							for (i2, _id2, a2) in &peers_clone {
-								if i1 < i2 {
-									let x2 = a2.cos();
-									let y2 = a2.sin();
-									ctx.draw(&Line {
-										x1,
-										y1,
-										x2,
-										y2,
-										color: Color::DarkGray,
-									});
-								}
-							}
-						}
-						for (i, id, a) in &peers_clone {
-							let x = a.cos();
-							let y = a.sin();
-							let color = if *i == selected {
-								Color::Cyan
-							} else {
-								Color::White
-							};
-							ctx.draw(&Points {
-								coords: &[(x, y)],
-								color,
-							});
-							let label: String = id.chars().take(5).collect();
-							ctx.print(x * 1.1, y * 1.1, label);
-						}
-					});
-				f.render_widget(canvas, chunks[1]);
-
-				let status = Paragraph::new(self.status_line.as_str())
-					.block(Block::default().borders(Borders::ALL).title("Status"));
-				f.render_widget(status, chunks[2]);
-			}
 		}
 
 		render_peer_info(f, info_area, self);
@@ -1258,12 +1119,6 @@ impl ShellApp {
 							"Auto-refreshed peer actions ({} peers)",
 							state.view.peers.len()
 						);
-					}
-					Mode::PeersGraph(graph) => {
-						let ids: Vec<String> = aggregated.iter().map(|p| p.id.clone()).collect();
-						graph.set_peers(&ids);
-						self.status_line =
-							format!("Auto-refreshed graph ({} nodes)", graph.peers.len());
 					}
 					Mode::PeerCpus(view) => {
 						if view.last_refresh.elapsed() >= self.refresh_interval {
@@ -1479,23 +1334,6 @@ impl ShellApp {
 					}
 				}
 				("CPU Info".into(), lines)
-			}
-			Mode::PeersGraph(graph) if !graph.peers.is_empty() => {
-				let node = &graph.peers[graph.selected];
-				let mut lines = Vec::new();
-				lines.push(format!("Peer ID: {}", node.id));
-				let addresses = self.gather_known_addresses(&node.id);
-				match addresses.len() {
-					0 => lines.push("Dial Address: unknown".into()),
-					1 => lines.push(format!("Dial Address: {}", addresses[0])),
-					_ => {
-						lines.push("Dial Addresses:".into());
-						for (idx, addr) in addresses.iter().enumerate() {
-							lines.push(format!("{}: {}", idx + 1, addr));
-						}
-					}
-				}
-				("Graph Selection".into(), lines)
 			}
 			_ => {
 				if let Some(state) = &self.latest_state {

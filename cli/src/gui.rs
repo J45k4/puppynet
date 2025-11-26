@@ -88,7 +88,6 @@ fn save_thumbnail_to_cache(hash: &str, data: &[u8]) -> bool {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum MenuItem {
 	Peers,
-	PeersGraph,
 	Users,
 	FileSearch,
 	StorageUsage,
@@ -96,9 +95,8 @@ pub enum MenuItem {
 	Quit,
 }
 
-const MENU_ITEMS: [MenuItem; 7] = [
+const MENU_ITEMS: [MenuItem; 6] = [
 	MenuItem::Peers,
-	MenuItem::PeersGraph,
 	MenuItem::Users,
 	MenuItem::FileSearch,
 	MenuItem::StorageUsage,
@@ -110,7 +108,6 @@ impl MenuItem {
 	fn label(self) -> &'static str {
 		match self {
 			MenuItem::Peers => "Peers",
-			MenuItem::PeersGraph => "Peers Graph",
 			MenuItem::Users => "Users",
 			MenuItem::FileSearch => "Files",
 			MenuItem::StorageUsage => "Storage Usage",
@@ -441,62 +438,6 @@ impl FileViewerState {
 }
 
 #[derive(Debug, Clone)]
-struct GraphView {
-	nodes: Vec<PeerNode>,
-	selected: usize,
-}
-
-impl GraphView {
-	fn new() -> Self {
-		Self {
-			nodes: Vec::new(),
-			selected: 0,
-		}
-	}
-
-	fn set_peers(&mut self, peers: &[PeerRow]) {
-		let count = peers.len().max(1);
-		self.nodes = peers
-			.iter()
-			.enumerate()
-			.map(|(idx, peer)| PeerNode {
-				id: peer.id.clone(),
-				angle: (idx as f32) * (std::f32::consts::TAU / count as f32),
-			})
-			.collect();
-		if self.selected >= self.nodes.len() {
-			self.selected = 0;
-		}
-	}
-
-	fn next(&mut self) {
-		if !self.nodes.is_empty() {
-			self.selected = (self.selected + 1) % self.nodes.len();
-		}
-	}
-
-	fn previous(&mut self) {
-		if !self.nodes.is_empty() {
-			if self.selected == 0 {
-				self.selected = self.nodes.len() - 1;
-			} else {
-				self.selected -= 1;
-			}
-		}
-	}
-
-	fn selected_id(&self) -> Option<&str> {
-		self.nodes.get(self.selected).map(|node| node.id.as_str())
-	}
-}
-
-#[derive(Debug, Clone)]
-struct PeerNode {
-	id: String,
-	angle: f32,
-}
-
-#[derive(Debug, Clone)]
 struct CreateUserForm {
 	username: String,
 	password: String,
@@ -605,11 +546,6 @@ impl Tab {
 		Self::new(id, "Storage".to_string(), Mode::StorageUsage(state), MenuItem::StorageUsage)
 	}
 
-	/// Create a new tab with Peers graph view
-	fn peers_graph(id: usize) -> Self {
-		Self::new(id, "Graph".to_string(), Mode::PeersGraph, MenuItem::PeersGraph)
-	}
-
 	/// Create a new tab with Scan results view
 	fn scan_results(id: usize, state: ScanResultsState) -> Self {
 		Self::new(id, "Scan Results".to_string(), Mode::ScanResults(state), MenuItem::ScanResults)
@@ -627,7 +563,6 @@ impl Tab {
 			Mode::PeerInterfaces(_) => "Net",
 			Mode::FileBrowser(_) => "Files",
 			Mode::FileViewer(_) => "View",
-			Mode::PeersGraph => "Graph",
 			Mode::Users(_) => "Users",
 			Mode::CreateUser(_) => "User",
 			Mode::FileSearch(_) => "Search",
@@ -669,7 +604,6 @@ impl Tab {
 				.last()
 				.unwrap_or("File")
 				.to_string(),
-			Mode::PeersGraph => "Graph".to_string(),
 			Mode::Users(_) => "Users".to_string(),
 			Mode::CreateUser(_) => "Create User".to_string(),
 			Mode::FileSearch(_) => "Files".to_string(),
@@ -1056,7 +990,6 @@ pub struct GuiApp {
 	mode: Mode,
 	peers: Vec<PeerRow>,
 	selected_peer_id: Option<String>,
-	graph: GraphView,
 	status: String,
 	app_title: String,
 	scan_state: ScanState,
@@ -1118,7 +1051,6 @@ enum Mode {
 	PeerInterfaces(PeerInterfacesState),
 	FileBrowser(FileBrowserState),
 	FileViewer(FileViewerState),
-	PeersGraph,
 	Users(UsersState),
 	CreateUser(CreateUserForm),
 	FileSearch(FileSearchState),
@@ -1224,8 +1156,6 @@ pub enum GuiMessage {
 	},
 	FileReadMore,
 	FileViewerBack,
-	GraphNext,
-	GraphPrev,
 	UsernameChanged(String),
 	PasswordChanged(String),
 	CreateUserSubmit,
@@ -1311,8 +1241,6 @@ impl Application for GuiApp {
 			.as_ref()
 			.map(aggregate_peers)
 			.unwrap_or_default();
-		let mut graph = GraphView::new();
-		graph.set_peers(&peers);
 		let app = GuiApp {
 			peer,
 			latest_state: latest_state.clone(),
@@ -1321,7 +1249,6 @@ impl Application for GuiApp {
 			mode: Mode::Peers,
 			peers,
 			selected_peer_id: None,
-			graph,
 			status: String::from("Ready"),
 			app_title: flags,
 			scan_state: ScanState::new(),
@@ -1376,24 +1303,6 @@ impl Application for GuiApp {
 							String::from("Showing peers — none discovered")
 						} else {
 							format!("Showing peers — {} total", self.peers.len())
-						};
-					}
-					MenuItem::PeersGraph => {
-						self.menu = item;
-						self.refresh_from_state();
-						self.selected_peer_id = self.graph.selected_id().map(|id| id.to_string());
-						// Update active tab's mode
-						if let Some(active_id) = self.active_tab_id {
-							if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == active_id) {
-								tab.mode = Mode::PeersGraph;
-								tab.menu = item;
-								tab.update_title();
-							}
-						}
-						self.mode = Mode::PeersGraph;
-						self.status = match self.selected_peer_id.as_deref() {
-							Some(id) => format!("Graph overview — focused on {}", id),
-							None => String::from("Graph overview — no peers"),
 						};
 					}
 					MenuItem::Users => {
@@ -2375,22 +2284,6 @@ impl Application for GuiApp {
 				}
 				Command::none()
 			}
-			GuiMessage::GraphNext => {
-				self.graph.next();
-				if let Some(id) = self.graph.selected_id() {
-					self.selected_peer_id = Some(id.to_string());
-					self.status = format!("Graph focus: {}", id);
-				}
-				Command::none()
-			}
-			GuiMessage::GraphPrev => {
-				self.graph.previous();
-				if let Some(id) = self.graph.selected_id() {
-					self.selected_peer_id = Some(id.to_string());
-					self.status = format!("Graph focus: {}", id);
-				}
-				Command::none()
-			}
 			GuiMessage::UsernameChanged(value) => {
 				self.with_active_mode_mut(|mode| {
 					if let Mode::CreateUser(form) = mode {
@@ -3344,7 +3237,6 @@ impl GuiApp {
 			Mode::PeerInterfaces(state) => self.view_peer_interfaces(state),
 			Mode::FileBrowser(state) => self.view_file_browser(state),
 			Mode::FileViewer(state) => self.view_file_viewer(state),
-			Mode::PeersGraph => self.view_graph(),
 			Mode::Users(state) => self.view_users(state),
 			Mode::CreateUser(form) => self.view_create_user(form),
 			Mode::FileSearch(state) => self.view_file_search(state),
@@ -3450,15 +3342,6 @@ impl GuiApp {
 			if let Some(peer_id) = missing_peer {
 				self.mode = Mode::Peers;
 				self.status = format!("Peer {} not available", peer_id);
-			}
-			self.graph.set_peers(&self.peers);
-			if let Some(idx) = self.selected_peer_id.as_ref().and_then(|selected| {
-				self.graph
-					.nodes
-					.iter()
-					.position(|node| &node.id == selected)
-			}) {
-				self.graph.selected = idx;
 			}
 			self.latest_state = Some(snapshot);
 		} else {
@@ -4057,46 +3940,6 @@ impl GuiApp {
 		controls =
 			controls.push(button(text("Back to browser")).on_press(GuiMessage::FileViewerBack));
 		layout = layout.push(controls);
-		layout.into()
-	}
-
-	fn view_graph(&self) -> Element<'_, GuiMessage> {
-		let mut layout = iced::widget::Column::new().spacing(12);
-		layout = layout.push(text("Peers Graph Overview").size(24));
-		if self.graph.nodes.is_empty() {
-			layout = layout.push(text("Graph is empty.").size(16));
-		} else {
-			if let Some(id) = self.graph.selected_id() {
-				layout = layout.push(text(format!("Selected peer: {}", id)).size(16));
-			}
-			let mut list = iced::widget::Column::new().spacing(4);
-			for node in &self.graph.nodes {
-				let marker = if Some(node.id.as_str()) == self.graph.selected_id() {
-					"▶"
-				} else {
-					""
-				};
-				list = list.push(
-					text(format!(
-						"{} {} (angle {:.2} rad)",
-						marker, node.id, node.angle
-					))
-					.size(14),
-				);
-			}
-			layout = layout.push(scrollable(list).height(Length::Fill));
-			let action_message = self
-				.graph
-				.selected_id()
-				.map(|id| GuiMessage::PeerActionsRequested(id.to_string()))
-				.unwrap_or(GuiMessage::BackToPeers);
-			let controls = iced::widget::Row::new()
-				.spacing(12)
-				.push(button(text("Previous")).on_press(GuiMessage::GraphPrev))
-				.push(button(text("Next")).on_press(GuiMessage::GraphNext))
-				.push(button(text("Open actions")).on_press(action_message));
-			layout = layout.push(controls);
-		}
 		layout.into()
 	}
 
@@ -5549,30 +5392,6 @@ mod tests {
 			assert!(matches!(app.mode, Mode::Peers));
 			assert!(app.peers.iter().any(|row| row.id == new_peer.to_string()));
 			assert!(app.status.contains("Showing peers"));
-			let _ = fs::remove_file(&key_path);
-			clear_keypair_var();
-		});
-	}
-
-	#[test]
-	fn selecting_graph_rebuilds_nodes() {
-		with_runtime(|| {
-			let key_path = temporary_key_path("graph");
-			set_keypair_var(&key_path);
-			let (mut app, _) = GuiApp::new(String::from("Test Title"));
-			let peer_a = PeerId::random();
-			let peer_b = PeerId::random();
-			{
-				let state = app.peer.state();
-				let mut guard = state.lock().expect("state lock");
-				guard.peer_discovered(peer_a, "/ip4/127.0.0.1/tcp/7001".parse().unwrap());
-				guard.peer_discovered(peer_b, "/ip4/127.0.0.1/tcp/7002".parse().unwrap());
-			}
-			app.graph.nodes.clear();
-			let _ = app.update(GuiMessage::MenuSelected(MenuItem::PeersGraph));
-			assert!(matches!(app.mode, Mode::PeersGraph));
-			assert_eq!(app.graph.nodes.len(), 3); // includes local peer
-			assert!(app.status.contains("Graph overview"));
 			let _ = fs::remove_file(&key_path);
 			clear_keypair_var();
 		});
