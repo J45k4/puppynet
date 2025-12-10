@@ -7,11 +7,13 @@ use hyper::body::Buf;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use libp2p::PeerId;
+use mime_guess::from_path;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::str::FromStr;
@@ -205,8 +207,8 @@ fn parse_peer_id(id: &str) -> Result<PeerId, String> {
 fn load_asset(name: &str) -> Option<Cow<'static, [u8]>> {
 	match name {
 		"index.html" => Some(Cow::Borrowed(include_bytes!("../http_assets/index.html"))),
-		"styles.css" => Some(Cow::Borrowed(include_bytes!("../http_assets/styles.css"))),
-		"script.js" => Some(Cow::Borrowed(include_bytes!("../http_assets/script.js"))),
+		"index.css" => Some(Cow::Borrowed(include_bytes!("../http_assets/index.css"))),
+		"index.js" => Some(Cow::Borrowed(include_bytes!("../http_assets/index.js"))),
 		_ => None,
 	}
 }
@@ -219,15 +221,43 @@ fn load_asset(name: &str) -> Option<Cow<'static, [u8]>> {
 	std::fs::read(path).ok().map(Cow::Owned)
 }
 
-fn serve_asset(path: &str, content_type: &str) -> Response<Body> {
-	match load_asset(path) {
-		Some(data) => Response::builder()
-			.status(StatusCode::OK)
-			.header(hyper::header::CONTENT_TYPE, content_type)
-			.body(Body::from(data))
-			.unwrap(),
-		None => json_response(StatusCode::NOT_FOUND, json!({ "error": "not found" })),
+fn load_dist_asset(name: &str) -> Option<Vec<u8>> {
+	if name.contains("..") {
+		return None;
 	}
+	let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+		.join("..")
+		.join("web")
+		.join("dist")
+		.join(name);
+	if path.is_dir() {
+		return None;
+	}
+	fs::read(path).ok()
+}
+
+fn asset_response(path: &str, data: impl Into<Body>) -> Response<Body> {
+	let content_type = from_path(path)
+		.first_or_octet_stream()
+		.essence_str()
+		.to_string();
+	Response::builder()
+		.status(StatusCode::OK)
+		.header(hyper::header::CONTENT_TYPE, content_type)
+		.body(data.into())
+		.unwrap()
+}
+
+fn serve_static_path(path: &str) -> Option<Response<Body>> {
+	let path = if path.is_empty() {
+		"index.html"
+	} else {
+		path
+	};
+	if let Some(data) = load_dist_asset(path) {
+		return Some(asset_response(path, data));
+	}
+	load_asset(path).map(|data| asset_response(path, data))
 }
 
 async fn handle_request(
@@ -242,11 +272,6 @@ async fn handle_request(
 		.collect();
 
 	let response = match (req.method(), segments.as_slice()) {
-		(&Method::GET, []) => serve_asset("index.html", "text/html; charset=utf-8"),
-		(&Method::GET, ["styles.css"]) => serve_asset("styles.css", "text/css; charset=utf-8"),
-		(&Method::GET, ["script.js"]) => {
-			serve_asset("script.js", "application/javascript; charset=utf-8")
-		}
 		(&Method::GET, ["health"]) => Response::new(Body::from("ok")),
 		(&Method::GET, ["users"]) => {
 			match state.puppy.list_users_db() {
@@ -643,6 +668,13 @@ async fn handle_request(
 					StatusCode::NOT_FOUND,
 					json!({ "error": "update not found" }),
 				),
+			}
+		}
+		(&Method::GET, segments) => {
+			let path = segments.join("/");
+			match serve_static_path(&path) {
+				Some(resp) => resp,
+				None => json_response(StatusCode::NOT_FOUND, json!({ "error": "not found" })),
 			}
 		}
 		_ => json_response(StatusCode::NOT_FOUND, json!({ "error": "not found" })),

@@ -1,0 +1,17 @@
+{
+	"name": "puppynet",
+	"module": "index.ts",
+	"type": "module",
+	"private": true,
+	"scripts": {
+		"dev": "bun --port 4222 ./src/index.html",
+		"build": "bun build src/index.html --outdir ../core/http_assets/ --entry-naming '[name].[ext]' --chunk-naming '[name].[ext]' --asset-naming '[name].[ext]'",
+		"watch": "bun --watch --port 4222 ./src/index.html"
+	},
+	"devDependencies": {
+		"@types/bun": "latest"
+	},
+	"peerDependencies": {
+		"typescript": "^5"
+	}
+}
