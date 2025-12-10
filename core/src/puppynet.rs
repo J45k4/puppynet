@@ -226,15 +226,6 @@ impl PuppyNet {
 			.collect())
 	}
 
-	pub fn request_permissions_blocking(
-		&self,
-		peer: PeerId,
-		permissions: Vec<Permission>,
-		merge: bool,
-	) -> anyhow::Result<Vec<Permission>> {
-		block_on(self.request_permissions(peer, permissions, merge))
-	}
-
 	pub fn state_snapshot(&self) -> Option<State> {
 		let (tx, rx) = oneshot::channel();
 		self.cmd_tx.send(Command::GetState { tx }).ok()?;
@@ -301,10 +292,6 @@ impl PuppyNet {
 			.map_err(|e| anyhow!("ListDisks response channel closed: {e}"))?
 	}
 
-	pub fn list_disks_blocking(&self, peer_id: PeerId) -> Result<Vec<DiskInfo>> {
-		block_on(self.list_disks(peer_id))
-	}
-
 	pub async fn list_interfaces(&self, peer_id: PeerId) -> Result<Vec<InterfaceInfo>> {
 		let (tx, rx) = oneshot::channel();
 		self.cmd_tx
@@ -312,10 +299,6 @@ impl PuppyNet {
 			.map_err(|e| anyhow!("failed to send ListInterfaces command: {e}"))?;
 		rx.await
 			.map_err(|e| anyhow!("ListInterfaces response channel closed: {e}"))?
-	}
-
-	pub fn list_interfaces_blocking(&self, peer_id: PeerId) -> Result<Vec<InterfaceInfo>> {
-		block_on(self.list_interfaces(peer_id))
 	}
 
 	pub fn scan_remote_peer(
@@ -349,14 +332,6 @@ impl PuppyNet {
 		})
 	}
 
-	pub fn scan_remote_peer_blocking(
-		&self,
-		peer: PeerId,
-		path: impl Into<String>,
-	) -> Result<ScanHandle, String> {
-		self.scan_remote_peer(peer, path)
-	}
-
 	pub async fn list_file_entries(
 		&self,
 		peer: PeerId,
@@ -376,15 +351,6 @@ impl PuppyNet {
 			.map_err(|e| anyhow!("ListFileEntries response channel closed: {e}"))?
 	}
 
-	pub fn list_file_entries_blocking(
-		&self,
-		peer: PeerId,
-		offset: u64,
-		limit: u64,
-	) -> Result<Vec<FileEntry>> {
-		block_on(self.list_file_entries(peer, offset, limit))
-	}
-
 	pub async fn list_storage_files(&self) -> Result<Vec<StorageUsageFile>> {
 		let (tx, rx) = oneshot::channel();
 		self.cmd_tx
@@ -392,10 +358,6 @@ impl PuppyNet {
 			.map_err(|e| anyhow!("failed to send ListStorageFiles command: {e}"))?;
 		rx.await
 			.map_err(|e| anyhow!("ListStorageFiles response channel closed: {e}"))?
-	}
-
-	pub fn list_storage_files_blocking(&self) -> Result<Vec<StorageUsageFile>> {
-		block_on(self.list_storage_files())
 	}
 
 	pub fn list_granted_permissions(&self, peer: PeerId) -> Result<Vec<Permission>> {
@@ -413,10 +375,6 @@ impl PuppyNet {
 			.map_err(|e| anyhow!("failed to send ListPermissions command: {e}"))?;
 		rx.await
 			.map_err(|e| anyhow!("ListPermissions response channel closed: {e}"))?
-	}
-
-	pub fn list_permissions_blocking(&self, peer: PeerId) -> Result<Vec<Permission>> {
-		block_on(self.list_permissions(peer))
 	}
 
 	pub fn scan_folder(&self, path: impl Into<String>) -> Result<ScanHandle, String> {
@@ -534,16 +492,6 @@ impl PuppyNet {
 			.map_err(|e| anyhow!("ReadFile response channel closed: {e}"))?
 	}
 
-	pub fn read_file_blocking(
-		&self,
-		peer: libp2p::PeerId,
-		path: impl Into<String>,
-		offset: u64,
-		length: Option<u64>,
-	) -> Result<FileChunk> {
-		block_on(self.read_file(peer, path, offset, length))
-	}
-
 	pub async fn get_thumbnail(
 		&self,
 		peer: libp2p::PeerId,
@@ -564,16 +512,6 @@ impl PuppyNet {
 			.map_err(|e| anyhow!("failed to send GetThumbnail command: {e}"))?;
 		rx.await
 			.map_err(|e| anyhow!("GetThumbnail response channel closed: {e}"))?
-	}
-
-	pub fn get_thumbnail_blocking(
-		&self,
-		peer: libp2p::PeerId,
-		path: impl Into<String>,
-		max_width: u32,
-		max_height: u32,
-	) -> Result<Thumbnail> {
-		block_on(self.get_thumbnail(peer, path, max_width, max_height))
 	}
 
 	/// Request a remote peer to update itself.
