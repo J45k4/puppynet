@@ -5276,7 +5276,7 @@ async fn search_files(
 		},
 		replicas_min,
 		replicas_max,
-		mime_type: mime,
+		mime_types: mime.into_iter().collect(),
 		sort_desc,
 		page,
 		page_size,

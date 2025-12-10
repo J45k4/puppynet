@@ -1,22 +1,27 @@
 import { patternMatcher } from "./pattern-matcher"
 
+type HandlerResult = void | Promise<void>
+
 let matcher: any
-const handleRoute = (path: string) => {
+const handleRoute = async (path: string) => {
 	if (!matcher) return
-	const m = matcher.match(path)
-	if (!m) console.error("No route found for", path)
-	console.log("match result", m)
+	const match = matcher.match(path)
+	if (!match) {
+		console.error("No route found for", path)
+		return
+	}
+	await Promise.resolve(match.result as HandlerResult)
 }
 window.addEventListener("popstate", () => {
-	handleRoute(window.location.pathname)
+	void handleRoute(window.location.pathname)
 })
 
 export const routes = (routes: any) => {
 	matcher = patternMatcher(routes)
-	handleRoute(window.location.pathname)
+	void handleRoute(window.location.pathname)
 }
 
 export const navigate = (path: string) => {
 	window.history.pushState({}, "", path)
-	handleRoute(path)
+	void handleRoute(path)
 }

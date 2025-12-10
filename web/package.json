@@ -4,9 +4,9 @@
 	"type": "module",
 	"private": true,
 	"scripts": {
-		"dev": "bun --port 4222 ./src/index.html",
-		"build": "bun build src/index.html --outdir ../core/http_assets/ --entry-naming '[name].[ext]' --chunk-naming '[name].[ext]' --asset-naming '[name].[ext]'",
-		"watch": "bun --watch --port 4222 ./src/index.html"
+		"dev": "bun --env=PUBLIC_* --port 4222 ./src/index.html",
+		"build": "bun build src/index.html --outdir ../core/http_assets/ --entry-naming '[name].[ext]' --chunk-naming '[name].[ext]' --asset-naming '[name].[ext]' --env=PUBLIC_*",
+		"watch": "bun --watch --env=PUBLIC_* --port 4222 ./src/index.html"
 	},
 	"devDependencies": {
 		"@types/bun": "latest"

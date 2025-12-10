@@ -4595,6 +4595,7 @@ dependencies = [
  "sysinfo",
  "tar",
  "tokio",
+ "url",
  "uuid",
  "walkdir",
  "zip",

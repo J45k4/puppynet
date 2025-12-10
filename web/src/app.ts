@@ -1,9 +1,14 @@
 import { routes } from "./router"
+import { getServerAddr } from "./api"
+import { renderHome } from "./pages/home"
+import { renderPeers, renderPeerDetail } from "./pages/peers"
+import { renderFiles } from "./pages/files"
+import { renderSearch } from "./pages/search"
+import { renderStorage } from "./pages/storage"
+import { renderUpdates } from "./pages/updates"
+import { renderSettings } from "./pages/settings"
 
-const serverAddr =
-  (typeof process !== "undefined" && process.env.PUBLIC_SERVER_ADDR)
-    ? process.env.PUBLIC_SERVER_ADDR
-    : "/";
+const serverAddr = getServerAddr()
 
 window.onload = () => {
 	const body = document.querySelector("body")
@@ -11,8 +16,15 @@ window.onload = () => {
 		throw new Error("No body element found")
 	}
 	routes({
-		"/peers": () => document.body.innerHTML = "<h1>Peers</h1><p>List of peers will be shown here.</p>",
-		"/*": () => document.body.innerHTML = "<h1>Home</h1><p>Welcome to PuppyNet!</p>",
+		"/": () => renderHome(),
+		"/peers": () => renderPeers(),
+		"/peers/:peerId": ({ peerId }) => renderPeerDetail(peerId),
+		"/files": () => renderFiles(),
+		"/search": () => renderSearch(),
+		"/storage": () => renderStorage(),
+		"/updates": () => renderUpdates(),
+		"/settings": () => renderSettings(),
+		"/*": () => renderHome(),
 	})
 
 	console.info("Using server address:", serverAddr)

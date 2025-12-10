@@ -722,7 +722,7 @@ pub struct SearchFilesArgs {
 	pub date_to: Option<String>,
 	pub replicas_min: Option<u64>,
 	pub replicas_max: Option<u64>,
-	pub mime_type: Option<String>,
+	pub mime_types: Vec<String>,
 	pub sort_desc: bool,
 	pub page: usize,
 	pub page_size: usize,
@@ -764,11 +764,13 @@ pub fn search_files(
 	}
 
 	// Mime type filter
-	if let Some(ref mime) = args.mime_type {
-		if !mime.trim().is_empty() {
-			conditions.push(format!("fe.mime_type = ?{}", param_values.len() + 1));
+	if !args.mime_types.is_empty() {
+		let mut placeholders = Vec::new();
+		for mime in &args.mime_types {
 			param_values.push(mime.clone());
+			placeholders.push(format!("?{}", param_values.len()));
 		}
+		conditions.push(format!("fe.mime_type IN ({})", placeholders.join(", ")));
 	}
 
 	// Date from filter

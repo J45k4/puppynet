@@ -4,6 +4,9 @@ use crate::updater::UpdateProgress;
 use crate::{Permission, SearchFilesArgs};
 use anyhow::Result;
 use hyper::body::Buf;
+use hyper::header::{
+	ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
+};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use libp2p::PeerId;
@@ -21,6 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::{signal, task};
 use tokio::net::TcpListener;
+use url::form_urlencoded;
 
 const CT_JSON: &str = "application/json";
 
@@ -183,19 +187,8 @@ fn bad_request(msg: impl Into<String>) -> Response<Body> {
 }
 
 fn parse_query(req: &Request<Body>) -> HashMap<String, String> {
-	req.uri()
-		.query()
-		.unwrap_or_default()
-		.split('&')
-		.filter_map(|pair| {
-			if pair.is_empty() {
-				return None;
-			}
-			let mut parts = pair.splitn(2, '=');
-			let key = parts.next()?;
-			let value = parts.next().unwrap_or_default();
-			Some((key.to_string(), value.to_string()))
-		})
+	form_urlencoded::parse(req.uri().query().unwrap_or_default().as_bytes())
+		.into_owned()
 		.collect()
 }
 
@@ -260,6 +253,20 @@ fn serve_static_path(path: &str) -> Option<Response<Body>> {
 	load_asset(path).map(|data| asset_response(path, data))
 }
 
+fn with_cors(mut resp: Response<Body>) -> Response<Body> {
+	resp.headers_mut()
+		.insert(ACCESS_CONTROL_ALLOW_ORIGIN, "*".parse().unwrap());
+	resp.headers_mut().insert(
+		ACCESS_CONTROL_ALLOW_HEADERS,
+		"content-type,authorization".parse().unwrap(),
+	);
+	resp.headers_mut().insert(
+		ACCESS_CONTROL_ALLOW_METHODS,
+		"GET,POST,PUT,DELETE,OPTIONS".parse().unwrap(),
+	);
+	resp
+}
+
 async fn handle_request(
 	req: Request<Body>,
 	state: Arc<ApiState>,
@@ -272,6 +279,10 @@ async fn handle_request(
 		.collect();
 
 	let response = match (req.method(), segments.as_slice()) {
+		(&Method::OPTIONS, _) => Response::builder()
+			.status(StatusCode::NO_CONTENT)
+			.body(Body::empty())
+			.unwrap(),
 		(&Method::GET, ["health"]) => Response::new(Body::from("ok")),
 		(&Method::GET, ["users"]) => {
 			match state.puppy.list_users_db() {
@@ -596,6 +607,22 @@ async fn handle_request(
 		}
 		(&Method::GET, ["api", "search"]) => {
 			let q = parse_query(&req);
+			let mut mime_types: Vec<String> = q
+				.get("mime_types")
+				.map(|raw| {
+					raw.split(',')
+						.filter(|v| !v.trim().is_empty())
+						.map(|v| v.trim().to_string())
+						.collect()
+				})
+				.unwrap_or_default();
+			if mime_types.is_empty() {
+				if let Some(single) = q.get("mime_type") {
+					if !single.trim().is_empty() {
+						mime_types.push(single.clone());
+					}
+				}
+			}
 			let args = SearchFilesArgs {
 				name_query: q.get("name_query").cloned(),
 				content_query: q.get("content_query").cloned(),
@@ -607,7 +634,7 @@ async fn handle_request(
 				replicas_max: q
 					.get("replicas_max")
 					.and_then(|v| v.parse::<u64>().ok()),
-				mime_type: q.get("mime_type").cloned(),
+				mime_types,
 				sort_desc: q
 					.get("sort_desc")
 					.map(|v| v == "true" || v == "1")
@@ -680,7 +707,7 @@ async fn handle_request(
 		_ => json_response(StatusCode::NOT_FOUND, json!({ "error": "not found" })),
 	};
 
-	Ok(response)
+	Ok(with_cors(response))
 }
 
 /// Start a simple HTTP server exposing a small API surface on top of PuppyNet.
