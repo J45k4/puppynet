@@ -31,7 +31,6 @@ pub enum Command {
 		#[clap(long)]
 		password: String,
 	},
-	Tui,
 	#[cfg(feature = "iced")]
 	Gui,
 	Daemon,

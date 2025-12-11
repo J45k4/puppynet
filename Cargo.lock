@@ -4586,6 +4586,7 @@ dependencies = [
  "clap",
  "crossterm",
  "flate2",
+ "futures",
  "homedir",
  "iced",
  "libp2p",

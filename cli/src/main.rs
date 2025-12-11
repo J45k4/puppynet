@@ -8,20 +8,13 @@ mod args;
 #[cfg(feature = "iced")]
 mod gui;
 mod installer;
-mod shell;
 mod updater;
 mod utility;
 
 #[tokio::main]
 async fn main() {
 	let args = args::Args::parse();
-	let init_logging = match &args.command {
-		Some(Command::Tui) => false,
-		_ => true,
-	};
-	if init_logging {
-		simple_logger::init_with_level(log::Level::Info).unwrap();
-	}
+	simple_logger::init_with_level(log::Level::Info).unwrap();
 
 	let version_label = utility::get_version_label().unwrap_or("dev");
 	log::info!("puppyagent version {}", version_label);
@@ -60,13 +53,6 @@ async fn main() {
 				std::process::exit(1);
 			}
 			log::info!("user {} created", username);
-			return;
-		}
-		Some(Command::Tui) => {
-			if let Err(err) = shell::run() {
-				log::error!("shell error: {err:?}");
-				std::process::exit(1);
-			}
 			return;
 		}
 		#[cfg(feature = "iced")]

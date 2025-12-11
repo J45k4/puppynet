@@ -511,17 +511,16 @@ async fn handle_request(
 			}
 		}
 		(&Method::GET, ["api", "state"]) => {
-			let me = state
-				.puppy
-				.state_snapshot()
+			let snapshot = state.puppy.state_snapshot().await;
+			let me = snapshot
+				.as_ref()
 				.map(|s| s.me.to_string())
 				.unwrap_or_else(|| String::from("unknown"));
-			let shared_folders = state
-				.puppy
-				.state_snapshot()
+			let shared_folders = snapshot
+				.as_ref()
 				.map(|s| {
 					s.shared_folders
-						.into_iter()
+						.iter()
 						.map(|f| SharedFolderSummary {
 							path: f.path().to_string_lossy().to_string(),
 							flags: f.flags(),

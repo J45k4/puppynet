@@ -7,6 +7,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
+use futures::executor::block_on;
 use chrono::{DateTime, Utc};
 use iced::alignment::{Horizontal, Vertical};
 use iced::executor;
@@ -938,8 +939,12 @@ async fn create_user(
 		.map_err(|err| format!("{err}"))
 }
 
+fn state_snapshot_blocking(peer: &Arc<PuppyNet>) -> Option<State> {
+	block_on(peer.state_snapshot())
+}
+
 fn shared_folder_suggestions(peer: &Arc<PuppyNet>) -> Vec<EditableFolderPermission> {
-	peer.state_snapshot()
+	state_snapshot_blocking(peer)
 		.map(|s| {
 			s.shared_folders
 				.iter()
@@ -964,15 +969,15 @@ async fn list_effective_permissions(
 	peer_id: String,
 ) -> (String, Result<Vec<Permission>, String>) {
 	let target = PeerId::from_str(&peer_id).unwrap();
-	let handle = task::spawn_blocking({
-		let peer = peer.clone();
-		let target = target.clone();
-		move || {
-			peer.state_snapshot()
-				.map(|s| s.permissions_for_peer(&target))
-				.ok_or_else(|| String::from("state unavailable"))
-		}
-	});
+		let handle = task::spawn_blocking({
+			let peer = peer.clone();
+			let target = target.clone();
+			move || {
+				state_snapshot_blocking(&peer)
+					.map(|s| s.permissions_for_peer(&target))
+					.ok_or_else(|| String::from("state unavailable"))
+			}
+		});
 	let result = match timeout(Duration::from_secs(3), handle).await {
 		Ok(Ok(res)) => res,
 		Ok(Err(err)) => Err(format!("permissions task failed: {err}")),
@@ -1086,7 +1091,7 @@ pub struct GuiApp {
 
 impl GuiApp {
 	fn local_node_id_bytes(&self) -> Vec<u8> {
-		if let Some(state) = self.peer.state_snapshot() {
+		if let Some(state) = state_snapshot_blocking(&self.peer) {
 			return state.me.to_bytes();
 		}
 		self.local_peer_id
@@ -1320,7 +1325,7 @@ impl Application for GuiApp {
 
 	fn new(flags: Self::Flags) -> (Self, Command<Self::Message>) {
 		let peer = Arc::new(PuppyNet::new());
-		let latest_state = peer.state_snapshot();
+		let latest_state = state_snapshot_blocking(&peer);
 		let peers = latest_state
 			.as_ref()
 			.map(aggregate_peers)
@@ -1528,7 +1533,7 @@ impl Application for GuiApp {
 					shared_roots,
 				)));
 				let peer = self.peer.clone();
-				let local_id = self.peer.state_snapshot().map(|s| s.me.to_string());
+				let local_id = state_snapshot_blocking(&self.peer).map(|s| s.me.to_string());
 				if let Some(id) = local_id {
 					if id == peer_id {
 						return Command::perform(
@@ -3493,7 +3498,7 @@ impl GuiApp {
 	}
 
 	fn refresh_from_state(&mut self) {
-		if let Some(snapshot) = self.peer.state_snapshot() {
+		if let Some(snapshot) = state_snapshot_blocking(&self.peer) {
 			self.local_peer_id = Some(snapshot.me.to_string());
 			self.peers = aggregate_peers(&snapshot);
 			if self
@@ -5283,10 +5288,11 @@ async fn search_files(
 	};
 
 	// Build a map from truncated node_id (first 16 bytes) to full PeerId
+	let state = peer
+		.state_snapshot()
+		.await
+		.ok_or_else(|| String::from("state unavailable"))?;
 	let peer_map: HashMap<Vec<u8>, PeerId> = {
-		let state = peer
-			.state_snapshot()
-			.ok_or_else(|| String::from("state unavailable"))?;
 		let mut peers = vec![state.me];
 		peers.extend(state.connections.iter().map(|c| c.peer_id));
 		peers.extend(state.discovered_peers.iter().map(|d| d.peer_id));
@@ -5372,10 +5378,11 @@ async fn load_storage_usage(peer: Arc<PuppyNet>) -> Result<Vec<StorageNodeView>,
 		.list_storage_files()
 		.await
 		.map_err(|err| err.to_string())?;
+	let state = peer
+		.state_snapshot()
+		.await
+		.ok_or_else(|| String::from("state unavailable"))?;
 	let known_peers: Vec<PeerId> = {
-		let state = peer
-			.state_snapshot()
-			.ok_or_else(|| String::from("state unavailable"))?;
 		let mut peers = vec![state.me];
 		peers.extend(state.connections.iter().map(|c| c.peer_id));
 		peers.extend(state.discovered_peers.iter().map(|d| d.peer_id));

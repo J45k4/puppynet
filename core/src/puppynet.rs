@@ -52,7 +52,6 @@ impl ScanHandle {
 pub struct PuppyNet {
 	shutdown_tx: Option<oneshot::Sender<()>>,
 	handle: JoinHandle<()>,
-	runtime: Option<tokio::runtime::Runtime>,
 	cmd_tx: UnboundedSender<Command>,
 	db: Arc<Mutex<SqliteConnection>>,
 	remote_scans: Arc<Mutex<HashMap<u64, mpsc::Sender<ScanEvent>>>>,
@@ -82,43 +81,21 @@ impl PuppyNet {
 			remote_updates.clone(),
 		);
 		let mut shutdown_rx = shutdown_rx;
-		let (handle, runtime) = match tokio::runtime::Handle::try_current() {
-			Ok(handle) => {
-				let join = handle.spawn(async move {
-					loop {
-						tokio::select! {
-							_ = &mut shutdown_rx => {
-								log::info!("PuppyNet shutting down");
-								break;
-							}
-							_ = app.run() => {}
-						}
+		let handle = tokio::spawn(async move {
+			loop {
+				tokio::select! {
+					_ = &mut shutdown_rx => {
+						log::info!("PuppyNet shutting down");
+						break;
 					}
-				});
-				(join, None)
+					_ = app.run() => {}
+				}
 			}
-			Err(_) => {
-				let runtime = tokio::runtime::Runtime::new()
-					.expect("failed to create tokio runtime for PuppyNet");
-				let join = runtime.spawn(async move {
-					loop {
-						tokio::select! {
-							_ = &mut shutdown_rx => {
-								log::info!("PuppyNet shutting down");
-								break;
-							}
-							_ = app.run() => {}
-						}
-					}
-				});
-				(join, Some(runtime))
-			}
-		};
+		});
 
 		PuppyNet {
 			shutdown_tx: Some(shutdown_tx),
 			handle,
-			runtime,
 			cmd_tx,
 			db,
 			remote_scans,
@@ -229,28 +206,39 @@ impl PuppyNet {
 			.collect())
 	}
 
-	pub fn state_snapshot(&self) -> Option<State> {
+	pub async fn state_snapshot(&self) -> Option<State> {
 		let (tx, rx) = oneshot::channel();
-		self.cmd_tx.send(Command::GetState { tx }).ok()?;
-		block_on(rx).ok()
+		if self.cmd_tx.send(Command::GetState { tx }).is_err() {
+			return None;
+		}
+		rx.await.ok()
 	}
 
 	pub fn list_users_db(&self) -> Result<Vec<String>, String> {
-		let conn = self.db.lock().map_err(|err| format!("db lock poisoned: {err}"))?;
+		let conn = self
+			.db
+			.lock()
+			.map_err(|err| format!("db lock poisoned: {err}"))?;
 		load_users(&conn)
 			.map(|users| users.into_iter().map(|u| u.name).collect())
 			.map_err(|err| format!("failed to load users: {err}"))
 	}
 
 	pub fn list_peers_db(&self) -> Result<Vec<Peer>, String> {
-		let conn = self.db.lock().map_err(|err| format!("db lock poisoned: {err}"))?;
+		let conn = self
+			.db
+			.lock()
+			.map_err(|err| format!("db lock poisoned: {err}"))?;
 		load_peers(&conn).map_err(|err| format!("failed to load peers: {err}"))
 	}
 
 	pub fn list_discovered_peers_db(
 		&self,
 	) -> Result<Vec<crate::state::DiscoveredPeer>, String> {
-		let conn = self.db.lock().map_err(|err| format!("db lock poisoned: {err}"))?;
+		let conn = self
+			.db
+			.lock()
+			.map_err(|err| format!("db lock poisoned: {err}"))?;
 		load_discovered_peers(&conn)
 			.map_err(|err| format!("failed to load discovered peers: {err}"))
 	}
@@ -628,7 +616,5 @@ impl PuppyNet {
 		if let Err(e) = self.handle.await {
 			log::error!("task join error: {e}");
 		}
-		// If we spun up a runtime, drop it after the task ends
-		drop(self.runtime.take());
 	}
 }
