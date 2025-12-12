@@ -380,7 +380,99 @@ body {
 .storage-actions {
 	display: flex;
 	justify-content: flex-end;
+	align-items: center;
+	gap: 10px;
 	margin-bottom: 12px;
+}
+
+.storage-view-toggle {
+	display: inline-flex;
+	gap: 6px;
+	padding: 4px;
+	border-radius: 10px;
+	background: #0b1220;
+	border: 1px solid #334155;
+}
+
+.storage-view-toggle button {
+	background: transparent;
+	color: inherit;
+	border: 1px solid transparent;
+	padding: 6px 10px;
+	border-radius: 8px;
+	cursor: pointer;
+	font-size: 0.9rem;
+}
+
+.storage-view-toggle button.active,
+.storage-view-toggle button[aria-selected="true"] {
+	background: rgba(56, 189, 248, .2);
+	border-color: #38bdf8;
+	color: #0b1728;
+}
+
+.storage-heatmap {
+	display: flex;
+	flex-direction: column;
+	gap: 18px;
+}
+
+.storage-heatmap-node {
+	border: 1px solid #334155;
+	border-radius: 10px;
+	padding: 10px 12px;
+	background: #0f172a;
+}
+
+.storage-heatmap-header {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin-bottom: 10px;
+}
+
+.storage-heatmap-back {
+	align-self: flex-start;
+	margin-top: 4px;
+}
+
+.storage-heatmap-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+	gap: 8px;
+}
+
+.storage-heatmap-tile {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	padding: 10px;
+	border-radius: 8px;
+	border: 1px solid #334155;
+	background: var(--heat-bg, #1e293b);
+	color: #f8fafc;
+	text-align: left;
+	cursor: pointer;
+	min-height: 86px;
+}
+
+.storage-heatmap-tile:hover {
+	border-color: #38bdf8;
+	filter: brightness(1.05);
+}
+
+.storage-heatmap-name {
+	font-size: 0.98rem;
+	line-height: 1.2;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.storage-heatmap-meta,
+.storage-heatmap-count {
+	font-size: 0.85rem;
+	color: rgba(248, 250, 252, 0.9);
 }
 
 .storage-table {

@@ -25,6 +25,8 @@ type StoragePageState = {
 	loading: boolean
 	error: string | null
 	customStatus: string | null
+	viewMode: "tree" | "heatmap"
+	heatmapFocus: Map<string, string | null>
 }
 
 type EntryStats = {
@@ -222,6 +224,10 @@ export const renderStorage = async () => {
 			<p id="storage-status" class="muted">Loading storage usage...</p>
 		</div>
 		<div class="storage-actions">
+			<div class="storage-view-toggle" role="tablist" aria-label="Storage view">
+				<button type="button" id="storage-view-tree" role="tab" aria-selected="true">Tree</button>
+				<button type="button" id="storage-view-heatmap" role="tab" aria-selected="false">Heatmap</button>
+			</div>
 			<button type="button" id="storage-refresh">Refresh</button>
 		</div>
 		<div class="storage-table">
@@ -241,12 +247,123 @@ export const renderStorage = async () => {
 	const statusEl = content.querySelector<HTMLElement>("#storage-status")
 	const listEl = content.querySelector<HTMLElement>("#storage-list")
 	const refreshButton = content.querySelector<HTMLButtonElement>("#storage-refresh")
+	const viewTreeButton = content.querySelector<HTMLButtonElement>("#storage-view-tree")
+	const viewHeatmapButton =
+		content.querySelector<HTMLButtonElement>("#storage-view-heatmap")
 
 	const state: StoragePageState = {
 		nodes: [],
 		loading: true,
 		error: null,
 		customStatus: null,
+		viewMode: "tree",
+		heatmapFocus: new Map(),
+	}
+
+	const heatColor = (percent: number) => {
+		const clamped = Math.max(0, Math.min(100, percent))
+		const hue = 210 - clamped * 2.1
+		return `hsl(${hue.toFixed(0)}deg 70% 40%)`
+	}
+
+	const renderHeatmap = () => {
+		if (!listEl) return
+		if (!state.nodes.length) {
+			listEl.innerHTML = `<p class="muted">No storage data available.</p>`
+			return
+		}
+
+		const findEntry = (
+			entries: StorageEntry[],
+			path: string,
+		): StorageEntry | null => {
+			for (const entry of entries) {
+				if (entry.path === path) return entry
+				if (entry.children.length) {
+					const found = findEntry(entry.children, path)
+					if (found) return found
+				}
+			}
+			return null
+		}
+
+		const nodeSections = state.nodes
+			.map((node) => {
+				const focusPath = state.heatmapFocus.get(node.id) ?? null
+				const focusEntry = focusPath
+					? findEntry(node.entries, focusPath)
+					: null
+				const focusEntries = focusEntry ? focusEntry.children : node.entries
+				const tiles = focusEntries.slice(0, 120).map((entry) => {
+					const bg = heatColor(entry.percent)
+					const percentLabel = `${entry.percent.toFixed(1)}%`
+					return `
+						<button
+							type="button"
+							class="storage-heatmap-tile"
+							style="--heat-bg: ${bg}"
+							data-entry-open="${escapeHtml(entry.path)}"
+							data-entry-has-children="${entry.children.length ? "1" : "0"}"
+							data-node-id="${escapeHtml(node.id)}"
+							title="${escapeHtml(entry.path)} • ${formatSize(entry.size)}"
+						>
+							<strong class="storage-heatmap-name">${escapeHtml(entry.name)}</strong>
+							<span class="storage-heatmap-meta">${percentLabel} • ${formatSize(
+						entry.size,
+					)}</span>
+							<span class="storage-heatmap-count">${entry.itemCount} item(s)</span>
+						</button>
+					`
+				})
+				const backButton =
+					focusEntry || focusPath
+						? `<button type="button" class="link-btn storage-heatmap-back" data-heatmap-back="${escapeHtml(
+								node.id,
+						  )}">Back</button>`
+						: ""
+				return `
+					<section class="storage-heatmap-node">
+						<header class="storage-heatmap-header">
+							<h3>${escapeHtml(node.name)}</h3>
+							<p class="muted">${escapeHtml(node.id)} • ${formatSize(
+					node.totalSize,
+				)}</p>
+							${backButton}
+						</header>
+						<div class="storage-heatmap-grid">
+							${tiles.join("")}
+						</div>
+					</section>
+				`
+			})
+			.join("")
+		listEl.innerHTML = `<div class="storage-heatmap">${nodeSections}</div>`
+		const tileButtons = listEl.querySelectorAll<HTMLButtonElement>("[data-entry-open]")
+		tileButtons.forEach((btn) => {
+			btn.addEventListener("click", () => {
+				const path = btn.getAttribute("data-entry-open")
+				const nodeId = btn.getAttribute("data-node-id") ?? ""
+				const hasChildren = btn.getAttribute("data-entry-has-children") === "1"
+				if (!path) return
+				if (hasChildren) {
+					state.heatmapFocus.set(nodeId, path)
+					updateStorageView()
+					return
+				}
+				state.customStatus = `Selected ${path}`
+				updateStatus()
+			})
+		})
+		const backButtons = listEl.querySelectorAll<HTMLButtonElement>(
+			"[data-heatmap-back]",
+		)
+		backButtons.forEach((btn) => {
+			btn.addEventListener("click", () => {
+				const nodeId = btn.getAttribute("data-heatmap-back") ?? ""
+				state.heatmapFocus.set(nodeId, null)
+				updateStorageView()
+			})
+		})
 	}
 
 	const buildEntryNodes = (
@@ -332,6 +449,10 @@ export const renderStorage = async () => {
 		renderRow,
 		onSelect: (node) => {
 			const data = node.data as StorageEntry | StorageNode
+			if (node.children?.length) {
+				tree.toggle(node.id)
+				return
+			}
 			if ((data as StorageEntry).path !== undefined) {
 				const entry = data as StorageEntry
 				state.customStatus = `Selected ${entry.path}`
@@ -376,32 +497,40 @@ export const renderStorage = async () => {
 			listEl.appendChild(tree.element)
 			tree.setNodes([])
 		} else {
-			const nodes: TreeNode<StorageEntry | StorageNode>[] = state.nodes.map(
-				(storageNode) => {
-					const nodeId = `node:${storageNode.id}`
-					return {
-						id: nodeId,
-						label: storageNode.name,
-						sublabel: storageNode.id,
-						data: storageNode,
-						children: buildEntryNodes(nodeId, storageNode.entries),
-					}
-				},
-			)
-			listEl.innerHTML = ""
-			listEl.appendChild(tree.element)
-			tree.setNodes(nodes)
+			if (state.viewMode === "heatmap") {
+				renderHeatmap()
+			} else {
+				const nodes: TreeNode<StorageEntry | StorageNode>[] = state.nodes.map(
+					(storageNode) => {
+						const nodeId = `node:${storageNode.id}`
+						return {
+							id: nodeId,
+							label: storageNode.name,
+							sublabel: storageNode.id,
+							data: storageNode,
+							children: buildEntryNodes(nodeId, storageNode.entries),
+						}
+					},
+				)
+				listEl.innerHTML = ""
+				listEl.appendChild(tree.element)
+				tree.setNodes(nodes)
+			}
 		}
 		updateStatus()
-		const entryOpenButtons = listEl.querySelectorAll<HTMLButtonElement>("[data-entry-open]")
-		entryOpenButtons.forEach((btn) => {
-			btn.addEventListener("click", () => {
-				const path = btn.getAttribute("data-entry-open")
-				if (!path) return
-				state.customStatus = `Selected ${path}`
-				updateStatus()
+		if (state.viewMode === "tree") {
+			const entryOpenButtons = listEl.querySelectorAll<HTMLButtonElement>(
+				"[data-entry-open]",
+			)
+			entryOpenButtons.forEach((btn) => {
+				btn.addEventListener("click", () => {
+					const path = btn.getAttribute("data-entry-open")
+					if (!path) return
+					state.customStatus = `Selected ${path}`
+					updateStatus()
+				})
 			})
-		})
+		}
 	}
 
 	const loadStorage = async () => {
@@ -409,6 +538,7 @@ export const renderStorage = async () => {
 		state.error = null
 		state.customStatus = null
 		state.nodes = []
+		state.heatmapFocus.clear()
 		updateStorageView()
 
 		try {
@@ -425,6 +555,22 @@ export const renderStorage = async () => {
 	refreshButton?.addEventListener("click", () => {
 		void loadStorage()
 	})
+
+	const setViewMode = (mode: StoragePageState["viewMode"]) => {
+		state.viewMode = mode
+		if (viewTreeButton) {
+			viewTreeButton.setAttribute("aria-selected", String(mode === "tree"))
+			viewTreeButton.classList.toggle("active", mode === "tree")
+		}
+		if (viewHeatmapButton) {
+			viewHeatmapButton.setAttribute("aria-selected", String(mode === "heatmap"))
+			viewHeatmapButton.classList.toggle("active", mode === "heatmap")
+		}
+		updateStorageView()
+	}
+
+	viewTreeButton?.addEventListener("click", () => setViewMode("tree"))
+	viewHeatmapButton?.addEventListener("click", () => setViewMode("heatmap"))
 
 	updateStorageView()
 	void loadStorage()

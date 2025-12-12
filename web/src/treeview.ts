@@ -130,6 +130,7 @@ export const createTreeView = <T>(options: TreeViewOptions<T>) => {
 	return {
 		element: root,
 		expanded,
+		toggle: toggleNode,
 		setNodes: (next: TreeNode<T>[]) => {
 			nodes = next
 			buildMap(nodes)
@@ -137,4 +138,3 @@ export const createTreeView = <T>(options: TreeViewOptions<T>) => {
 		},
 	}
 }
-
