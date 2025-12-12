@@ -1,6 +1,6 @@
 use std::env;
-use std::str::FromStr;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use anyhow::{anyhow, bail};
 use chrono::DateTime;
@@ -926,8 +926,9 @@ pub fn load_peers(conn: &Connection) -> anyhow::Result<Vec<Peer>> {
 	let mut stmt = conn.prepare("SELECT peer_id, name FROM peers")?;
 	let rows = stmt.query_map([], |row| {
 		let id_str: String = row.get(0)?;
-		let id = libp2p::PeerId::from_str(&id_str)
-			.map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
+		let id = libp2p::PeerId::from_str(&id_str).map_err(|e| {
+			rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+		})?;
 		Ok(Peer {
 			id,
 			name: row.get(1)?,
@@ -969,11 +970,12 @@ pub fn load_discovered_peers(conn: &Connection) -> anyhow::Result<Vec<Discovered
 	let rows = stmt.query_map([], |row| {
 		let id_str: String = row.get(0)?;
 		let addr_str: String = row.get(1)?;
-		let peer_id = libp2p::PeerId::from_str(&id_str)
-			.map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
-		let multiaddr = addr_str
-			.parse()
-			.map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?;
+		let peer_id = libp2p::PeerId::from_str(&id_str).map_err(|e| {
+			rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+		})?;
+		let multiaddr = addr_str.parse().map_err(|e| {
+			rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e))
+		})?;
 		Ok(DiscoveredPeer { peer_id, multiaddr })
 	})?;
 	let mut peers = Vec::new();

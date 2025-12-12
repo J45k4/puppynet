@@ -1,6 +1,13 @@
 import { ensureShell } from "../layout"
 import { fetchMimeTypes, searchFiles } from "../api"
 import { createMultiSelect } from "../multiselect"
+import { navigate } from "../router"
+
+const escapeHtml = (value: string) =>
+	value
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
 
 const defaultPageSize = 25
 
@@ -67,11 +74,13 @@ export const renderSearch = async () => {
 						<tr>
 							<th>Name</th>
 							<th>Type</th>
-						<th>Size</th>
-						<th>Replicas</th>
-						<th>Updated</th>
-					</tr>
-				</thead>
+							<th>Size</th>
+							<th>Replicas</th>
+							<th>Updated</th>
+							<th>Hash</th>
+							<th></th>
+						</tr>
+					</thead>
 					<tbody id="search-body"></tbody>
 				</table>
 			</div>
@@ -79,24 +88,74 @@ export const renderSearch = async () => {
 		`
 	}
 
+	const formatHashValue = (value: number[] | string | undefined) => {
+		if (!value) return ""
+		if (typeof value === "string") {
+			return value
+		}
+		if (!Array.isArray(value)) {
+			return ""
+		}
+		return value
+			.map((byte) => byte.toString(16).padStart(2, "0"))
+			.join("")
+	}
+
+	const shortHash = (value: string) => {
+		if (!value) return ""
+		return value.length > 16 ? `${value.slice(0, 8)}…${value.slice(-8)}` : value
+	}
+
 	const appendRows = (rows: any[]) => {
 		const body = document.getElementById("search-body")
 		if (!body) return
 		const html = rows
 			.map(
-				(r) => `
-					<tr>
-						<td>${r.name}</td>
-						<td class="muted">${r.mime_type ?? "unknown"}</td>
-						<td>${((r.size ?? 0) / 1024).toFixed(1)} KB</td>
-						<td><span class="badge small">${r.replicas} replicas</span></td>
-						<td class="muted">${r.latest_datetime ?? ""}</td>
-					</tr>
-				`,
+				(r) => {
+					const hash = formatHashValue(r.hash)
+					const nodeId = formatHashValue(r.node_id)
+					const path = r.path ?? ""
+					return `
+						<tr>
+							<td>${escapeHtml(r.name ?? "")}</td>
+							<td class="muted">${escapeHtml(r.mime_type ?? "unknown")}</td>
+							<td>${((r.size ?? 0) / 1024).toFixed(1)} KB</td>
+							<td><span class="badge small">${r.replicas} replicas</span></td>
+							<td class="muted">${escapeHtml(r.latest_datetime ?? "")}</td>
+							<td class="muted hash-cell">${escapeHtml(shortHash(hash))}</td>
+							<td>
+								<button
+									type="button"
+									class="link-btn"
+									data-hash-link="${escapeHtml(hash)}"
+									data-node-id="${escapeHtml(nodeId)}"
+									data-path="${escapeHtml(path)}"
+								>
+									View
+								</button>
+							</td>
+						</tr>
+					`
+				},
 			)
 			.join("")
 		body.insertAdjacentHTML("beforeend", html)
 	}
+
+	tableEl?.addEventListener("click", (event) => {
+		const target = event.target as HTMLElement | null
+		const button = target?.closest<HTMLButtonElement>("[data-hash-link]")
+		if (!button) return
+		const hash = button.getAttribute("data-hash-link")
+		if (!hash) return
+		const nodeId = button.getAttribute("data-node-id")
+		const path = button.getAttribute("data-path")
+		const params = new URLSearchParams()
+		if (nodeId) params.set("node", nodeId)
+		if (path) params.set("path", path)
+		const suffix = params.toString() ? `?${params.toString()}` : ""
+		navigate(`/file/${encodeURIComponent(hash)}${suffix}`)
+	})
 
 	const loadPage = async () => {
 		if (loading) return

@@ -1,17 +1,18 @@
+use crate::FileChunk;
 use crate::app::{App, Command, ReadFileCmd};
 use crate::auth;
 use crate::db::{
-	StorageUsageFile, delete_session, load_discovered_peers, load_peers, load_user, load_users,
-	lookup_session_username, open_db, run_migrations, save_session,
+	FileEntry, StorageUsageFile, delete_session, get_file_entry, get_file_location, get_your_node,
+	load_discovered_peers, load_peers, load_user, load_users, lookup_session_username, open_db,
+	run_migrations, save_session,
 };
 use crate::p2p::{
 	CpuInfo, DirEntry, DiskInfo, InterfaceInfo, PermissionGrant, Thumbnail, grant_from_permission,
 	permission_from_grant,
 };
 use crate::scan::ScanEvent;
-use crate::state::{Peer, FLAG_READ, FLAG_SEARCH, FLAG_WRITE, Permission, State};
+use crate::state::{FLAG_READ, FLAG_SEARCH, FLAG_WRITE, Peer, Permission, State};
 use crate::updater::{self, UpdateProgress};
-use crate::{FileChunk, FileEntry};
 use anyhow::{Result, anyhow, bail};
 use chrono::Utc;
 use futures::executor::block_on;
@@ -232,9 +233,7 @@ impl PuppyNet {
 		load_peers(&conn).map_err(|err| format!("failed to load peers: {err}"))
 	}
 
-	pub fn list_discovered_peers_db(
-		&self,
-	) -> Result<Vec<crate::state::DiscoveredPeer>, String> {
+	pub fn list_discovered_peers_db(&self) -> Result<Vec<crate::state::DiscoveredPeer>, String> {
 		let conn = self
 			.db
 			.lock()
@@ -243,12 +242,11 @@ impl PuppyNet {
 			.map_err(|err| format!("failed to load discovered peers: {err}"))
 	}
 
-	pub fn verify_user_credentials(
-		&self,
-		username: &str,
-		password: &str,
-	) -> anyhow::Result<bool> {
-		let conn = self.db.lock().map_err(|err| anyhow!("db lock poisoned: {err}"))?;
+	pub fn verify_user_credentials(&self, username: &str, password: &str) -> anyhow::Result<bool> {
+		let conn = self
+			.db
+			.lock()
+			.map_err(|err| anyhow!("db lock poisoned: {err}"))?;
 		let Some(user) = load_user(&conn, username)? else {
 			return Ok(false);
 		};
@@ -263,18 +261,27 @@ impl PuppyNet {
 	) -> anyhow::Result<()> {
 		let now = Utc::now().timestamp();
 		let expires_at = now.saturating_add(ttl_secs);
-		let mut conn = self.db.lock().map_err(|err| anyhow!("db lock poisoned: {err}"))?;
+		let mut conn = self
+			.db
+			.lock()
+			.map_err(|err| anyhow!("db lock poisoned: {err}"))?;
 		save_session(&mut *conn, token_hash, username, now, expires_at)?;
 		Ok(())
 	}
 
 	pub fn http_me(&self, token_hash: &[u8]) -> anyhow::Result<Option<String>> {
-		let conn = self.db.lock().map_err(|err| anyhow!("db lock poisoned: {err}"))?;
+		let conn = self
+			.db
+			.lock()
+			.map_err(|err| anyhow!("db lock poisoned: {err}"))?;
 		lookup_session_username(&conn, token_hash, Utc::now().timestamp())
 	}
 
 	pub fn drop_session(&self, token_hash: &[u8]) -> anyhow::Result<()> {
-		let mut conn = self.db.lock().map_err(|err| anyhow!("db lock poisoned: {err}"))?;
+		let mut conn = self
+			.db
+			.lock()
+			.map_err(|err| anyhow!("db lock poisoned: {err}"))?;
 		delete_session(&mut *conn, token_hash)?;
 		Ok(())
 	}
@@ -385,6 +392,35 @@ impl PuppyNet {
 			.map_err(|e| anyhow!("failed to send ListStorageFiles command: {e}"))?;
 		rx.await
 			.map_err(|e| anyhow!("ListStorageFiles response channel closed: {e}"))?
+	}
+
+	pub fn resolve_local_file_by_hash(
+		&self,
+		hash: &[u8],
+	) -> Result<Option<(PathBuf, FileEntry)>, String> {
+		let conn = self
+			.db
+			.lock()
+			.map_err(|err| format!("db lock poisoned: {err}"))?;
+		let node_id = match get_your_node(&conn)
+			.map_err(|err| format!("failed to load local node id: {err}"))?
+		{
+			Some(id) => id,
+			None => return Ok(None),
+		};
+		let file_entry = get_file_entry(&conn, hash)
+			.map_err(|err| format!("failed to load file entry: {err}"))?;
+		let entry = match file_entry {
+			Some(entry) => entry,
+			None => return Ok(None),
+		};
+		let location = get_file_location(&conn, &node_id, hash)
+			.map_err(|err| format!("failed to load file location: {err}"))?;
+		let location = match location {
+			Some(location) => location,
+			None => return Ok(None),
+		};
+		Ok(Some((location.path, entry)))
 	}
 
 	pub fn list_granted_permissions(&self, peer: PeerId) -> Result<Vec<Permission>> {

@@ -6,8 +6,10 @@ import {
 	fetchPeerCpus,
 	fetchPeerInterfaces,
 	fetchLocalPeerId,
+	startPeerUpdate,
+	pollPeerUpdate,
 } from "../api"
-import type { CpuInfo, InterfaceInfo, Peer } from "../api"
+import type { CpuInfo, InterfaceInfo, Peer, UpdateProgress } from "../api"
 
 const escapeHtml = (value: string) =>
 	value
@@ -63,7 +65,7 @@ const renderCpuRows = (cpus: CpuInfo[]): string =>
 		)
 		.join("")
 
-const renderInterfaceRows = (interfaces: InterfaceInfo[]): string =>
+	const renderInterfaceRows = (interfaces: InterfaceInfo[]): string =>
 	interfaces
 		.map(
 			(iface) => `
@@ -86,7 +88,39 @@ const renderInterfaceRows = (interfaces: InterfaceInfo[]): string =>
 		)
 		.join("")
 
-export const renderPeers = async () => {
+	type PeerUpdateState = {
+		updateId: number | null
+		inProgress: boolean
+		done: boolean
+		events: UpdateProgress[]
+		error: string | null
+	}
+
+	const formatUpdateMessage = (event: UpdateProgress) => {
+		switch (event.type) {
+			case "FetchingRelease":
+				return "Fetching release metadata"
+			case "Downloading":
+				return `Downloading ${event.filename}`
+			case "Unpacking":
+				return "Unpacking update"
+			case "Verifying":
+				return "Verifying update"
+			case "Installing":
+				return "Installing update"
+			case "Completed":
+				return `Update completed (version ${event.version})`
+			case "Failed":
+				return `Update failed: ${event.error}`
+			case "AlreadyUpToDate":
+				return `Already up to date (version ${event.current_version})`
+		}
+	}
+
+	const describeError = (error: unknown) =>
+		error instanceof Error ? error.message : String(error)
+
+	export const renderPeers = async () => {
 	const content = ensureShell("/peers")
 	content.innerHTML = `
 		<section class="hero">
@@ -196,6 +230,12 @@ export const renderPeerDetail = async (peerId: string) => {
 			<p id="peer-interfaces-status" class="muted">Interface metrics will appear here.</p>
 			<div id="peer-interfaces-list" class="resource-list"></div>
 		</div>
+		<div class="card" id="peer-update-card">
+			<h2>Updates</h2>
+			<p id="peer-update-status" class="muted">Update status will appear here.</p>
+			<button type="button" id="peer-update-button">Update peer</button>
+			<div id="peer-update-log" class="updates-list"></div>
+		</div>
 	`
 	const backBtn = document.getElementById("back-to-peers")
 	if (backBtn) {
@@ -245,6 +285,118 @@ export const renderPeerDetail = async (peerId: string) => {
 			interfacesListEl.innerHTML = `<p class="muted">Failed to load interface data.</p>`
 		}
 	}
+	const updateStatusEl = document.getElementById("peer-update-status")
+	const updateLogEl = document.getElementById("peer-update-log")
+	const updateButton = document.getElementById(
+		"peer-update-button",
+	) as HTMLButtonElement | null
+
+	const updateState: PeerUpdateState = {
+		updateId: null,
+		inProgress: false,
+		done: false,
+		events: [],
+		error: null,
+	}
+	let updatePoll: number | null = null
+
+	const renderUpdateLog = () => {
+		if (!updateLogEl) return
+		if (!updateState.events.length) {
+			updateLogEl.innerHTML = `<p class="muted">No update activity yet.</p>`
+			return
+		}
+		updateLogEl.innerHTML = updateState.events
+			.map(
+				(event) => `
+					<div class="update-event update-event-${event.type.toLowerCase()}">
+						${escapeHtml(formatUpdateMessage(event))}
+					</div>
+				`,
+			)
+			.join("")
+	}
+
+	const setUpdateStatus = (message: string) => {
+		if (updateStatusEl) {
+			updateStatusEl.textContent = message
+		}
+	}
+
+	const setUpdateButtonState = () => {
+		if (updateButton) {
+			updateButton.disabled = updateState.inProgress
+		}
+	}
+
+	const clearUpdatePoll = () => {
+		if (updatePoll !== null) {
+			window.clearTimeout(updatePoll)
+			updatePoll = null
+		}
+	}
+
+	const pollUpdates = async () => {
+		if (!updateState.updateId) {
+			return
+		}
+		try {
+			const events = await pollPeerUpdate(updateState.updateId)
+			if (events.length > 0) {
+				updateState.events.push(...events)
+				renderUpdateLog()
+				const last = events[events.length - 1]!
+				setUpdateStatus(formatUpdateMessage(last))
+				if (
+					last.type === "Completed" ||
+					last.type === "Failed" ||
+					last.type === "AlreadyUpToDate"
+				) {
+					updateState.inProgress = false
+					updateState.done = true
+					clearUpdatePoll()
+					setUpdateButtonState()
+					return
+				}
+			}
+		} catch (error) {
+			updateState.error = describeError(error)
+			updateState.inProgress = false
+			setUpdateStatus(`Update polling failed: ${updateState.error}`)
+			setUpdateButtonState()
+			clearUpdatePoll()
+			return
+		}
+		if (updateState.inProgress) {
+			updatePoll = window.setTimeout(pollUpdates, 1500)
+		}
+	}
+
+	const handleUpdateClick = async () => {
+		if (updateState.inProgress) {
+			return
+		}
+		updateState.events = []
+		updateState.error = null
+		updateState.done = false
+		updateState.updateId = null
+		renderUpdateLog()
+		setUpdateStatus("Starting update...")
+		setUpdateButtonState()
+		try {
+			const updateId = await startPeerUpdate(peerId)
+			updateState.updateId = updateId
+			updateState.inProgress = true
+			setUpdateButtonState()
+			setUpdateStatus("Update started...")
+			void pollUpdates()
+		} catch (error) {
+			updateState.error = describeError(error)
+			updateState.inProgress = false
+			setUpdateButtonState()
+			setUpdateStatus(`Failed to start update: ${updateState.error}`)
+		}
+	}
 	try {
 		const peer = await findPeer(peerId)
 		if (!peer) {
@@ -266,4 +418,9 @@ export const renderPeerDetail = async (peerId: string) => {
 		const statusEl = document.getElementById("peer-status")
 		if (statusEl) statusEl.textContent = `Failed to load peer: ${err}`
 	}
+	updateButton?.addEventListener("click", () => {
+		void handleUpdateClick()
+	})
+	setUpdateButtonState()
+	renderUpdateLog()
 }

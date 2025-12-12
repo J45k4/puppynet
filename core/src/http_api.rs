@@ -4,32 +4,38 @@ use crate::scan::ScanEvent;
 use crate::updater::UpdateProgress;
 use crate::{Permission, SearchFilesArgs};
 use anyhow::Result;
-use hyper::body::Buf;
+use futures::stream::unfold;
+use hyper::body::{Buf, Bytes};
 use hyper::header::{
-	ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS,
-	ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue, ORIGIN, SET_COOKIE,
+	ACCEPT_RANGES, ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS,
+	ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_LENGTH, CONTENT_RANGE,
+	CONTENT_TYPE, HeaderValue, ORIGIN, RANGE, SET_COOKIE,
 };
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use libp2p::PeerId;
+use log::warn;
 use mime_guess::from_path;
+use rand::RngCore;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::env;
+use std::fmt::Write;
 use std::fs;
+use std::io::{ErrorKind, SeekFrom};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use log::warn;
-use rand::rngs::OsRng;
-use rand::RngCore;
-use tokio::{signal, task};
+use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::TcpListener;
+use tokio::{signal, task};
 use url::form_urlencoded;
 
 const CT_JSON: &str = "application/json";
@@ -83,6 +89,7 @@ struct StateResponse {
 struct PeerSummary {
 	id: String,
 	name: Option<String>,
+	node_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -155,10 +162,7 @@ impl ApiState {
 		false
 	}
 
-	fn insert_update(
-		&self,
-		rx: Arc<Mutex<std::sync::mpsc::Receiver<UpdateProgress>>>,
-	) -> u64 {
+	fn insert_update(&self, rx: Arc<Mutex<std::sync::mpsc::Receiver<UpdateProgress>>>) -> u64 {
 		let id = self.next_update_id.fetch_add(1, Ordering::SeqCst);
 		self.updates.lock().unwrap().insert(id, rx);
 		id
@@ -243,7 +247,11 @@ fn clear_session_cookie() -> HeaderValue {
 }
 
 fn bearer_token(req: &Request<Body>) -> Option<String> {
-	let header = req.headers().get(hyper::header::AUTHORIZATION)?.to_str().ok()?;
+	let header = req
+		.headers()
+		.get(hyper::header::AUTHORIZATION)?
+		.to_str()
+		.ok()?;
 	let (kind, token) = header.split_once(' ')?;
 	kind.eq_ignore_ascii_case("bearer")
 		.then(|| token.to_string())
@@ -310,11 +318,7 @@ fn asset_response(path: &str, data: impl Into<Body>) -> Response<Body> {
 }
 
 fn serve_static_path(path: &str) -> Option<Response<Body>> {
-	let path = if path.is_empty() {
-		"index.html"
-	} else {
-		path
-	};
+	let path = if path.is_empty() { "index.html" } else { path };
 	if let Some(data) = load_dist_asset(path) {
 		return Some(asset_response(path, data));
 	}
@@ -341,6 +345,129 @@ fn with_cors(mut resp: Response<Body>, origin: Option<&str>) -> Response<Body> {
 		HeaderValue::from_static("true"),
 	);
 	resp
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+	let mut buf = String::with_capacity(bytes.len() * 2);
+	for byte in bytes {
+		write!(buf, "{:02x}", byte).ok();
+	}
+	buf
+}
+
+fn peer_to_node_id(peer: &PeerId) -> Option<[u8; 16]> {
+	let mut node_id = [0u8; 16];
+	let bytes = peer.to_bytes();
+	let len = node_id.len();
+	if bytes.len() < len {
+		return None;
+	}
+	node_id.copy_from_slice(&bytes[..len]);
+	Some(node_id)
+}
+
+enum RangeParseError {
+	Invalid,
+	Unsatisfiable,
+}
+
+fn range_not_satisfiable_response(total: u64) -> Response<Body> {
+	let mut resp = Response::builder()
+		.status(StatusCode::RANGE_NOT_SATISFIABLE)
+		.header(CONTENT_RANGE, format!("bytes */{}", total))
+		.body(Body::empty())
+		.unwrap();
+	resp.headers_mut()
+		.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+	resp
+}
+
+const READ_CHUNK_SIZE: usize = 64 * 1024;
+
+fn hex_value(byte: u8) -> Option<u8> {
+	match byte {
+		b'0'..=b'9' => Some(byte - b'0'),
+		b'a'..=b'f' => Some(byte - b'a' + 10),
+		b'A'..=b'F' => Some(byte - b'A' + 10),
+		_ => None,
+	}
+}
+
+fn parse_hash_param(value: &str) -> Result<[u8; 32], &'static str> {
+	let trimmed = value.trim();
+	let stripped = trimmed
+		.strip_prefix("0x")
+		.or_else(|| trimmed.strip_prefix("0X"))
+		.unwrap_or(trimmed);
+	if stripped.is_empty() {
+		return Err("hash cannot be empty");
+	}
+	if stripped.len() != 64 {
+		return Err("hash must be 32 bytes");
+	}
+	let bytes = stripped.as_bytes();
+	let mut hash = [0u8; 32];
+	for i in 0..32 {
+		let hi = hex_value(bytes[i * 2]).ok_or("invalid hash")?;
+		let lo = hex_value(bytes[i * 2 + 1]).ok_or("invalid hash")?;
+		hash[i] = (hi << 4) | lo;
+	}
+	Ok(hash)
+}
+
+fn parse_range_header(value: &str, total: u64) -> Result<(u64, u64), RangeParseError> {
+	let trimmed = value.trim();
+	if trimmed.len() < 6 {
+		return Err(RangeParseError::Invalid);
+	}
+	if !trimmed[..6].eq_ignore_ascii_case("bytes=") {
+		return Err(RangeParseError::Invalid);
+	}
+	let range_part = trimmed[6..].trim();
+	if range_part.is_empty() {
+		return Err(RangeParseError::Invalid);
+	}
+	let first_range = range_part.split(',').next().unwrap_or("").trim();
+	let mut parts = first_range.splitn(2, '-');
+	let start_str = parts.next().unwrap_or("").trim();
+	let end_str = parts.next().unwrap_or("").trim();
+	if start_str.is_empty() && end_str.is_empty() {
+		return Err(RangeParseError::Invalid);
+	}
+	if total == 0 {
+		return Err(RangeParseError::Unsatisfiable);
+	}
+	if start_str.is_empty() {
+		let suffix = end_str
+			.parse::<u64>()
+			.map_err(|_| RangeParseError::Invalid)?;
+		if suffix == 0 {
+			return Err(RangeParseError::Unsatisfiable);
+		}
+		let start = if suffix >= total { 0 } else { total - suffix };
+		let end = total.saturating_sub(1);
+		return Ok((start, end));
+	}
+	let start = start_str
+		.parse::<u64>()
+		.map_err(|_| RangeParseError::Invalid)?;
+	if start >= total {
+		return Err(RangeParseError::Unsatisfiable);
+	}
+	let mut end = if end_str.is_empty() {
+		total.saturating_sub(1)
+	} else {
+		end_str
+			.parse::<u64>()
+			.map_err(|_| RangeParseError::Invalid)?
+	};
+	if total > 0 {
+		end = end.min(total.saturating_sub(1));
+	}
+	if start > end {
+		return Err(RangeParseError::Unsatisfiable);
+	}
+	Ok((start, end))
 }
 
 fn load_jwt_secret() -> String {
@@ -380,8 +507,10 @@ async fn handle_request(
 		None
 	};
 	if is_protected && req.method() != Method::OPTIONS && auth_user.is_none() {
-		let resp =
-			json_response(StatusCode::UNAUTHORIZED, json!({ "error": "not authenticated" }));
+		let resp = json_response(
+			StatusCode::UNAUTHORIZED,
+			json!({ "error": "not authenticated" }),
+		);
 		return Ok(with_cors(resp, origin_ref));
 	}
 
@@ -423,27 +552,27 @@ async fn handle_request(
 							origin_ref,
 						));
 					}
-					let access_token = match auth::issue_jwt(
-						&payload.username,
-						state.jwt_secret.as_bytes(),
-					) {
-						Ok(token) => token,
-						Err(err) => {
-							return Ok(with_cors(
-								json_response(
-									StatusCode::INTERNAL_SERVER_ERROR,
-									json!({ "error": err.to_string() }),
-								),
-								origin_ref,
-							));
-						}
-					};
+					let access_token =
+						match auth::issue_jwt(&payload.username, state.jwt_secret.as_bytes()) {
+							Ok(token) => token,
+							Err(err) => {
+								return Ok(with_cors(
+									json_response(
+										StatusCode::INTERNAL_SERVER_ERROR,
+										json!({ "error": err.to_string() }),
+									),
+									origin_ref,
+								));
+							}
+						};
 					let mut resp =
 						json_response(StatusCode::OK, json!({ "access_token": access_token }));
 					if payload.set_cookie.unwrap_or(false) {
 						let (token, hash) = auth::generate_session_token();
 						if let Err(err) =
-							state.puppy.save_session(&hash, &payload.username, SESSION_TTL_SECS)
+							state
+								.puppy
+								.save_session(&hash, &payload.username, SESSION_TTL_SECS)
 						{
 							return Ok(with_cors(
 								json_response(
@@ -471,7 +600,8 @@ async fn handle_request(
 				.status(StatusCode::NO_CONTENT)
 				.body(Body::empty())
 				.unwrap();
-			resp.headers_mut().insert(SET_COOKIE, clear_session_cookie());
+			resp.headers_mut()
+				.insert(SET_COOKIE, clear_session_cookie());
 			resp
 		}
 		(&Method::GET, ["auth", "me"]) => match auth_user {
@@ -481,15 +611,10 @@ async fn handle_request(
 				json!({ "error": "not authenticated" }),
 			),
 		},
-		(&Method::GET, ["users"]) => {
-			match state.puppy.list_users_db() {
-				Ok(list) => json_response(StatusCode::OK, json!({ "users": list })),
-				Err(err) => json_response(
-					StatusCode::INTERNAL_SERVER_ERROR,
-					json!({ "error": err }),
-				),
-			}
-		}
+		(&Method::GET, ["users"]) => match state.puppy.list_users_db() {
+			Ok(list) => json_response(StatusCode::OK, json!({ "users": list })),
+			Err(err) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": err })),
+		},
 		(&Method::POST, ["users"]) => {
 			let body = hyper::body::aggregate(req.into_body()).await;
 			let Ok(buf) = body else {
@@ -501,10 +626,9 @@ async fn handle_request(
 					.puppy
 					.create_user(payload.username.clone(), payload.password)
 				{
-					Ok(()) => json_response(
-						StatusCode::CREATED,
-						json!({ "username": payload.username }),
-					),
+					Ok(()) => {
+						json_response(StatusCode::CREATED, json!({ "username": payload.username }))
+					}
 					Err(err) => bad_request(err.to_string()),
 				},
 				Err(err) => bad_request(format!("invalid json: {err}")),
@@ -533,9 +657,13 @@ async fn handle_request(
 				.list_peers_db()
 				.unwrap_or_default()
 				.into_iter()
-				.map(|p| PeerSummary {
-					id: p.id.to_string(),
-					name: p.name,
+				.map(|p| {
+					let node_id = peer_to_node_id(&p.id).map(|id| bytes_to_hex(&id));
+					PeerSummary {
+						id: p.id.to_string(),
+						name: p.name,
+						node_id,
+					}
 				})
 				.collect();
 			let discovered = state
@@ -605,13 +733,9 @@ async fn handle_request(
 			let Ok(buf) = body else {
 				return Ok(with_cors(bad_request("failed to read body"), origin_ref));
 			};
-			let parsed: Result<SetPermissionsRequest, _> =
-				serde_json::from_reader(buf.reader());
+			let parsed: Result<SetPermissionsRequest, _> = serde_json::from_reader(buf.reader());
 			match parsed {
-				Ok(payload) => match state
-					.puppy
-					.set_peer_permissions(peer, payload.permissions)
-				{
+				Ok(payload) => match state.puppy.set_peer_permissions(peer, payload.permissions) {
 					Ok(()) => Response::builder()
 						.status(StatusCode::NO_CONTENT)
 						.body(Body::empty())
@@ -744,6 +868,146 @@ async fn handle_request(
 			Ok(files) => json_response(StatusCode::OK, json!({ "files": files })),
 			Err(err) => bad_request(err.to_string()),
 		},
+		(&Method::GET, ["api", "file", "hash"]) => {
+			let query = parse_query(&req);
+			let Some(raw_hash) = query.get("hash") else {
+				return Ok(with_cors(bad_request("missing hash parameter"), origin_ref));
+			};
+			let hash_bytes = match parse_hash_param(raw_hash) {
+				Ok(value) => value,
+				Err(err) => return Ok(with_cors(bad_request(err), origin_ref)),
+			};
+			let (path, entry) = match state.puppy.resolve_local_file_by_hash(&hash_bytes) {
+				Ok(Some(result)) => result,
+				Ok(None) => {
+					return Ok(with_cors(
+						json_response(
+							StatusCode::NOT_FOUND,
+							json!({ "error": "file hash not found locally" }),
+						),
+						origin_ref,
+					));
+				}
+				Err(err) => {
+					return Ok(with_cors(
+						json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": err })),
+						origin_ref,
+					));
+				}
+			};
+			let mut file = match File::open(&path).await {
+				Ok(file) => file,
+				Err(err) => {
+					let response = if matches!(err.kind(), ErrorKind::NotFound) {
+						json_response(
+							StatusCode::NOT_FOUND,
+							json!({ "error": "file missing on disk" }),
+						)
+					} else {
+						json_response(
+							StatusCode::INTERNAL_SERVER_ERROR,
+							json!({ "error": err.to_string() }),
+						)
+					};
+					return Ok(with_cors(response, origin_ref));
+				}
+			};
+			let metadata = match file.metadata().await {
+				Ok(metadata) => metadata,
+				Err(err) => {
+					let response = json_response(
+						StatusCode::INTERNAL_SERVER_ERROR,
+						json!({ "error": err.to_string() }),
+					);
+					return Ok(with_cors(response, origin_ref));
+				}
+			};
+			let total_len = metadata.len();
+			let mime_type = entry.mime_type.clone().unwrap_or_else(|| {
+				from_path(&path)
+					.first_or_octet_stream()
+					.essence_str()
+					.to_string()
+			});
+			let range_header = req.headers().get(RANGE).cloned();
+			if total_len == 0 {
+				if range_header.is_some() {
+					return Ok(with_cors(
+						range_not_satisfiable_response(total_len),
+						origin_ref,
+					));
+				}
+				let resp = Response::builder()
+					.status(StatusCode::OK)
+					.header(CONTENT_TYPE, &mime_type)
+					.header(CONTENT_LENGTH, "0")
+					.header(ACCEPT_RANGES, HeaderValue::from_static("bytes"))
+					.body(Body::empty())
+					.unwrap();
+				return Ok(with_cors(resp, origin_ref));
+			}
+			let (start, end, status) = if let Some(range_value) = range_header {
+				let header_value = match range_value.to_str() {
+					Ok(value) => value,
+					Err(_) => {
+						return Ok(with_cors(bad_request("invalid range header"), origin_ref));
+					}
+				};
+				match parse_range_header(header_value, total_len) {
+					Ok((start, end)) => (start, end, StatusCode::PARTIAL_CONTENT),
+					Err(RangeParseError::Invalid) => {
+						return Ok(with_cors(bad_request("invalid range header"), origin_ref));
+					}
+					Err(RangeParseError::Unsatisfiable) => {
+						return Ok(with_cors(
+							range_not_satisfiable_response(total_len),
+							origin_ref,
+						));
+					}
+				}
+			} else {
+				(0, total_len.saturating_sub(1), StatusCode::OK)
+			};
+			if start > 0 {
+				if let Err(err) = file.seek(SeekFrom::Start(start)).await {
+					let response = json_response(
+						StatusCode::INTERNAL_SERVER_ERROR,
+						json!({ "error": err.to_string() }),
+					);
+					return Ok(with_cors(response, origin_ref));
+				}
+			}
+			let chunk_len = end - start + 1;
+			let stream = unfold((file, chunk_len), |(mut reader, remaining)| async move {
+				if remaining == 0 {
+					return None;
+				}
+				let buf_size = remaining.min(READ_CHUNK_SIZE as u64) as usize;
+				let mut buf = vec![0u8; buf_size];
+				match reader.read(&mut buf).await {
+					Ok(0) => None,
+					Ok(n) => {
+						buf.truncate(n);
+						let next_remaining = remaining.saturating_sub(n as u64);
+						Some((Ok(Bytes::from(buf)), (reader, next_remaining)))
+					}
+					Err(err) => Some((Err(err), (reader, 0))),
+				}
+			});
+			let mut builder = Response::builder()
+				.status(status)
+				.header(CONTENT_TYPE, &mime_type)
+				.header(ACCEPT_RANGES, HeaderValue::from_static("bytes"))
+				.header(CONTENT_LENGTH, chunk_len.to_string());
+			if status == StatusCode::PARTIAL_CONTENT {
+				builder = builder.header(
+					CONTENT_RANGE,
+					format!("bytes {}-{}/{}", start, end, total_len),
+				);
+			}
+			let resp = builder.body(Body::wrap_stream(stream)).unwrap();
+			with_cors(resp, origin_ref)
+		}
 		(&Method::GET, ["api", "scans", "results"]) => {
 			let query = parse_query(&req);
 			let page = query
@@ -824,18 +1088,17 @@ async fn handle_request(
 				content_query: q.get("content_query").cloned(),
 				date_from: q.get("date_from").cloned(),
 				date_to: q.get("date_to").cloned(),
-				replicas_min: q
-					.get("replicas_min")
-					.and_then(|v| v.parse::<u64>().ok()),
-				replicas_max: q
-					.get("replicas_max")
-					.and_then(|v| v.parse::<u64>().ok()),
+				replicas_min: q.get("replicas_min").and_then(|v| v.parse::<u64>().ok()),
+				replicas_max: q.get("replicas_max").and_then(|v| v.parse::<u64>().ok()),
 				mime_types,
 				sort_desc: q
 					.get("sort_desc")
 					.map(|v| v == "true" || v == "1")
 					.unwrap_or(true),
-				page: q.get("page").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0),
+				page: q
+					.get("page")
+					.and_then(|v| v.parse::<usize>().ok())
+					.unwrap_or(0),
 				page_size: q
 					.get("page_size")
 					.and_then(|v| v.parse::<usize>().ok())
@@ -868,8 +1131,7 @@ async fn handle_request(
 			let Ok(buf) = body else {
 				return Ok(with_cors(bad_request("failed to read body"), origin_ref));
 			};
-			let parsed: Result<UpdateStartRequest, _> =
-				serde_json::from_reader(buf.reader());
+			let parsed: Result<UpdateStartRequest, _> = serde_json::from_reader(buf.reader());
 			match parsed {
 				Ok(payload) => match state.puppy.update_remote_peer(peer, payload.version) {
 					Ok(rx) => {
@@ -893,14 +1155,14 @@ async fn handle_request(
 				),
 			}
 		}
-	(&Method::GET, segments) => {
-		let path = segments.join("/");
-		match serve_static_path(&path) {
-			Some(resp) => resp,
-			None => json_response(StatusCode::NOT_FOUND, json!({ "error": "not found" })),
+		(&Method::GET, segments) => {
+			let path = segments.join("/");
+			match serve_static_path(&path) {
+				Some(resp) => resp,
+				None => json_response(StatusCode::NOT_FOUND, json!({ "error": "not found" })),
+			}
 		}
-	}
-	_ => json_response(StatusCode::NOT_FOUND, json!({ "error": "not found" })),
+		_ => json_response(StatusCode::NOT_FOUND, json!({ "error": "not found" })),
 	};
 
 	Ok(with_cors(response, origin_ref))

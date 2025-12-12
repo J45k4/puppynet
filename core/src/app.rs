@@ -1512,10 +1512,13 @@ impl App {
 						log::info!("mDNS discovered peer {} at {}", peer_id, multiaddr);
 						self.state.peer_discovered(peer_id, multiaddr.clone());
 						if let Ok(mut conn) = self.db.lock() {
-							let _ = save_discovered_peer(&mut *conn, &DiscoveredPeer {
-								peer_id,
-								multiaddr: multiaddr.clone(),
-							});
+							let _ = save_discovered_peer(
+								&mut *conn,
+								&DiscoveredPeer {
+									peer_id,
+									multiaddr: multiaddr.clone(),
+								},
+							);
 						}
 						self.swarm.dial(multiaddr).unwrap();
 					}
@@ -1550,7 +1553,13 @@ impl App {
 					connection_id,
 				});
 				if let Ok(mut conn) = self.db.lock() {
-					let _ = save_peer(&mut *conn, &Peer { id: peer_id, name: None });
+					let _ = save_peer(
+						&mut *conn,
+						&Peer {
+							id: peer_id,
+							name: None,
+						},
+					);
 				}
 			}
 			SwarmEvent::ConnectionClosed {

@@ -7,8 +7,8 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
-use futures::executor::block_on;
 use chrono::{DateTime, Utc};
+use futures::executor::block_on;
 use iced::alignment::{Horizontal, Vertical};
 use iced::executor;
 use iced::theme;
@@ -969,15 +969,15 @@ async fn list_effective_permissions(
 	peer_id: String,
 ) -> (String, Result<Vec<Permission>, String>) {
 	let target = PeerId::from_str(&peer_id).unwrap();
-		let handle = task::spawn_blocking({
-			let peer = peer.clone();
-			let target = target.clone();
-			move || {
-				state_snapshot_blocking(&peer)
-					.map(|s| s.permissions_for_peer(&target))
-					.ok_or_else(|| String::from("state unavailable"))
-			}
-		});
+	let handle = task::spawn_blocking({
+		let peer = peer.clone();
+		let target = target.clone();
+		move || {
+			state_snapshot_blocking(&peer)
+				.map(|s| s.permissions_for_peer(&target))
+				.ok_or_else(|| String::from("state unavailable"))
+		}
+	});
 	let result = match timeout(Duration::from_secs(3), handle).await {
 		Ok(Ok(res)) => res,
 		Ok(Err(err)) => Err(format!("permissions task failed: {err}")),

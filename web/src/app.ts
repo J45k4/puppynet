@@ -9,6 +9,7 @@ import { renderUpdates } from "./pages/updates"
 import { renderSettings } from "./pages/settings"
 import { renderUsers, renderUserDetail } from "./pages/users"
 import { renderLogin } from "./pages/login"
+import { renderFileByHash } from "./pages/file"
 
 const serverAddr = getServerAddr()
 
@@ -31,6 +32,7 @@ window.onload = () => {
 		"/storage": () => renderStorage(),
 		"/updates": () => renderUpdates(),
 		"/settings": () => renderSettings(),
+		"/file/:hash": ({ hash }: { hash: string }) => renderFileByHash(hash),
 		"/*": () => renderHome(),
 	})
 

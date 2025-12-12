@@ -1,5 +1,5 @@
-pub mod auth;
 mod app;
+pub mod auth;
 mod db;
 pub mod http_api;
 pub mod p2p;

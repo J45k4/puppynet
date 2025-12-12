@@ -500,3 +500,72 @@ body {
 	overflow: auto;
 	max-height: 320px;
 }
+
+.file-meta {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin-bottom: 12px;
+	font-size: 0.95rem;
+}
+
+.file-preview {
+	margin-top: 16px;
+}
+
+.file-preview pre {
+	margin: 0;
+	padding: 12px;
+	border-radius: 8px;
+	border: 1px solid #334155;
+	background: #020617;
+	white-space: pre-wrap;
+	font-size: 0.95rem;
+	max-height: 400px;
+	overflow: auto;
+}
+
+.file-preview pre img {
+	max-width: 100%;
+	height: auto;
+	display: block;
+}
+
+.file-preview pre.file-content--image {
+	padding: 0;
+	background: transparent;
+	border: none;
+	max-height: none;
+	overflow: visible;
+}
+
+.file-preview pre.file-content--image img {
+	width: 100%;
+	height: auto;
+	max-height: 70vh;
+	object-fit: contain;
+	margin: 0 auto;
+}
+
+.file-actions {
+	display: flex;
+	justify-content: flex-end;
+	margin-top: 12px;
+}
+
+.update-event {
+	border-radius: 8px;
+	border: 1px solid #334155;
+	padding: 10px;
+	background: #020617;
+	font-size: 0.95rem;
+	color: #e2e8f0;
+}
+
+.update-event-completed {
+	border-color: #22c55e;
+}
+
+.update-event-failed {
+	border-color: #f97316;
+}
