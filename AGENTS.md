@@ -11,3 +11,4 @@ dont modify readme unless given instruction to do that
 
 if you make changes you web you should run
 - bun run check in web folder
+- bun run build to generate latest assets
