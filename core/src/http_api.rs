@@ -77,6 +77,22 @@ struct UpdateStartRequest {
 }
 
 #[derive(Serialize)]
+struct ShellStartResponse {
+	id: u64,
+}
+
+#[derive(Deserialize)]
+struct ShellInputRequest {
+	id: u64,
+	data: Vec<u8>,
+}
+
+#[derive(Serialize)]
+struct ShellOutputResponse {
+	data: Vec<u8>,
+}
+
+#[derive(Serialize)]
 struct StateResponse {
 	me: String,
 	peers: Vec<PeerSummary>,
@@ -1039,6 +1055,44 @@ async fn handle_request(
 					.body(Body::from(thumb.data))
 					.unwrap(),
 				Err(err) => bad_request(err.to_string()),
+			}
+		}
+		(&Method::POST, ["api", "peers", peer_id, "shell", "start"]) => {
+			let peer = match parse_peer_id(peer_id) {
+				Ok(p) => p,
+				Err(err) => return Ok(with_cors(bad_request(err), origin_ref)),
+			};
+			let mut id_bytes = [0u8; 8];
+			OsRng.fill_bytes(&mut id_bytes);
+			let session_id = u64::from_le_bytes(id_bytes);
+			match state.puppy.start_shell(peer, session_id).await {
+				Ok(id) => json_response(StatusCode::OK, json!(ShellStartResponse { id })),
+				Err(err) => bad_request(err.to_string()),
+			}
+		}
+		(&Method::POST, ["api", "peers", peer_id, "shell", "input"]) => {
+			let peer = match parse_peer_id(peer_id) {
+				Ok(p) => p,
+				Err(err) => return Ok(with_cors(bad_request(err), origin_ref)),
+			};
+			let body = hyper::body::aggregate(req.into_body()).await;
+			let Ok(buf) = body else {
+				return Ok(with_cors(bad_request("failed to read body"), origin_ref));
+			};
+			let parsed: Result<ShellInputRequest, _> = serde_json::from_reader(buf.reader());
+			match parsed {
+				Ok(payload) => match state
+					.puppy
+					.shell_input(peer, payload.id, payload.data)
+					.await
+				{
+					Ok(data) => json_response(
+						StatusCode::OK,
+						json!(ShellOutputResponse { data }),
+					),
+					Err(err) => bad_request(err.to_string()),
+				},
+				Err(err) => bad_request(format!("invalid json: {err}")),
 			}
 		}
 		(&Method::GET, ["api", "storage"]) => match state.puppy.list_storage_files().await {

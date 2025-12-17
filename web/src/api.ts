@@ -376,6 +376,55 @@ export type FileChunk = {
 	eof: boolean
 }
 
+export const startPeerShell = async (peerId: string): Promise<number> => {
+	const headers = authHeaders()
+	const res = await fetch(
+		`${apiBase}/api/peers/${encodeURIComponent(peerId)}/shell/start`,
+		{
+			method: "POST",
+			credentials: "include",
+			headers,
+		},
+	)
+	if (res.status === 401) {
+		throw new Error("not authenticated")
+	}
+	if (!res.ok) {
+		throw new Error(`Failed to start shell: ${res.status}`)
+	}
+	const data = (await res.json()) as { id: number }
+	return data.id
+}
+
+export const sendPeerShellInput = async (
+	peerId: string,
+	id: number,
+	data: number[],
+): Promise<number[]> => {
+	const auth = authHeaders()
+	const headers: HeadersInit = {
+		"content-type": "application/json",
+		...(auth ?? {}),
+	}
+	const res = await fetch(
+		`${apiBase}/api/peers/${encodeURIComponent(peerId)}/shell/input`,
+		{
+			method: "POST",
+			credentials: "include",
+			headers,
+			body: JSON.stringify({ id, data }),
+		},
+	)
+	if (res.status === 401) {
+		throw new Error("not authenticated")
+	}
+	if (!res.ok) {
+		throw new Error(`Shell input failed: ${res.status}`)
+	}
+	const payload = (await res.json()) as { data: number[] }
+	return payload.data
+}
+
 export const fetchPeerFileChunk = async (
 	peerId: string,
 	path: string,

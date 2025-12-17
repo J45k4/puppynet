@@ -10,6 +10,7 @@ import { renderSettings } from "./pages/settings"
 import { renderUsers, renderUserDetail } from "./pages/users"
 import { renderLogin } from "./pages/login"
 import { renderFileByHash, renderFileByPath } from "./pages/file"
+import { renderPeerShell } from "./pages/peer-shell"
 
 const serverAddr = getServerAddr()
 
@@ -24,6 +25,8 @@ window.onload = () => {
 		"/peers": () => renderPeers(),
 		"/peers/:peerId": ({ peerId }: { peerId: string }) =>
 			renderPeerDetail(peerId),
+		"/peers/:peerId/shell": ({ peerId }: { peerId: string }) =>
+			renderPeerShell(peerId),
 		"/user": () => renderUsers(),
 		"/user/:userId": ({ userId }: { userId: string }) =>
 			renderUserDetail(userId),

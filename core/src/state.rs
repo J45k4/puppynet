@@ -293,10 +293,15 @@ impl State {
 	}
 
 	pub fn peer_discovered(&mut self, peer_id: PeerId, multiaddr: Multiaddr) {
-		if !self.discovered_peers.iter().any(|p| p.peer_id == peer_id) {
-			self.discovered_peers
-				.push(DiscoveredPeer { peer_id, multiaddr });
+		if self
+			.discovered_peers
+			.iter()
+			.any(|p| p.peer_id == peer_id && p.multiaddr == multiaddr)
+		{
+			return;
 		}
+		self.discovered_peers
+			.push(DiscoveredPeer { peer_id, multiaddr });
 	}
 
 	pub fn peer_expired(&mut self, peer_id: PeerId, multiaddr: Multiaddr) {

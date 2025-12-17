@@ -218,6 +218,9 @@ export const renderPeerDetail = async (peerId: string) => {
 			<h2>Summary</h2>
 			<p id="peer-status" class="muted">Loading peer info...</p>
 			<div id="peer-details"></div>
+			<div class="peer-actions" style="margin-top: 8px;">
+				<button type="button" class="link-btn" id="peer-open-shell">Remote shell</button>
+			</div>
 			<button class="link-btn" id="back-to-peers">Back to peers</button>
 		</div>
 		<div class="card" id="peer-cpu-card">
@@ -240,6 +243,10 @@ export const renderPeerDetail = async (peerId: string) => {
 	const backBtn = document.getElementById("back-to-peers")
 	if (backBtn) {
 		backBtn.addEventListener("click", () => navigate("/peers"))
+	}
+	const shellBtn = document.getElementById("peer-open-shell")
+	if (shellBtn) {
+		shellBtn.addEventListener("click", () => navigate(`/peers/${peerId}/shell`))
 	}
 	const cpuStatusEl = document.getElementById("peer-cpu-status")
 	const cpuListEl = document.getElementById("peer-cpu-list")

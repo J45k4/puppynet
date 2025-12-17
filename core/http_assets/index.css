@@ -380,7 +380,97 @@ body {
 .storage-actions {
   display: flex;
   justify-content: flex-end;
+  align-items:  center;
+  gap: 10px;
   margin-bottom: 12px;
+}
+
+.storage-view-toggle {
+  display: inline-flex;
+  background: #0b1220;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  gap: 6px;
+  padding: 4px;
+}
+
+.storage-view-toggle button {
+  color: inherit;
+  cursor: pointer;
+  background: none;
+  border: 1px solid #0000;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: .9rem;
+}
+
+.storage-view-toggle button.active, .storage-view-toggle button[aria-selected="true"] {
+  color: #0b1728;
+  background: #38bdf833;
+  border-color: #38bdf8;
+}
+
+.storage-heatmap {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.storage-heatmap-node {
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.storage-heatmap-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.storage-heatmap-back {
+  align-self:  flex-start;
+  margin-top: 4px;
+}
+
+.storage-heatmap-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.storage-heatmap-tile {
+  display: flex;
+  background: var(--heat-bg, #1e293b);
+  color: #f8fafc;
+  text-align: left;
+  cursor: pointer;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 86px;
+  padding: 10px;
+}
+
+.storage-heatmap-tile:hover {
+  filter: brightness(1.05);
+  border-color: #38bdf8;
+}
+
+.storage-heatmap-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: .98rem;
+  line-height: 1.2;
+}
+
+.storage-heatmap-meta, .storage-heatmap-count {
+  color: #f8fafce6;
+  font-size: .85rem;
 }
 
 .storage-table {
@@ -638,6 +728,14 @@ body {
   display: flex;
   justify-content: flex-end;
   margin-top: 12px;
+}
+
+.peer-shell-canvas {
+  background: #000;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  width: 100%;
+  height: 60vh;
 }
 
 .update-event {

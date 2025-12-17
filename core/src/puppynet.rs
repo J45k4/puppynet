@@ -577,6 +577,38 @@ impl PuppyNet {
 			.map_err(|e| anyhow!("GetThumbnail response channel closed: {e}"))?
 	}
 
+	pub async fn start_shell(&self, peer: PeerId, session_id: u64) -> Result<u64> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::StartShell {
+				peer,
+				session_id,
+				tx,
+			})
+			.map_err(|e| anyhow!("failed to send StartShell command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("StartShell response channel closed: {e}"))?
+	}
+
+	pub async fn shell_input(
+		&self,
+		peer: PeerId,
+		session_id: u64,
+		data: Vec<u8>,
+	) -> Result<Vec<u8>> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::ShellInput {
+				peer,
+				session_id,
+				data,
+				tx,
+			})
+			.map_err(|e| anyhow!("failed to send ShellInput command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("ShellInput response channel closed: {e}"))?
+	}
+
 	/// Request a remote peer to update itself.
 	/// Returns a receiver that will receive UpdateProgress events as the update proceeds.
 	/// If the target peer is the local peer, performs a local self-update instead.

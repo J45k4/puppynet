@@ -263,6 +263,43 @@ var fetchFileByHash = async (hash) => {
     status: res.status
   };
 };
+var startPeerShell = async (peerId) => {
+  const headers = authHeaders();
+  const res = await fetch(`${apiBase}/api/peers/${encodeURIComponent(peerId)}/shell/start`, {
+    method: "POST",
+    credentials: "include",
+    headers
+  });
+  if (res.status === 401) {
+    throw new Error("not authenticated");
+  }
+  if (!res.ok) {
+    throw new Error(`Failed to start shell: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.id;
+};
+var sendPeerShellInput = async (peerId, id, data) => {
+  const auth = authHeaders();
+  const headers = {
+    "content-type": "application/json",
+    ...auth ?? {}
+  };
+  const res = await fetch(`${apiBase}/api/peers/${encodeURIComponent(peerId)}/shell/input`, {
+    method: "POST",
+    credentials: "include",
+    headers,
+    body: JSON.stringify({ id, data })
+  });
+  if (res.status === 401) {
+    throw new Error("not authenticated");
+  }
+  if (!res.ok) {
+    throw new Error(`Shell input failed: ${res.status}`);
+  }
+  const payload = await res.json();
+  return payload.data;
+};
 var fetchPeerFileChunk = async (peerId, path, length) => {
   const params = new URLSearchParams;
   params.set("path", path);
@@ -642,6 +679,9 @@ var renderPeerDetail = async (peerId) => {
 			<h2>Summary</h2>
 			<p id="peer-status" class="muted">Loading peer info...</p>
 			<div id="peer-details"></div>
+			<div class="peer-actions" style="margin-top: 8px;">
+				<button type="button" class="link-btn" id="peer-open-shell">Remote shell</button>
+			</div>
 			<button class="link-btn" id="back-to-peers">Back to peers</button>
 		</div>
 		<div class="card" id="peer-cpu-card">
@@ -664,6 +704,10 @@ var renderPeerDetail = async (peerId) => {
   const backBtn = document.getElementById("back-to-peers");
   if (backBtn) {
     backBtn.addEventListener("click", () => navigate("/peers"));
+  }
+  const shellBtn = document.getElementById("peer-open-shell");
+  if (shellBtn) {
+    shellBtn.addEventListener("click", () => navigate(`/peers/${peerId}/shell`));
   }
   const cpuStatusEl = document.getElementById("peer-cpu-status");
   const cpuListEl = document.getElementById("peer-cpu-list");
@@ -930,6 +974,7 @@ var createTreeView = (options) => {
   return {
     element: root,
     expanded,
+    toggle: toggleNode,
     setNodes: (next) => {
       nodes = next;
       buildMap(nodes);
@@ -1826,6 +1871,10 @@ var renderStorage = async () => {
 			<p id="storage-status" class="muted">Loading storage usage...</p>
 		</div>
 		<div class="storage-actions">
+			<div class="storage-view-toggle" role="tablist" aria-label="Storage view">
+				<button type="button" id="storage-view-tree" role="tab" aria-selected="true">Tree</button>
+				<button type="button" id="storage-view-heatmap" role="tab" aria-selected="false">Heatmap</button>
+			</div>
 			<button type="button" id="storage-refresh">Refresh</button>
 		</div>
 		<div class="storage-table">
@@ -1844,11 +1893,103 @@ var renderStorage = async () => {
   const statusEl = content.querySelector("#storage-status");
   const listEl = content.querySelector("#storage-list");
   const refreshButton = content.querySelector("#storage-refresh");
+  const viewTreeButton = content.querySelector("#storage-view-tree");
+  const viewHeatmapButton = content.querySelector("#storage-view-heatmap");
   const state = {
     nodes: [],
     loading: true,
     error: null,
-    customStatus: null
+    customStatus: null,
+    viewMode: "tree",
+    heatmapFocus: new Map
+  };
+  const heatColor = (percent) => {
+    const clamped = Math.max(0, Math.min(100, percent));
+    const hue = 210 - clamped * 2.1;
+    return `hsl(${hue.toFixed(0)}deg 70% 40%)`;
+  };
+  const renderHeatmap = () => {
+    if (!listEl)
+      return;
+    if (!state.nodes.length) {
+      listEl.innerHTML = `<p class="muted">No storage data available.</p>`;
+      return;
+    }
+    const findEntry = (entries, path) => {
+      for (const entry of entries) {
+        if (entry.path === path)
+          return entry;
+        if (entry.children.length) {
+          const found = findEntry(entry.children, path);
+          if (found)
+            return found;
+        }
+      }
+      return null;
+    };
+    const nodeSections = state.nodes.map((node) => {
+      const focusPath = state.heatmapFocus.get(node.id) ?? null;
+      const focusEntry = focusPath ? findEntry(node.entries, focusPath) : null;
+      const focusEntries = focusEntry ? focusEntry.children : node.entries;
+      const tiles = focusEntries.slice(0, 120).map((entry) => {
+        const bg = heatColor(entry.percent);
+        const percentLabel = `${entry.percent.toFixed(1)}%`;
+        return `
+						<button
+							type="button"
+							class="storage-heatmap-tile"
+							style="--heat-bg: ${bg}"
+							data-entry-open="${escapeHtml4(entry.path)}"
+							data-entry-has-children="${entry.children.length ? "1" : "0"}"
+							data-node-id="${escapeHtml4(node.id)}"
+							title="${escapeHtml4(entry.path)} • ${formatSize2(entry.size)}"
+						>
+							<strong class="storage-heatmap-name">${escapeHtml4(entry.name)}</strong>
+							<span class="storage-heatmap-meta">${percentLabel} • ${formatSize2(entry.size)}</span>
+							<span class="storage-heatmap-count">${entry.itemCount} item(s)</span>
+						</button>
+					`;
+      });
+      const backButton = focusEntry || focusPath ? `<button type="button" class="link-btn storage-heatmap-back" data-heatmap-back="${escapeHtml4(node.id)}">Back</button>` : "";
+      return `
+					<section class="storage-heatmap-node">
+						<header class="storage-heatmap-header">
+							<h3>${escapeHtml4(node.name)}</h3>
+							<p class="muted">${escapeHtml4(node.id)} • ${formatSize2(node.totalSize)}</p>
+							${backButton}
+						</header>
+						<div class="storage-heatmap-grid">
+							${tiles.join("")}
+						</div>
+					</section>
+				`;
+    }).join("");
+    listEl.innerHTML = `<div class="storage-heatmap">${nodeSections}</div>`;
+    const tileButtons = listEl.querySelectorAll("[data-entry-open]");
+    tileButtons.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const path = btn.getAttribute("data-entry-open");
+        const nodeId = btn.getAttribute("data-node-id") ?? "";
+        const hasChildren = btn.getAttribute("data-entry-has-children") === "1";
+        if (!path)
+          return;
+        if (hasChildren) {
+          state.heatmapFocus.set(nodeId, path);
+          updateStorageView();
+          return;
+        }
+        state.customStatus = `Selected ${path}`;
+        updateStatus();
+      });
+    });
+    const backButtons = listEl.querySelectorAll("[data-heatmap-back]");
+    backButtons.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const nodeId = btn.getAttribute("data-heatmap-back") ?? "";
+        state.heatmapFocus.set(nodeId, null);
+        updateStorageView();
+      });
+    });
   };
   const buildEntryNodes = (nodeId, entries) => entries.map((entry) => ({
     id: `${nodeId}:${entry.path}`,
@@ -1906,6 +2047,10 @@ var renderStorage = async () => {
     renderRow,
     onSelect: (node) => {
       const data = node.data;
+      if (node.children?.length) {
+        tree.toggle(node.id);
+        return;
+      }
       if (data.path !== undefined) {
         const entry = data;
         state.customStatus = `Selected ${entry.path}`;
@@ -1950,37 +2095,44 @@ var renderStorage = async () => {
       listEl.appendChild(tree.element);
       tree.setNodes([]);
     } else {
-      const nodes = state.nodes.map((storageNode) => {
-        const nodeId = `node:${storageNode.id}`;
-        return {
-          id: nodeId,
-          label: storageNode.name,
-          sublabel: storageNode.id,
-          data: storageNode,
-          children: buildEntryNodes(nodeId, storageNode.entries)
-        };
-      });
-      listEl.innerHTML = "";
-      listEl.appendChild(tree.element);
-      tree.setNodes(nodes);
+      if (state.viewMode === "heatmap") {
+        renderHeatmap();
+      } else {
+        const nodes = state.nodes.map((storageNode) => {
+          const nodeId = `node:${storageNode.id}`;
+          return {
+            id: nodeId,
+            label: storageNode.name,
+            sublabel: storageNode.id,
+            data: storageNode,
+            children: buildEntryNodes(nodeId, storageNode.entries)
+          };
+        });
+        listEl.innerHTML = "";
+        listEl.appendChild(tree.element);
+        tree.setNodes(nodes);
+      }
     }
     updateStatus();
-    const entryOpenButtons = listEl.querySelectorAll("[data-entry-open]");
-    entryOpenButtons.forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const path = btn.getAttribute("data-entry-open");
-        if (!path)
-          return;
-        state.customStatus = `Selected ${path}`;
-        updateStatus();
+    if (state.viewMode === "tree") {
+      const entryOpenButtons = listEl.querySelectorAll("[data-entry-open]");
+      entryOpenButtons.forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const path = btn.getAttribute("data-entry-open");
+          if (!path)
+            return;
+          state.customStatus = `Selected ${path}`;
+          updateStatus();
+        });
       });
-    });
+    }
   };
   const loadStorage = async () => {
     state.loading = true;
     state.error = null;
     state.customStatus = null;
     state.nodes = [];
+    state.heatmapFocus.clear();
     updateStorageView();
     try {
       const files = await fetchStorageUsage();
@@ -1995,6 +2147,20 @@ var renderStorage = async () => {
   refreshButton?.addEventListener("click", () => {
     loadStorage();
   });
+  const setViewMode = (mode) => {
+    state.viewMode = mode;
+    if (viewTreeButton) {
+      viewTreeButton.setAttribute("aria-selected", String(mode === "tree"));
+      viewTreeButton.classList.toggle("active", mode === "tree");
+    }
+    if (viewHeatmapButton) {
+      viewHeatmapButton.setAttribute("aria-selected", String(mode === "heatmap"));
+      viewHeatmapButton.classList.toggle("active", mode === "heatmap");
+    }
+    updateStorageView();
+  };
+  viewTreeButton?.addEventListener("click", () => setViewMode("tree"));
+  viewHeatmapButton?.addEventListener("click", () => setViewMode("heatmap"));
   updateStorageView();
   loadStorage();
 };
@@ -2586,6 +2752,440 @@ var renderFileByPath = async (peerId, path) => {
   loadFile();
 };
 
+// src/PuppyTerm.ts
+class PuppyTerm {
+  onData = () => {};
+  fontSize;
+  fontFamily;
+  cursorAlpha;
+  defaultFg;
+  defaultBg;
+  canvas = null;
+  ctx = null;
+  cols;
+  rows;
+  charW = 10;
+  charH;
+  fg;
+  bg;
+  cx = 0;
+  cy = 0;
+  buf = [];
+  esc = false;
+  csi = false;
+  csiBuf = "";
+  constructor(opts = {}) {
+    this.fontSize = opts.fontSize ?? 16;
+    this.fontFamily = opts.fontFamily ?? "ui-monospace, Menlo, Consolas, monospace";
+    this.cursorAlpha = opts.cursorAlpha ?? 0.35;
+    this.defaultFg = opts.defaultFg ?? "#ddd";
+    this.defaultBg = opts.defaultBg ?? "#111";
+    this.fg = this.defaultFg;
+    this.bg = this.defaultBg;
+    this.cols = opts.cols ?? 80;
+    this.rows = opts.rows ?? 24;
+    this.charH = Math.ceil(this.fontSize * 1.3);
+    this.initBuffer();
+  }
+  open(canvas) {
+    this.canvas = canvas;
+    const ctx = canvas.getContext("2d", { alpha: false });
+    if (!ctx)
+      throw new Error("PuppyTerm: failed to get 2D context");
+    this.ctx = ctx;
+    ctx.font = `${this.fontSize}px ${this.fontFamily}`;
+    ctx.textBaseline = "top";
+    this.charW = Math.ceil(ctx.measureText("M").width);
+    this.charH = Math.ceil(this.fontSize * 1.3);
+    this.cols = Math.max(1, Math.floor(canvas.width / this.charW));
+    this.rows = Math.max(1, Math.floor(canvas.height / this.charH));
+    this.initBuffer();
+    this.clear();
+    this.render();
+    this.installInput();
+  }
+  resizeToCanvas() {
+    if (!this.canvas || !this.ctx)
+      return;
+    const newCols = Math.max(1, Math.floor(this.canvas.width / this.charW));
+    const newRows = Math.max(1, Math.floor(this.canvas.height / this.charH));
+    if (newCols === this.cols && newRows === this.rows)
+      return;
+    const old = this.buf;
+    const oldCols = this.cols;
+    const oldRows = this.rows;
+    this.cols = newCols;
+    this.rows = newRows;
+    this.initBuffer();
+    const minRows = Math.min(oldRows, this.rows);
+    const minCols = Math.min(oldCols, this.cols);
+    for (let y = 0;y < minRows; y++) {
+      for (let x = 0;x < minCols; x++) {
+        this.buf[y][x] = old[y][x];
+      }
+    }
+    this.cx = Math.min(this.cx, this.cols - 1);
+    this.cy = Math.min(this.cy, this.rows - 1);
+    this.render();
+  }
+  write(data) {
+    for (let i = 0;i < data.length; i++) {
+      const ch = data[i];
+      if (this.handleAnsiChar(ch))
+        continue;
+      if (ch === `
+`) {
+        this.lineFeed();
+        continue;
+      }
+      if (ch === "\r") {
+        this.cx = 0;
+        continue;
+      }
+      if (ch === "\b") {
+        this.cx = Math.max(0, this.cx - 1);
+        this.putChar(" ");
+        continue;
+      }
+      if (ch === "\t") {
+        this.tab();
+        continue;
+      }
+      this.putChar(ch);
+    }
+    this.render();
+  }
+  clear() {
+    for (let y = 0;y < this.rows; y++) {
+      for (let x = 0;x < this.cols; x++) {
+        this.buf[y][x] = { ch: " ", fg: this.fg, bg: this.bg };
+      }
+    }
+    this.cx = 0;
+    this.cy = 0;
+  }
+  initBuffer() {
+    const makeCell = () => ({ ch: " ", fg: this.fg, bg: this.bg });
+    this.buf = Array.from({ length: this.rows }, () => Array.from({ length: this.cols }, makeCell));
+  }
+  render() {
+    const ctx = this.ctx;
+    if (!ctx)
+      return;
+    for (let y = 0;y < this.rows; y++) {
+      for (let x = 0;x < this.cols; x++) {
+        const cell = this.buf[y][x];
+        const px = x * this.charW;
+        const py = y * this.charH;
+        ctx.fillStyle = cell.bg;
+        ctx.fillRect(px, py, this.charW, this.charH);
+        if (cell.ch !== " ") {
+          ctx.fillStyle = cell.fg;
+          ctx.fillText(cell.ch, px, py);
+        }
+      }
+    }
+    ctx.globalAlpha = this.cursorAlpha;
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(this.cx * this.charW, this.cy * this.charH, this.charW, this.charH);
+    ctx.globalAlpha = 1;
+  }
+  putChar(ch) {
+    if (this.cx >= this.cols) {
+      this.cx = 0;
+      this.lineFeed();
+    }
+    if (this.cy >= this.rows) {
+      this.scrollUp();
+      this.cy = this.rows - 1;
+    }
+    this.buf[this.cy][this.cx] = { ch, fg: this.fg, bg: this.bg };
+    this.cx++;
+  }
+  lineFeed() {
+    this.cy++;
+    if (this.cy >= this.rows) {
+      this.scrollUp();
+      this.cy = this.rows - 1;
+    }
+  }
+  scrollUp() {
+    this.buf.shift();
+    const emptyRow = Array.from({ length: this.cols }, () => ({
+      ch: " ",
+      fg: this.fg,
+      bg: this.bg
+    }));
+    this.buf.push(emptyRow);
+  }
+  tab() {
+    const next = (Math.floor(this.cx / 8) + 1) * 8;
+    this.cx = Math.min(next, this.cols - 1);
+  }
+  handleAnsiChar(ch) {
+    if (!this.esc) {
+      if (ch === "\x1B") {
+        this.esc = true;
+        return true;
+      }
+      return false;
+    }
+    if (!this.csi) {
+      if (ch === "[") {
+        this.csi = true;
+        this.csiBuf = "";
+        return true;
+      }
+      this.esc = false;
+      return true;
+    }
+    this.csiBuf += ch;
+    const code = ch.charCodeAt(0);
+    const isFinal = code >= 64 && code <= 126;
+    if (!isFinal)
+      return true;
+    const final = ch;
+    const body = this.csiBuf.slice(0, -1);
+    this.applyCsi(final, body);
+    this.esc = false;
+    this.csi = false;
+    this.csiBuf = "";
+    return true;
+  }
+  applyCsi(final, body) {
+    const isPrivate = body.startsWith("?");
+    const paramsStr = isPrivate ? body.slice(1) : body;
+    const params = paramsStr.length ? paramsStr.split(";").map((s) => s === "" ? Number.NaN : Number(s)) : [];
+    const p = (idx, def) => Number.isFinite(params[idx]) ? params[idx] : def;
+    switch (final) {
+      case "m":
+        if (params.length === 0) {
+          this.sgr(0);
+          break;
+        }
+        for (const n of params) {
+          this.sgr(Number.isFinite(n) ? n : 0);
+        }
+        break;
+      case "H":
+      case "f": {
+        const row = p(0, 1);
+        const col = p(1, 1);
+        this.cy = Math.min(this.rows - 1, Math.max(0, row - 1));
+        this.cx = Math.min(this.cols - 1, Math.max(0, col - 1));
+        break;
+      }
+      case "A":
+        this.cy = Math.max(0, this.cy - p(0, 1));
+        break;
+      case "B":
+        this.cy = Math.min(this.rows - 1, this.cy + p(0, 1));
+        break;
+      case "C":
+        this.cx = Math.min(this.cols - 1, this.cx + p(0, 1));
+        break;
+      case "D":
+        this.cx = Math.max(0, this.cx - p(0, 1));
+        break;
+      case "J": {
+        const mode = p(0, 0);
+        if (mode === 2) {
+          this.clear();
+        } else if (mode === 0) {
+          for (let y = this.cy;y < this.rows; y++) {
+            const startX = y === this.cy ? this.cx : 0;
+            for (let x = startX;x < this.cols; x++) {
+              this.buf[y][x] = { ch: " ", fg: this.fg, bg: this.bg };
+            }
+          }
+        }
+        break;
+      }
+      case "K": {
+        const mode = p(0, 0);
+        if (mode === 2) {
+          for (let x = 0;x < this.cols; x++) {
+            this.buf[this.cy][x] = { ch: " ", fg: this.fg, bg: this.bg };
+          }
+        } else if (mode === 0) {
+          for (let x = this.cx;x < this.cols; x++) {
+            this.buf[this.cy][x] = { ch: " ", fg: this.fg, bg: this.bg };
+          }
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  sgr(n) {
+    if (n === 0) {
+      this.fg = this.defaultFg;
+      this.bg = this.defaultBg;
+      return;
+    }
+    const basic = [
+      "#000",
+      "#a00",
+      "#0a0",
+      "#aa0",
+      "#00a",
+      "#a0a",
+      "#0aa",
+      "#aaa"
+    ];
+    const bright = [
+      "#555",
+      "#f55",
+      "#5f5",
+      "#ff5",
+      "#55f",
+      "#f5f",
+      "#5ff",
+      "#fff"
+    ];
+    if (n >= 30 && n <= 37) {
+      const next = basic[n - 30];
+      if (next)
+        this.fg = next;
+    }
+    if (n >= 40 && n <= 47) {
+      const next = basic[n - 40];
+      if (next)
+        this.bg = next;
+    }
+    if (n >= 90 && n <= 97) {
+      const next = bright[n - 90];
+      if (next)
+        this.fg = next;
+    }
+    if (n >= 100 && n <= 107) {
+      const next = bright[n - 100];
+      if (next)
+        this.bg = next;
+    }
+  }
+  installInput() {
+    const canvas = this.canvas;
+    canvas.tabIndex = 0;
+    canvas.style.outline = "none";
+    canvas.addEventListener("mousedown", () => canvas.focus());
+    canvas.addEventListener("keydown", (e) => {
+      if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Tab"].includes(e.key)) {
+        e.preventDefault();
+      }
+      const data = this.keyToData(e);
+      if (data)
+        this.onData(data);
+    });
+  }
+  keyToData(e) {
+    if (e.key === "Enter")
+      return "\r";
+    if (e.key === "Backspace")
+      return "";
+    if (e.key === "Tab")
+      return "\t";
+    if (e.key === "ArrowUp")
+      return "\x1B[A";
+    if (e.key === "ArrowDown")
+      return "\x1B[B";
+    if (e.key === "ArrowRight")
+      return "\x1B[C";
+    if (e.key === "ArrowLeft")
+      return "\x1B[D";
+    if (e.ctrlKey && e.key.length === 1) {
+      const k = e.key.toUpperCase();
+      const code = k.charCodeAt(0);
+      if (code >= 65 && code <= 90)
+        return String.fromCharCode(code - 64);
+    }
+    if (e.altKey && e.key.length === 1)
+      return "\x1B" + e.key;
+    if (!e.ctrlKey && !e.metaKey && e.key.length === 1)
+      return e.key;
+    return "";
+  }
+}
+
+// src/pages/peer-shell.ts
+var renderPeerShell = async (peerId) => {
+  const content = ensureShell("/peers");
+  content.innerHTML = `
+	<section class="hero">
+		<h1>Remote shell</h1>
+		<p class="lede">Interactive session for peer ${peerId}</p>
+	</section>
+	<div class="card">
+		<canvas id="peer-shell-canvas" class="peer-shell-canvas"></canvas>
+		<p id="peer-shell-status" class="muted" style="margin-top: 8px;">Connecting…</p>
+	</div>
+`;
+  const canvas = content.querySelector("#peer-shell-canvas");
+  const statusEl = content.querySelector("#peer-shell-status");
+  if (!canvas) {
+    throw new Error("shell canvas missing");
+  }
+  const fitCanvas = () => {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.max(300, Math.floor(rect.width * dpr));
+    canvas.height = Math.max(240, Math.floor(rect.height * dpr));
+  };
+  fitCanvas();
+  const term = new PuppyTerm;
+  term.open(canvas);
+  term.write(`Connecting to peer…\r
+`);
+  let sessionId = null;
+  try {
+    sessionId = await startPeerShell(peerId);
+    if (statusEl)
+      statusEl.textContent = `Shell started (session ${sessionId})`;
+    term.write(`Connected.\r
+`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (statusEl)
+      statusEl.textContent = `Failed to start shell: ${msg}`;
+    term.write(`Failed to start shell: ${msg}\r
+`);
+    return;
+  }
+  const encoder = new TextEncoder;
+  const decoder = new TextDecoder("utf-8", { fatal: false });
+  let inFlight = false;
+  const send = async (data) => {
+    if (sessionId === null || inFlight)
+      return;
+    inFlight = true;
+    try {
+      const bytes = Array.from(encoder.encode(data));
+      const outBytes = await sendPeerShellInput(peerId, sessionId, bytes);
+      if (outBytes.length) {
+        term.write(decoder.decode(new Uint8Array(outBytes)));
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (statusEl)
+        statusEl.textContent = `Shell error: ${msg}`;
+      term.write(`\r
+Shell error: ${msg}\r
+`);
+    } finally {
+      inFlight = false;
+    }
+  };
+  term.onData = (data) => {
+    term.write(data);
+    send(data);
+  };
+  window.addEventListener("resize", () => {
+    fitCanvas();
+    term.resizeToCanvas();
+  });
+};
+
 // src/app.ts
 var serverAddr2 = getServerAddr();
 window.onload = () => {
@@ -2598,6 +3198,7 @@ window.onload = () => {
     "/login": () => renderLogin(),
     "/peers": () => renderPeers(),
     "/peers/:peerId": ({ peerId }) => renderPeerDetail(peerId),
+    "/peers/:peerId/shell": ({ peerId }) => renderPeerShell(peerId),
     "/user": () => renderUsers(),
     "/user/:userId": ({ userId }) => renderUserDetail(userId),
     "/files": () => renderFiles(),

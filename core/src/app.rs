@@ -22,7 +22,14 @@ use crate::{
 use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
-use libp2p::{PeerId, Swarm, mdns, swarm::SwarmEvent};
+use libp2p::{
+	Multiaddr,
+	PeerId,
+	Swarm,
+	mdns,
+	core::connection::ConnectedPoint,
+	swarm::SwarmEvent,
+};
 use rusqlite::{Connection as SqliteConnection, params};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, mpsc};
@@ -35,6 +42,8 @@ use std::{
 use sysinfo::{Disks, Networks, System};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::process::Command as TokioCommand;
+use tokio::time::{Duration, timeout};
 use tokio::{
 	sync::{
 		mpsc::{UnboundedReceiver, UnboundedSender},
@@ -149,6 +158,28 @@ pub enum Command {
 	GetLocalPeerId {
 		tx: oneshot::Sender<PeerId>,
 	},
+	StartShell {
+		peer: PeerId,
+		session_id: u64,
+		tx: oneshot::Sender<Result<u64>>,
+	},
+	ShellInput {
+		peer: PeerId,
+		session_id: u64,
+		data: Vec<u8>,
+		tx: oneshot::Sender<Result<Vec<u8>>>,
+	},
+}
+
+struct ShellSession {
+	child: tokio::process::Child,
+	stdin: tokio::process::ChildStdin,
+	stdout: tokio::process::ChildStdout,
+}
+
+enum ShellInputResult {
+	Output(Vec<u8>),
+	Exited,
 }
 
 async fn read_file(path: &Path, offset: u64, length: Option<u64>) -> Result<FileChunk> {
@@ -392,6 +423,25 @@ impl ResponseDecoder for AccessGrantAck {
 	}
 }
 
+impl ResponseDecoder for u64 {
+	fn decode(response: PeerRes) -> anyhow::Result<Self> {
+		match response {
+			PeerRes::ShellStarted { id } => Ok(id),
+			other => Err(anyhow!("unexpected response: {:?}", other)),
+		}
+	}
+}
+
+impl ResponseDecoder for Vec<u8> {
+	fn decode(response: PeerRes) -> anyhow::Result<Self> {
+		match response {
+			PeerRes::ShellOutput { data, .. } => Ok(data),
+			PeerRes::ShellExited { .. } => Ok(Vec::new()),
+			other => Err(anyhow!("unexpected response: {:?}", other)),
+		}
+	}
+}
+
 trait PendingResponseHandler: Send {
 	fn complete(self: Box<Self>, response: PeerRes);
 	fn fail(self: Box<Self>, error: anyhow::Error);
@@ -556,11 +606,129 @@ pub struct App {
 	db: Arc<Mutex<SqliteConnection>>,
 	remote_scans: Arc<Mutex<HashMap<u64, mpsc::Sender<ScanEvent>>>>,
 	remote_updates: Arc<Mutex<HashMap<u64, mpsc::Sender<UpdateProgress>>>>,
+	shell_sessions: HashMap<u64, ShellSession>,
 }
 
 impl App {
 	fn can_access(&self, peer: PeerId, path: &Path, access: u8) -> bool {
 		self.state.has_fs_access(peer, path, access)
+	}
+
+	async fn start_shell_session(&mut self, peer: PeerId, session_id: u64) -> anyhow::Result<()> {
+		if let Some(mut existing) = self.shell_sessions.remove(&session_id) {
+			let _ = existing.child.kill().await;
+		}
+		let shell_path = env::var("SHELL").unwrap_or_else(|_| String::from("/bin/sh"));
+		let mut child = TokioCommand::new(shell_path)
+			.env("TERM", "xterm-256color")
+			.env("PUPPYNET_REMOTE", "1")
+			.stdin(std::process::Stdio::piped())
+			.stdout(std::process::Stdio::piped())
+			.stderr(std::process::Stdio::piped())
+			.spawn()
+			.map_err(|e| anyhow!("failed to spawn shell: {e}"))?;
+		let stdin = child
+			.stdin
+			.take()
+			.ok_or_else(|| anyhow!("failed to take shell stdin"))?;
+		let stdout = child
+			.stdout
+			.take()
+			.ok_or_else(|| anyhow!("failed to take shell stdout"))?;
+		self.shell_sessions.insert(
+			session_id,
+			ShellSession {
+				child,
+				stdin,
+				stdout,
+			},
+		);
+		log::info!("[{}] Started remote shell session {}", peer, session_id);
+		Ok(())
+	}
+
+	fn record_peer_address(&mut self, peer: &PeerId, addr: &Multiaddr) {
+		let peer_id = *peer;
+		let multiaddr = addr.clone();
+		self.state.peer_discovered(peer_id, multiaddr.clone());
+		if let Ok(mut conn) = self.db.lock() {
+			let _ = save_discovered_peer(
+				&mut *conn,
+				&DiscoveredPeer {
+					peer_id,
+					multiaddr,
+				},
+			);
+		}
+	}
+
+	fn known_peer_addresses(&self, peer: &PeerId) -> Vec<Multiaddr> {
+		self.state
+			.discovered_peers
+			.iter()
+			.filter(|entry| entry.peer_id == *peer)
+			.map(|entry| entry.multiaddr.clone())
+			.collect()
+	}
+
+	async fn process_shell_input(
+		&mut self,
+		session_id: u64,
+		data: &[u8],
+		peer: Option<PeerId>,
+	) -> anyhow::Result<ShellInputResult> {
+		let Some(session) = self.shell_sessions.get_mut(&session_id) else {
+			if let Some(peer_id) = peer {
+				log::warn!("peer {} requested missing shell session {}", peer_id, session_id);
+			}
+			return Err(anyhow!("shell session not found"));
+		};
+
+		if !data.is_empty() {
+			if let Err(err) = session.stdin.write_all(data).await {
+				self.shell_sessions.remove(&session_id);
+				if let Some(peer_id) = peer {
+					log::warn!(
+						"[{}] shell stdin failed for session {}: {err}",
+						peer_id,
+						session_id
+					);
+				}
+				return Err(anyhow!("shell stdin failed: {err}"));
+			}
+			let _ = session.stdin.flush().await;
+		}
+
+		let mut out = Vec::new();
+		let mut buf = [0u8; 8192];
+		loop {
+			match timeout(Duration::from_millis(40), session.stdout.read(&mut buf)).await {
+				Ok(Ok(0)) => {
+					self.shell_sessions.remove(&session_id);
+					return Ok(ShellInputResult::Exited);
+				}
+				Ok(Ok(n)) => {
+					out.extend_from_slice(&buf[..n]);
+					if out.len() >= 64 * 1024 {
+						break;
+					}
+				}
+				Ok(Err(err)) => {
+					self.shell_sessions.remove(&session_id);
+					if let Some(peer_id) = peer {
+						log::warn!(
+							"[{}] shell stdout failed for session {}: {err}",
+							peer_id,
+							session_id
+						);
+					}
+					return Err(anyhow!("shell stdout failed: {err}"));
+				}
+				Err(_) => break,
+			}
+		}
+
+		Ok(ShellInputResult::Output(out))
 	}
 
 	pub fn new(
@@ -646,6 +814,7 @@ impl App {
 			db,
 			remote_scans,
 			remote_updates,
+			shell_sessions: HashMap::new(),
 		};
 		app.normalize_file_location_node_ids();
 		app.persist_local_node();
@@ -1083,9 +1252,9 @@ impl App {
 					// If update_with_progress failed with an error (not a result),
 					// send a failure event
 					if let Err(err) = result {
-						let _ = internal_tx_for_error.send(InternalCommand::SendUpdateEvent {
-							target,
-							update_id: id,
+								let _ = internal_tx_for_error.send(InternalCommand::SendUpdateEvent {
+									target,
+									update_id: id,
 							event: UpdateProgress::Failed {
 								error: err.to_string(),
 							},
@@ -1107,11 +1276,25 @@ impl App {
 							| UpdateProgress::AlreadyUpToDate { .. }
 					) {
 						map.remove(&id);
+						}
+					} else {
+						log::warn!("received update event for unknown id {}", id);
 					}
-				} else {
-					log::warn!("received update event for unknown id {}", id);
+					PeerRes::UpdateEventAck
 				}
-				PeerRes::UpdateEventAck
+				PeerReq::StartShell { id } => {
+					self.start_shell_session(peer, id).await?;
+					PeerRes::ShellStarted { id }
+				}
+			PeerReq::ShellInput { id, data } => {
+				match self
+					.process_shell_input(id, &data, Some(peer))
+					.await
+				{
+					Ok(ShellInputResult::Output(out)) => PeerRes::ShellOutput { id, data: out },
+					Ok(ShellInputResult::Exited) => PeerRes::ShellExited { id },
+					Err(err) => PeerRes::Error(err.to_string()),
+				}
 			}
 		};
 		Ok(res)
@@ -1542,16 +1725,24 @@ impl App {
 			SwarmEvent::ConnectionEstablished {
 				peer_id,
 				connection_id,
-				endpoint: _,
+				endpoint,
 				num_established: _,
 				concurrent_dial_errors: _,
 				established_in: _,
 			} => {
 				log::info!("Connected to peer {}", peer_id);
 				self.state.connections.push(Connection {
-					peer_id,
+					peer_id: peer_id.clone(),
 					connection_id,
 				});
+				if let Some(addr) = match endpoint {
+					ConnectedPoint::Dialer { address, .. } => Some(address.clone()),
+					ConnectedPoint::Listener {
+						send_back_addr, ..
+					} => Some(send_back_addr.clone()),
+				} {
+					self.record_peer_address(&peer_id, &addr);
+				}
 				if let Ok(mut conn) = self.db.lock() {
 					let _ = save_peer(
 						&mut *conn,
@@ -1931,6 +2122,66 @@ impl App {
 			}
 			Command::GetLocalPeerId { tx } => {
 				let _ = tx.send(self.state.me);
+			}
+			Command::StartShell {
+				peer,
+				session_id,
+				tx,
+			} => {
+				if self.state.me == peer {
+					let result = self
+						.start_shell_session(peer, session_id)
+						.await
+						.map(|_| session_id);
+					let _ = tx.send(result);
+					return;
+				}
+				let addresses = self.known_peer_addresses(&peer);
+				let request_id = self
+					.swarm
+					.behaviour_mut()
+					.puppynet
+					.send_request_with_addresses(
+						&peer,
+						PeerReq::StartShell { id: session_id },
+						addresses,
+					);
+				self.pending_requests
+					.insert(request_id, Pending::<u64>::new(tx));
+			}
+			Command::ShellInput {
+				peer,
+				session_id,
+				data,
+				tx,
+			} => {
+				if self.state.me == peer {
+					let result = match self
+						.process_shell_input(session_id, &data, None)
+						.await
+					{
+						Ok(ShellInputResult::Output(out)) => Ok(out),
+						Ok(ShellInputResult::Exited) => Ok(Vec::new()),
+						Err(err) => Err(err),
+					};
+					let _ = tx.send(result);
+					return;
+				}
+				let addresses = self.known_peer_addresses(&peer);
+				let request_id = self
+					.swarm
+					.behaviour_mut()
+					.puppynet
+					.send_request_with_addresses(
+						&peer,
+						PeerReq::ShellInput {
+							id: session_id,
+							data,
+						},
+						addresses,
+					);
+				self.pending_requests
+					.insert(request_id, Pending::<Vec<u8>>::new(tx));
 			}
 		}
 	}

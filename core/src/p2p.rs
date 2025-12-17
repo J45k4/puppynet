@@ -119,6 +119,15 @@ pub enum PeerReq {
 		id: u64,
 		event: UpdateProgress,
 	},
+	/// Start a long-lived remote shell session on this peer.
+	StartShell {
+		id: u64,
+	},
+	/// Send input bytes to an existing shell session.
+	ShellInput {
+		id: u64,
+		data: Vec<u8>,
+	},
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +177,19 @@ pub enum PeerRes {
 	UpdateStarted(Result<(), String>),
 	/// Acknowledgment for update progress event
 	UpdateEventAck,
+	/// Acknowledgment that a shell session was created.
+	ShellStarted {
+		id: u64,
+	},
+	/// Output bytes from a shell session.
+	ShellOutput {
+		id: u64,
+		data: Vec<u8>,
+	},
+	/// Shell session exited or was closed.
+	ShellExited {
+		id: u64,
+	},
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
