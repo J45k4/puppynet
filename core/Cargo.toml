@@ -37,3 +37,5 @@ rsa = { version = "0.9", default-features = false, features = ["sha2", "pem"] }
 homedir = "0.3"
 hyper = { version = "0.14", features = ["full"] }
 url = "2"
+axum = "0.7"
+wgui = { git = "https://github.com/J45k4/wgui.git", rev = "108876086b57951aee96022ee66c2b485ed8564d", default-features = false, features = ["axum"] }
