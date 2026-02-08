@@ -22,14 +22,7 @@ use crate::{
 use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
-use libp2p::{
-	Multiaddr,
-	PeerId,
-	Swarm,
-	mdns,
-	core::connection::ConnectedPoint,
-	swarm::SwarmEvent,
-};
+use libp2p::{Multiaddr, PeerId, Swarm, core::connection::ConnectedPoint, mdns, swarm::SwarmEvent};
 use rusqlite::{Connection as SqliteConnection, params};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, mpsc};
@@ -652,13 +645,7 @@ impl App {
 		let multiaddr = addr.clone();
 		self.state.peer_discovered(peer_id, multiaddr.clone());
 		if let Ok(mut conn) = self.db.lock() {
-			let _ = save_discovered_peer(
-				&mut *conn,
-				&DiscoveredPeer {
-					peer_id,
-					multiaddr,
-				},
-			);
+			let _ = save_discovered_peer(&mut *conn, &DiscoveredPeer { peer_id, multiaddr });
 		}
 	}
 
@@ -679,7 +666,11 @@ impl App {
 	) -> anyhow::Result<ShellInputResult> {
 		let Some(session) = self.shell_sessions.get_mut(&session_id) else {
 			if let Some(peer_id) = peer {
-				log::warn!("peer {} requested missing shell session {}", peer_id, session_id);
+				log::warn!(
+					"peer {} requested missing shell session {}",
+					peer_id,
+					session_id
+				);
 			}
 			return Err(anyhow!("shell session not found"));
 		};
@@ -1252,9 +1243,9 @@ impl App {
 					// If update_with_progress failed with an error (not a result),
 					// send a failure event
 					if let Err(err) = result {
-								let _ = internal_tx_for_error.send(InternalCommand::SendUpdateEvent {
-									target,
-									update_id: id,
+						let _ = internal_tx_for_error.send(InternalCommand::SendUpdateEvent {
+							target,
+							update_id: id,
 							event: UpdateProgress::Failed {
 								error: err.to_string(),
 							},
@@ -1276,21 +1267,18 @@ impl App {
 							| UpdateProgress::AlreadyUpToDate { .. }
 					) {
 						map.remove(&id);
-						}
-					} else {
-						log::warn!("received update event for unknown id {}", id);
 					}
-					PeerRes::UpdateEventAck
+				} else {
+					log::warn!("received update event for unknown id {}", id);
 				}
-				PeerReq::StartShell { id } => {
-					self.start_shell_session(peer, id).await?;
-					PeerRes::ShellStarted { id }
-				}
+				PeerRes::UpdateEventAck
+			}
+			PeerReq::StartShell { id } => {
+				self.start_shell_session(peer, id).await?;
+				PeerRes::ShellStarted { id }
+			}
 			PeerReq::ShellInput { id, data } => {
-				match self
-					.process_shell_input(id, &data, Some(peer))
-					.await
-				{
+				match self.process_shell_input(id, &data, Some(peer)).await {
 					Ok(ShellInputResult::Output(out)) => PeerRes::ShellOutput { id, data: out },
 					Ok(ShellInputResult::Exited) => PeerRes::ShellExited { id },
 					Err(err) => PeerRes::Error(err.to_string()),
@@ -1737,9 +1725,7 @@ impl App {
 				});
 				if let Some(addr) = match endpoint {
 					ConnectedPoint::Dialer { address, .. } => Some(address.clone()),
-					ConnectedPoint::Listener {
-						send_back_addr, ..
-					} => Some(send_back_addr.clone()),
+					ConnectedPoint::Listener { send_back_addr, .. } => Some(send_back_addr.clone()),
 				} {
 					self.record_peer_address(&peer_id, &addr);
 				}
@@ -2156,10 +2142,7 @@ impl App {
 				tx,
 			} => {
 				if self.state.me == peer {
-					let result = match self
-						.process_shell_input(session_id, &data, None)
-						.await
-					{
+					let result = match self.process_shell_input(session_id, &data, None).await {
 						Ok(ShellInputResult::Output(out)) => Ok(out),
 						Ok(ShellInputResult::Exited) => Ok(Vec::new()),
 						Err(err) => Err(err),
