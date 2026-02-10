@@ -1,0 +1,276 @@
+<Switch>
+  <Case path="/login" title="Login - PuppyNet UI">
+    <VStack spacing=8 padding=12 width=360>
+      <Text value="Login" />
+      <TextInput value={state.login_username} placeholder="Username" onTextChanged="EditLoginUsername" />
+      <TextInput value={state.login_password} placeholder="Password" onTextChanged="EditLoginPassword" />
+      <If test={state.login_error != ""}>
+        <Text value={state.login_error} color="#b30000" />
+      </If>
+      <Button text="Login" onClick="Login" />
+    </VStack>
+  </Case>
+
+  <Case path="/" title="PuppyNet UI">
+    <If test={!state.authenticated}>
+      <VStack spacing=8 padding=12>
+        <Text value="Authentication required" />
+        <Button text="Go to login" onClick="OpenLogin" />
+      </VStack>
+    </If>
+    <Else>
+      <VStack spacing=8 padding=10>
+        <HStack spacing=6>
+          <Text value={state.username} grow=1 />
+          <Button text="Logout" onClick="Logout" />
+        </HStack>
+
+        <HStack spacing=6>
+          <Button text="Home" onClick="NavHome" />
+          <Button text="Peers" onClick="NavPeers" />
+          <Button text="Files" onClick="NavFiles" />
+          <Button text="Search" onClick="NavSearch" />
+          <Button text="Storage" onClick="NavStorage" />
+          <Button text="Users" onClick="NavUsers" />
+          <Button text="Updates" onClick="NavUpdates" />
+          <Button text="Settings" onClick="NavSettings" />
+        </HStack>
+
+        <If test={state.page == "home"}>
+          <VStack spacing=4>
+            <Text value={state.home_peers} />
+            <Text value={state.home_files} />
+            <Text value={state.home_storage} />
+            <Text value={state.home_users} />
+          </VStack>
+        </If>
+
+        <If test={state.page == "peers"}>
+          <VStack spacing=6>
+            <HStack spacing=6>
+              <Text value="Discovered peers" grow=1 />
+              <Button text="Refresh" onClick="RefreshPeers" />
+            </HStack>
+            <Text value={state.current_peer} />
+            <If test={!state.has_peers}>
+              <Text value="No peers discovered yet." />
+            </If>
+            <Else>
+              <VStack spacing=4>
+                <For each={state.peers} itemAs="peer" indexAs="i">
+                  <HStack spacing=6>
+                    <Text value={peer.label} grow=1 />
+                    <Text value={peer.id} />
+                    <Button text="Details" onClick="PeerRow" arg={i} />
+                  </HStack>
+                </For>
+              </VStack>
+            </Else>
+          </VStack>
+        </If>
+
+        <If test={state.page == "peer_detail"}>
+          <VStack spacing=6>
+            <Text value={state.selected_peer} />
+            <Text value="CPUs:" />
+            <If test={!state.has_cpus}>
+              <Text value="No CPU data available." />
+            </If>
+            <Else>
+              <For each={state.cpus} itemAs="cpu">
+                <Text value={cpu.line} />
+              </For>
+            </Else>
+
+            <Text value="Interfaces:" />
+            <If test={!state.has_interfaces}>
+              <Text value="No interface data." />
+            </If>
+            <Else>
+              <For each={state.interfaces} itemAs="iface">
+                <Text value={iface.line} />
+              </For>
+            </Else>
+
+            <Text value="Remote shell" />
+            <HStack spacing=6>
+              <Button text="Start shell" onClick="StartShell" />
+              <Text value={state.shell_status} />
+            </HStack>
+            <HStack spacing=6>
+              <TextInput value={state.shell_input} placeholder="Shell command (include newline)" onTextChanged="EditShellInput" />
+              <Button text="Send" onClick="SendShellInput" />
+            </HStack>
+            <If test={!state.shell_has_session}>
+              <Text value="No shell session started yet." />
+            </If>
+            <Else>
+              <Text value={state.shell_output} />
+            </Else>
+
+            <Text value="Peer updates" />
+            <HStack spacing=6>
+              <TextInput value={state.update_version} placeholder="Optional version tag" onTextChanged="EditUpdateVersion" />
+              <Button text="Start update" onClick="StartPeerUpdate" />
+              <Button text="Poll events" onClick="PollPeerUpdate" />
+            </HStack>
+            <Text value={state.update_status} />
+            <If test={!state.has_update_events}>
+              <Text value="No update events yet." />
+            </If>
+            <Else>
+              <For each={state.update_events} itemAs="event">
+                <Text value={event} />
+              </For>
+            </Else>
+
+            <Button text="Back" onClick="PeerBack" />
+          </VStack>
+        </If>
+
+        <If test={state.page == "files"}>
+          <VStack spacing=6>
+            <HStack spacing=6>
+              <Text value="Local files" grow=1 />
+              <Button text="Refresh" onClick="RefreshFiles" />
+            </HStack>
+            <If test={!state.has_files}>
+              <Text value="No file entries recorded." />
+            </If>
+            <Else>
+              <For each={state.files} itemAs="entry" indexAs="i">
+                <HStack spacing=6>
+                  <Text value={entry.line} grow=1 />
+                  <Button text="Preview" onClick="PreviewLocalFile" arg={i} />
+                </HStack>
+              </For>
+            </Else>
+          </VStack>
+        </If>
+
+        <If test={state.page == "search"}>
+          <VStack spacing=6>
+            <HStack spacing=6>
+              <TextInput value={state.search_name_query} placeholder="Search by file name" onTextChanged="EditSearchNameQuery" />
+              <Button text="Search" onClick="RunSearch" />
+            </HStack>
+            <HStack spacing=6>
+              <Text value="Mime filters:" />
+              <Text value={state.search_selected_mimes_text} grow=1 />
+              <Button text="Clear" onClick="ClearSearchMimes" />
+            </HStack>
+            <If test={!state.has_search_mime_options}>
+              <Text value="No mime options available." />
+            </If>
+            <Else>
+              <VStack maxWidth=380 maxHeight=180 overflow="scroll" spacing=4>
+                <For each={state.search_mime_options} itemAs="mime" indexAs="i">
+                  <HStack spacing=6>
+                    <Checkbox checked={mime.selected} onClick="ToggleSearchMime" arg={i} />
+                    <Text value={mime.name} grow=1 />
+                  </HStack>
+                </For>
+              </VStack>
+            </Else>
+            <Text value={state.search_status} />
+            <If test={!state.search_has_results}>
+              <Text value="No results." />
+            </If>
+            <Else>
+              <For each={state.search_results} itemAs="row" indexAs="i">
+                <VStack spacing=2>
+                  <Text value={row.name} />
+                  <Text value={row.path} />
+                  <Text value={row.size} />
+                  <Text value={row.replicas} />
+                  <Text value={row.peer_id} />
+                  <Button text="Preview file" onClick="SearchPreview" arg={i} />
+                </VStack>
+              </For>
+            </Else>
+
+          </VStack>
+        </If>
+
+        <If test={state.page == "storage"}>
+          <VStack spacing=6>
+            <HStack spacing=6>
+              <Text value="Storage snapshot" grow=1 />
+              <Button text="Refresh" onClick="RefreshStorage" />
+            </HStack>
+            <If test={!state.has_storage_rows}>
+              <Text value="No storage data captured yet." />
+            </If>
+            <Else>
+              <For each={state.storage_rows} itemAs="entry">
+                <Text value={entry.line} />
+              </For>
+            </Else>
+          </VStack>
+        </If>
+
+        <If test={state.page == "users"}>
+          <VStack spacing=6>
+            <HStack spacing=6>
+              <Text value="Local users" grow=1 />
+              <Button text="Refresh" onClick="RefreshUsers" />
+            </HStack>
+            <HStack spacing=6>
+              <TextInput value={state.new_user_username} placeholder="New username" onTextChanged="EditNewUserUsername" />
+              <TextInput value={state.new_user_password} placeholder="New password" onTextChanged="EditNewUserPassword" />
+              <Button text="Create" onClick="CreateUser" />
+            </HStack>
+            <Text value={state.new_user_status} />
+            <If test={!state.has_users}>
+              <Text value="No local users recorded." />
+            </If>
+            <Else>
+              <For each={state.users} itemAs="user">
+                <Text value={user} />
+              </For>
+            </Else>
+          </VStack>
+        </If>
+
+        <If test={state.page == "updates"}>
+          <VStack spacing=4>
+            <Text value="Updates" />
+            <Text value="Open a peer details page to start or monitor peer updates." />
+          </VStack>
+        </If>
+
+        <If test={state.page == "settings"}>
+          <VStack spacing=4>
+            <Text value="Settings" />
+            <Text value="Configuration panels will land here soon." />
+          </VStack>
+        </If>
+
+        <Modal open={state.file_preview_modal_open} onClick="CloseFilePreviewModal">
+          <VStack spacing=6 padding=10 width=900 maxHeight=520 overflow="scroll" backgroundColor="#ffffff" border="1px solid #d9d9d9">
+            <HStack spacing=6>
+              <Text value="File preview" grow=1 />
+              <Button text="Close" onClick="CloseFilePreviewModal" />
+            </HStack>
+            <HStack spacing=6>
+              <TextInput value={state.file_preview_peer} placeholder="Peer id (optional)" onTextChanged="EditFilePreviewPeer" />
+              <TextInput value={state.file_preview_path} placeholder="Path to read" onTextChanged="EditFilePreviewPath" />
+              <Button text="Load preview" onClick="LoadFilePreview" />
+            </HStack>
+            <Text value={state.file_preview_status} />
+            <Text value={state.file_preview_content} />
+          </VStack>
+        </Modal>
+
+        <Text value={state.status} />
+      </VStack>
+    </Else>
+  </Case>
+
+  <Case path="/*" title="PuppyNet UI">
+    <VStack spacing=8 padding=12>
+      <Text value="Page not found" />
+      <Button text="Back to app" onClick="OpenApp" />
+    </VStack>
+  </Case>
+</Switch>

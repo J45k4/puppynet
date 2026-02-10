@@ -7,6 +7,7 @@ mod puppynet;
 pub mod scan;
 mod state;
 mod types;
+pub mod ui;
 pub mod updater;
 pub use state::{FLAG_READ, FLAG_SEARCH, FLAG_WRITE, FolderRule, Permission, Rule, State};
 pub use types::FileChunk;

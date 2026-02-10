@@ -552,11 +552,7 @@ fn parse_peer_range_header(
 	Ok((start, Some(end)))
 }
 
-async fn infer_peer_file_size(
-	state: &ApiState,
-	peer: PeerId,
-	path: &str,
-) -> Option<u64> {
+async fn infer_peer_file_size(state: &ApiState, peer: PeerId, path: &str) -> Option<u64> {
 	let normalized = path.replace('\\', "/").trim_end_matches('/').to_string();
 	if normalized.is_empty() {
 		return None;
@@ -999,15 +995,10 @@ async fn handle_request(
 					let total_str = total_len
 						.map(|len| len.to_string())
 						.unwrap_or_else(|| "*".to_string());
-					let range_value =
-						format!("bytes {}-{}/{}", start, actual_end, total_str);
+					let range_value = format!("bytes {}-{}/{}", start, actual_end, total_str);
 					(chunk, StatusCode::PARTIAL_CONTENT, Some(range_value))
 				} else {
-					let chunk = match state
-						.puppy
-						.read_file(peer, path.clone(), 0, None)
-						.await
-					{
+					let chunk = match state.puppy.read_file(peer, path.clone(), 0, None).await {
 						Ok(chunk) => chunk,
 						Err(err) => {
 							return Ok(with_cors(bad_request(err.to_string()), origin_ref));
@@ -1086,10 +1077,7 @@ async fn handle_request(
 					.shell_input(peer, payload.id, payload.data)
 					.await
 				{
-					Ok(data) => json_response(
-						StatusCode::OK,
-						json!(ShellOutputResponse { data }),
-					),
+					Ok(data) => json_response(StatusCode::OK, json!(ShellOutputResponse { data })),
 					Err(err) => bad_request(err.to_string()),
 				},
 				Err(err) => bad_request(format!("invalid json: {err}")),
