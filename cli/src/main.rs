@@ -1,6 +1,6 @@
 use args::Command;
 use clap::Parser;
-use puppynet_core::{PuppyNet, http_api};
+use puppynet_core::{PuppyNet, http_api, ui};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -82,6 +82,20 @@ async fn main() {
 					std::process::exit(1);
 				}
 			}
+			let ui_addr = match args.ui_bind.parse::<SocketAddr>() {
+				Ok(addr) => addr,
+				Err(err) => {
+					log::error!("invalid --ui-bind address {}: {err}", args.ui_bind);
+					std::process::exit(1);
+				}
+			};
+			let ui_puppy = Arc::clone(&peer);
+			let mut ui_task = Some(tokio::spawn(async move {
+				if let Err(err) = ui::run_ui(ui_puppy, ui_addr).await {
+					log::error!("ui server error: {err:?}");
+				}
+			}));
+
 			let mut http_task = None;
 			if let Some(addr_str) = &args.http {
 				match addr_str.parse::<SocketAddr>() {
@@ -101,9 +115,13 @@ async fn main() {
 				}
 			}
 
-			if http_task.is_some() {
+			if ui_task.is_some() || http_task.is_some() {
 				if let Err(err) = tokio::signal::ctrl_c().await {
 					log::error!("failed to listen for ctrl_c: {err}");
+				}
+				if let Some(task) = ui_task.take() {
+					task.abort();
+					let _ = task.await;
 				}
 				if let Some(task) = http_task {
 					task.abort();

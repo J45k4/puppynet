@@ -9,6 +9,7 @@ rayon = ["dep:rayon"]
 
 [dependencies]
 anyhow = "1"
+async-trait = "0.1"
 argon2 = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
@@ -38,4 +39,5 @@ homedir = "0.3"
 hyper = { version = "0.14", features = ["full"] }
 url = "2"
 axum = "0.7"
-wgui = { git = "https://github.com/J45k4/wgui.git", rev = "108876086b57951aee96022ee66c2b485ed8564d", default-features = false, features = ["axum"] }
+wgui = { git = "https://github.com/J45k4/wgui.git", rev = "328009dda8414d02ac56f0d216eee4af07ad59d0" }
+#wgui = { path = "../../wgui/wgui" }
