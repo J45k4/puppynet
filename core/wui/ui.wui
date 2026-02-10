@@ -51,6 +51,7 @@
               <Text value="Discovered peers" grow=1 />
               <Button text="Refresh" onClick="RefreshPeers" />
             </HStack>
+            <Text value={state.current_peer} />
             <If test={!state.has_peers}>
               <Text value="No peers discovered yet." />
             </If>

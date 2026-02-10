@@ -278,6 +278,7 @@ struct UiViewState {
 	home_files: String,
 	home_storage: String,
 	home_users: String,
+	current_peer: String,
 	has_peers: bool,
 	has_cpus: bool,
 	has_interfaces: bool,
@@ -438,6 +439,10 @@ impl UiRootController {
 			home_files: format!("Files captured: {}", files.len()),
 			home_storage: format!("Storage entries: {}", storage_rows.len()),
 			home_users: format!("Users: {}", users.len()),
+			current_peer: match state.local_peer_id.clone() {
+				Some(peer_id) => format!("Current peer: {peer_id}"),
+				None => String::from("Current peer: unavailable"),
+			},
 			has_peers: !peers.is_empty(),
 			has_cpus: !cpus.is_empty(),
 			has_interfaces: !interfaces.is_empty(),
@@ -1328,7 +1333,7 @@ impl UiServer {
 		match self.puppy.state_snapshot().await {
 			Some(snapshot) => {
 				let local_id = snapshot.me.to_string();
-				let peers = snapshot
+				let mut peers = snapshot
 					.peers
 					.iter()
 					.map(|peer| PeerRow {
@@ -1337,6 +1342,13 @@ impl UiServer {
 						local: peer.id.to_string() == local_id,
 					})
 					.collect::<Vec<_>>();
+				if !peers.iter().any(|peer| peer.id == local_id) {
+					peers.push(PeerRow {
+						id: local_id.clone(),
+						name: String::from("Current peer"),
+						local: true,
+					});
+				}
 				let mut state = self.state.lock().await;
 				state.peers = peers;
 				state.local_peer_id = Some(local_id);
