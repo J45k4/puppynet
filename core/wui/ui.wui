@@ -56,11 +56,20 @@
               <Text value="No peers discovered yet." />
             </If>
             <Else>
-              <VStack spacing=4>
+              <VStack spacing=4 border="1px solid #cfcfcf" backgroundColor="#f5f5f5">
+                <HStack spacing=6 padding=6 backgroundColor="#ececec">
+                  <VStack width=150><Text value="ID" /></VStack>
+                  <VStack width=220><Text value="NAME" /></VStack>
+                  <VStack width=180><Text value="TRAFFIC" /></VStack>
+                  <VStack width=90><Text value="STATUS" /></VStack>
+                  <Text value="" grow=1 />
+                </HStack>
                 <For each={state.peers} itemAs="peer" indexAs="i">
-                  <HStack spacing=6>
-                    <Text value={peer.label} grow=1 />
-                    <Text value={peer.id} />
+                  <HStack spacing=6 padding=6 backgroundColor="#f9f9f9">
+                    <VStack width=150><Text value={peer.id} /></VStack>
+                    <VStack width=220><Text value={peer.name} /></VStack>
+                    <VStack width=180><Text value={peer.traffic} /></VStack>
+                    <VStack width=90><Text value={peer.status} color={peer.status_color} /></VStack>
                     <Button text="Details" onClick="PeerRow" arg={i} />
                   </HStack>
                 </For>
@@ -80,6 +89,25 @@
               <For each={state.cpus} itemAs="cpu">
                 <Text value={cpu.line} />
               </For>
+            </Else>
+
+            <Text value="Disks:" />
+            <If test={!state.has_disks}>
+              <Text value="No disk data available." />
+            </If>
+            <Else>
+              <VStack spacing=8>
+                <For each={state.disks} itemAs="disk">
+                  <VStack spacing=2>
+                    <Text value={disk.name} />
+                    <HStack spacing=0 width=220 height=24 border="1px solid #333333">
+                      <VStack width={disk.used_width} height=24 backgroundColor={disk.used_color} />
+                      <VStack width={disk.free_width} height=24 backgroundColor="#f4f4f4" />
+                    </HStack>
+                    <Text value={disk.usage_text} />
+                  </VStack>
+                </For>
+              </VStack>
             </Else>
 
             <Text value="Interfaces:" />
@@ -124,6 +152,35 @@
               </For>
             </Else>
 
+            <Text value="Peer scan" />
+            <HStack spacing=6>
+              <TextInput value={state.scan_path} placeholder="Folder path to scan" onTextChanged="EditScanPath" grow=1 />
+              <Button text="Set path" onClick="OpenScanFolderModal" />
+              <Button text="Start scan" onClick="StartPeerScan" />
+              <Button text="Poll scan" onClick="PollPeerScan" />
+              <If test={state.scan_in_progress}>
+                <Button text="Cancel" onClick="CancelPeerScan" />
+              </If>
+            </HStack>
+            <If test={state.scan_folder_modal_open}>
+              <VStack spacing=6 padding=10 width=520 backgroundColor="#ffffff" border="1px solid #d9d9d9">
+                <Text value="Scan folder path" />
+                <TextInput value={state.scan_path} placeholder="Paste absolute folder path (example: /Users/me/Documents)" onTextChanged="EditScanPath" />
+                <HStack spacing=6>
+                  <Button text="Done" onClick="CloseScanFolderModal" />
+                </HStack>
+              </VStack>
+            </If>
+            <Text value={state.scan_status} />
+            <If test={!state.has_scan_events}>
+              <Text value="No scan events yet." />
+            </If>
+            <Else>
+              <For each={state.scan_events} itemAs="event">
+                <Text value={event} />
+              </For>
+            </Else>
+
             <Button text="Back" onClick="PeerBack" />
           </VStack>
         </If>
@@ -131,19 +188,67 @@
         <If test={state.page == "files"}>
           <VStack spacing=6>
             <HStack spacing=6>
-              <Text value="Local files" grow=1 />
+              <Button text="Nodes" onClick="NavPeers" />
+              <Button text="Files" onClick="NavFiles" />
+              <Button text="Virtual folders" onClick="NavFiles" />
+              <Button text="Backup folders" onClick="NavFiles" />
+              <Button text="COMMANDER" onClick="NavFiles" />
+              <Text value="" grow=1 />
               <Button text="Refresh" onClick="RefreshFiles" />
             </HStack>
             <If test={!state.has_files}>
               <Text value="No file entries recorded." />
             </If>
             <Else>
-              <For each={state.files} itemAs="entry" indexAs="i">
-                <HStack spacing=6>
-                  <Text value={entry.line} grow=1 />
-                  <Button text="Preview" onClick="PreviewLocalFile" arg={i} />
-                </HStack>
-              </For>
+              <HStack spacing=10>
+                <VStack spacing=8 grow=1 border="1px solid #dcdcdc" padding=8 minHeight=520 backgroundColor="#ffffff">
+                  <If test={state.has_file_selected}>
+                    <If test={state.file_selected_is_image}>
+                      <Image src={state.file_selected_thumbnail_url} alt={state.file_selected_name} objectFit="contain" maxWidth=920 maxHeight=560 />
+                    </If>
+                    <Else>
+                      <VStack spacing=6 padding=20 backgroundColor="#efefef" minHeight=400>
+                        <Text value={state.file_selected_name} />
+                        <Text value={state.file_selected_meta} />
+                      </VStack>
+                    </Else>
+                  </If>
+                </VStack>
+                <VStack width=320 minWidth=260 maxWidth=360 spacing=8 border="1px solid #dcdcdc" padding=8 backgroundColor="#f7f7f7">
+                  <Text value={state.file_selected_when} />
+                  <Text value={state.file_selected_device} />
+                  <Text value="Tags" />
+                  <TextInput value={state.file_search_query} placeholder="Search word" onTextChanged="EditFileSearchQuery" />
+                  <If test={!state.has_file_mime_options}>
+                    <Text value="No tags available." />
+                  </If>
+                  <Else>
+                    <VStack maxHeight=180 overflow="scroll" spacing=4>
+                      <For each={state.file_mime_options} itemAs="mime" indexAs="i">
+                        <HStack spacing=6>
+                          <Checkbox checked={mime.selected} onClick="ToggleFileMime" arg={i} />
+                          <Text value={mime.name} grow=1 />
+                        </HStack>
+                      </For>
+                    </VStack>
+                    <Button text="Clear tags" onClick="ClearFileMimes" />
+                  </Else>
+                  <Text value="Nodes" />
+                  <For each={state.file_nodes} itemAs="node">
+                    <Text value={node} />
+                  </For>
+                </VStack>
+              </HStack>
+              <HStack spacing=8 overflow="scroll">
+                <For each={state.files} itemAs="entry" indexAs="i">
+                  <VStack spacing=4 width=160 minWidth=160 padding=6 border="1px solid #dedede" backgroundColor="#ffffff">
+                    <Text value={entry.title} />
+                    <Text value={entry.kind} />
+                    <Button text="Open" onClick="SelectLocalFile" arg={i} />
+                    <Button text="Preview" onClick="PreviewLocalFile" arg={i} />
+                  </VStack>
+                </For>
+              </HStack>
             </Else>
           </VStack>
         </If>

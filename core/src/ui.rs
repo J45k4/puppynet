@@ -1,5 +1,6 @@
 use crate::db::FileEntry;
-use crate::p2p::{CpuInfo, InterfaceInfo};
+use crate::p2p::{CpuInfo, DiskInfo, InterfaceInfo};
+use crate::scan::ScanEvent;
 use crate::updater::UpdateProgress;
 use crate::{PuppyNet, StorageUsageFile};
 use anyhow::Result;
@@ -8,6 +9,7 @@ use libp2p::PeerId;
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::mpsc;
 use std::sync::mpsc::TryRecvError;
 use std::str::FromStr;
@@ -45,6 +47,7 @@ struct UiState {
 	selected_peer: Option<String>,
 	search_mime_types: Vec<String>,
 	peer_cpus: Vec<CpuInfo>,
+	peer_disks: Vec<DiskInfo>,
 	peer_interfaces: Vec<InterfaceInfo>,
 	files: Vec<FileEntry>,
 	storage: Vec<StorageUsageFile>,
@@ -61,6 +64,7 @@ impl UiState {
 			selected_peer: None,
 			search_mime_types: Vec::new(),
 			peer_cpus: Vec::new(),
+			peer_disks: Vec::new(),
 			peer_interfaces: Vec::new(),
 			files: Vec::new(),
 			storage: Vec::new(),
@@ -136,7 +140,10 @@ struct UiContext {
 #[derive(Clone, WuiModel)]
 struct UiPeer {
 	id: String,
-	label: String,
+	name: String,
+	traffic: String,
+	status: String,
+	status_color: String,
 }
 
 #[derive(Clone, WuiModel)]
@@ -150,9 +157,25 @@ struct UiInterface {
 }
 
 #[derive(Clone, WuiModel)]
+struct UiDisk {
+	name: String,
+	used_color: String,
+	used_width: i32,
+	free_width: i32,
+	usage_text: String,
+}
+
+#[derive(Clone, WuiModel)]
 struct UiFileRow {
 	hash: String,
-	line: String,
+	title: String,
+	meta: String,
+	kind: String,
+	tile_color: String,
+	first_datetime: String,
+	latest_datetime: String,
+	thumbnail_url: String,
+	is_image: bool,
 }
 
 #[derive(Clone, WuiModel)]
@@ -186,6 +209,10 @@ struct UiClientSession {
 	search_selected_mimes: Vec<String>,
 	search_results: Vec<UiSearchRow>,
 	search_status: String,
+	file_search_query: String,
+	file_selected_mimes: Vec<String>,
+	file_view_table: bool,
+	selected_file_hash: String,
 	new_user_username: String,
 	new_user_password: String,
 	new_user_status: String,
@@ -204,6 +231,13 @@ struct UiClientSession {
 	update_events: Vec<String>,
 	update_in_progress: bool,
 	update_rx: Option<Arc<std::sync::Mutex<mpsc::Receiver<UpdateProgress>>>>,
+	scan_path: String,
+	scan_status: String,
+	scan_events: Vec<String>,
+	scan_in_progress: bool,
+	scan_rx: Option<Arc<std::sync::Mutex<mpsc::Receiver<ScanEvent>>>>,
+	scan_handle: Option<crate::ScanHandle>,
+	scan_folder_modal_open: bool,
 }
 
 impl Default for UiClientSession {
@@ -218,6 +252,10 @@ impl Default for UiClientSession {
 			search_selected_mimes: Vec::new(),
 			search_results: Vec::new(),
 			search_status: String::new(),
+			file_search_query: String::new(),
+			file_selected_mimes: Vec::new(),
+			file_view_table: false,
+			selected_file_hash: String::new(),
 			new_user_username: String::new(),
 			new_user_password: String::new(),
 			new_user_status: String::new(),
@@ -236,6 +274,13 @@ impl Default for UiClientSession {
 			update_events: Vec::new(),
 			update_in_progress: false,
 			update_rx: None,
+			scan_path: String::new(),
+			scan_status: String::new(),
+			scan_events: Vec::new(),
+			scan_in_progress: false,
+			scan_rx: None,
+			scan_handle: None,
+			scan_folder_modal_open: false,
 		}
 	}
 }
@@ -256,6 +301,19 @@ struct UiViewState {
 	search_status: String,
 	search_results: Vec<UiSearchRow>,
 	search_has_results: bool,
+	file_search_query: String,
+	file_mime_options: Vec<UiMimeOption>,
+	has_file_mime_options: bool,
+	file_view_table: bool,
+	file_view_thumbnails: bool,
+	file_nodes: Vec<String>,
+	has_file_selected: bool,
+	file_selected_name: String,
+	file_selected_meta: String,
+	file_selected_when: String,
+	file_selected_device: String,
+	file_selected_is_image: bool,
+	file_selected_thumbnail_url: String,
 	new_user_username: String,
 	new_user_password: String,
 	new_user_status: String,
@@ -274,6 +332,12 @@ struct UiViewState {
 	update_events: Vec<String>,
 	has_update_events: bool,
 	update_in_progress: bool,
+	scan_path: String,
+	scan_status: String,
+	scan_events: Vec<String>,
+	has_scan_events: bool,
+	scan_in_progress: bool,
+	scan_folder_modal_open: bool,
 	home_peers: String,
 	home_files: String,
 	home_storage: String,
@@ -281,6 +345,7 @@ struct UiViewState {
 	current_peer: String,
 	has_peers: bool,
 	has_cpus: bool,
+	has_disks: bool,
 	has_interfaces: bool,
 	has_files: bool,
 	has_storage_rows: bool,
@@ -288,6 +353,7 @@ struct UiViewState {
 	selected_peer: String,
 	peers: Vec<UiPeer>,
 	cpus: Vec<UiCpu>,
+	disks: Vec<UiDisk>,
 	interfaces: Vec<UiInterface>,
 	files: Vec<UiFileRow>,
 	storage_rows: Vec<UiStorageRow>,
@@ -338,16 +404,20 @@ impl UiRootController {
 	pub fn state(&self) -> UiViewState {
 		let state = self.block_on(self.ctx.state.server.snapshot());
 		let session = self.current_session();
+		let local_peer_id = state.local_peer_id.clone().unwrap_or_default();
 		let peers = state
 			.peers
 			.into_iter()
 			.map(|peer| UiPeer {
-				id: peer.id.clone(),
-				label: if peer.local {
+				id: short_peer_id(&peer.id),
+				name: if peer.local {
 					format!("{} (you)", peer.name)
 				} else {
 					peer.name
 				},
+				traffic: String::from("↑ 0kb/s ↓ 0kb/s"),
+				status: String::from("online"),
+				status_color: String::from("#1a9b2b"),
 			})
 			.collect::<Vec<_>>();
 		let cpus = state
@@ -357,6 +427,45 @@ impl UiRootController {
 				line: format!("{} — {:.1}% | {} Hz", cpu.name, cpu.usage, cpu.frequency_hz),
 			})
 			.collect::<Vec<_>>();
+		let disks = state
+			.peer_disks
+			.into_iter()
+			.map(|disk| {
+				let total_width = 220i32;
+				let usage = disk.usage_percent.clamp(0.0, 100.0) as f64;
+				let mut used_width = ((usage / 100.0) * total_width as f64).round() as i32;
+				if used_width < 0 {
+					used_width = 0;
+				}
+				if used_width > total_width {
+					used_width = total_width;
+				}
+				let free_width = total_width - used_width;
+				let used_color = if usage >= 85.0 {
+					"#f03a3a"
+				} else if usage >= 65.0 {
+					"#e3b628"
+				} else {
+					"#8fe36e"
+				};
+				let label = if disk.name.trim().is_empty() {
+					disk.mount_path.clone()
+				} else {
+					disk.name.clone()
+				};
+				UiDisk {
+					name: label,
+					used_color: used_color.to_string(),
+					used_width,
+					free_width,
+					usage_text: format!(
+						"{} free of {}",
+						format_size(disk.available_space),
+						format_size(disk.total_space),
+					),
+				}
+			})
+			.collect::<Vec<_>>();
 		let interfaces = state
 			.peer_interfaces
 			.into_iter()
@@ -364,15 +473,88 @@ impl UiRootController {
 				line: format!("{} — {} | {}", iface.name, iface.mac, iface.ips.join(", ")),
 			})
 			.collect::<Vec<_>>();
+		let file_query = session.file_search_query.trim().to_ascii_lowercase();
+		let file_selected_mimes = session
+			.file_selected_mimes
+			.iter()
+			.map(|mime| mime.to_ascii_lowercase())
+			.collect::<Vec<_>>();
 		let files = state
 			.files
 			.into_iter()
-			.take(20)
-			.map(|entry| UiFileRow {
-				hash: format_hash(&entry.hash),
-				line: format!("{} — {} bytes", format_hash(&entry.hash), entry.size),
+			.filter(|entry| {
+				if !file_selected_mimes.is_empty() {
+					let mime = entry.mime_type.clone().unwrap_or_default().to_ascii_lowercase();
+					if !file_selected_mimes.iter().any(|selected| selected == &mime) {
+						return false;
+					}
+				}
+				if file_query.is_empty() {
+					return true;
+				}
+				let hash = format_hash(&entry.hash);
+				let mime = entry.mime_type.clone().unwrap_or_default();
+				hash.to_ascii_lowercase().contains(&file_query)
+					|| mime.to_ascii_lowercase().contains(&file_query)
+			})
+			.take(48)
+			.map(|entry| {
+				let hash = format_hash(&entry.hash);
+				let short = short_hash(&entry.hash);
+				let mime = entry.mime_type.clone().unwrap_or_else(|| String::from("unknown"));
+				let is_image = mime.contains("image");
+				let thumbnail_url = if is_image && !local_peer_id.is_empty() {
+					match self.ctx.state.server.puppy.resolve_local_file_by_hash(&entry.hash) {
+						Ok(Some((path, _))) => format!(
+							"/api/peers/{}/thumbnail?path={}&max_width=1024&max_height=768",
+							local_peer_id,
+							url_encode(&path.to_string_lossy()),
+						),
+						_ => String::new(),
+					}
+				} else {
+					String::new()
+				};
+				let kind = if mime.contains("image") {
+					"IMG"
+				} else if mime.contains("video") {
+					"VID"
+				} else if mime.contains("pdf") {
+					"PDF"
+				} else {
+					"FILE"
+				};
+				let tile_color = if kind == "IMG" {
+					"#d9ecff"
+				} else if kind == "VID" {
+					"#e7f7df"
+				} else if kind == "PDF" {
+					"#ffe2e2"
+				} else {
+					"#ececec"
+				};
+				UiFileRow {
+					hash,
+					title: short,
+					meta: format!("{} | {}", mime, format_size(entry.size.max(0) as u64)),
+					kind: kind.to_string(),
+					tile_color: tile_color.to_string(),
+					first_datetime: entry.first_datetime,
+					latest_datetime: entry.latest_datetime,
+					thumbnail_url,
+					is_image,
+				}
 			})
 			.collect::<Vec<_>>();
+		let selected_file = if session.selected_file_hash.is_empty() {
+			files.first().cloned()
+		} else {
+			files
+				.iter()
+				.find(|entry| entry.hash == session.selected_file_hash)
+				.cloned()
+				.or_else(|| files.first().cloned())
+		};
 		let storage_rows = state
 			.storage
 			.into_iter()
@@ -398,6 +580,19 @@ impl UiRootController {
 					.any(|selected| selected == mime),
 			})
 			.collect::<Vec<_>>();
+		let file_mime_options = state
+			.search_mime_types
+			.iter()
+			.map(|mime| UiMimeOption {
+				name: mime.clone(),
+				selected: session
+					.file_selected_mimes
+					.iter()
+					.any(|selected| selected == mime),
+			})
+			.collect::<Vec<_>>();
+		let has_file_mime_options = !file_mime_options.is_empty();
+		let file_nodes = peers.iter().map(|peer| peer.id.clone()).collect::<Vec<_>>();
 		UiViewState {
 			page: page_label(&state.page).to_string(),
 			status: state.status,
@@ -417,6 +612,34 @@ impl UiRootController {
 			search_status: session.search_status,
 			search_has_results: !session.search_results.is_empty(),
 			search_results: session.search_results,
+			file_search_query: session.file_search_query,
+			file_mime_options,
+			has_file_mime_options,
+			file_view_table: session.file_view_table,
+			file_view_thumbnails: !session.file_view_table,
+			file_nodes,
+			has_file_selected: selected_file.is_some(),
+			file_selected_name: selected_file
+				.as_ref()
+				.map(|entry| entry.title.clone())
+				.unwrap_or_default(),
+			file_selected_meta: selected_file
+				.as_ref()
+				.map(|entry| entry.meta.clone())
+				.unwrap_or_default(),
+			file_selected_when: selected_file
+				.as_ref()
+				.map(|entry| format!("{} - {}", entry.first_datetime, entry.latest_datetime))
+				.unwrap_or_default(),
+			file_selected_device: String::from("Local node"),
+			file_selected_is_image: selected_file
+				.as_ref()
+				.map(|entry| entry.is_image)
+				.unwrap_or(false),
+			file_selected_thumbnail_url: selected_file
+				.as_ref()
+				.map(|entry| entry.thumbnail_url.clone())
+				.unwrap_or_default(),
 			new_user_username: session.new_user_username,
 			new_user_password: session.new_user_password,
 			new_user_status: session.new_user_status,
@@ -435,6 +658,12 @@ impl UiRootController {
 			update_events: session.update_events.clone(),
 			has_update_events: !session.update_events.is_empty(),
 			update_in_progress: session.update_in_progress,
+			scan_path: session.scan_path,
+			scan_status: session.scan_status,
+			scan_events: session.scan_events.clone(),
+			has_scan_events: !session.scan_events.is_empty(),
+			scan_in_progress: session.scan_in_progress,
+			scan_folder_modal_open: session.scan_folder_modal_open,
 			home_peers: format!("Peers: {}", peers.len()),
 			home_files: format!("Files captured: {}", files.len()),
 			home_storage: format!("Storage entries: {}", storage_rows.len()),
@@ -445,6 +674,7 @@ impl UiRootController {
 			},
 			has_peers: !peers.is_empty(),
 			has_cpus: !cpus.is_empty(),
+			has_disks: !disks.is_empty(),
 			has_interfaces: !interfaces.is_empty(),
 			has_files: !files.is_empty(),
 			has_storage_rows: !storage_rows.is_empty(),
@@ -452,6 +682,7 @@ impl UiRootController {
 			selected_peer: state.selected_peer.unwrap_or_default(),
 			peers,
 			cpus,
+			disks,
 			interfaces,
 			files,
 			storage_rows,
@@ -548,6 +779,12 @@ impl UiRootController {
 			return;
 		}
 		self.block_on(self.ctx.state.server.handle_action(UiAction::NavFiles));
+		self.block_on(
+			self.ctx
+				.state
+				.server
+				.handle_action(UiAction::RefreshSearchOptions),
+		);
 	}
 
 	pub fn nav_search(&mut self) {
@@ -640,6 +877,9 @@ impl UiRootController {
 		let Some(hash) = hash else {
 			return;
 		};
+		self.update_session(|session| {
+			session.selected_file_hash = format_hash(&hash);
+		});
 		match self.ctx.state.server.puppy.resolve_local_file_by_hash(&hash) {
 			Ok(Some((path, _entry))) => {
 				self.update_session(|session| {
@@ -667,12 +907,94 @@ impl UiRootController {
 		}
 	}
 
+	pub fn select_local_file(&mut self, idx: u32) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		let hash = {
+			let state = self.block_on(self.ctx.state.server.snapshot());
+			state.files.get(idx as usize).map(|entry| entry.hash)
+		};
+		let Some(hash) = hash else {
+			return;
+		};
+		self.update_session(|session| {
+			session.selected_file_hash = format_hash(&hash);
+		});
+	}
+
 	pub fn refresh_storage(&mut self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
 		}
 		self.block_on(self.ctx.state.server.handle_action(UiAction::RefreshStorage));
+	}
+
+	pub fn edit_file_search_query(&mut self, value: String) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		self.update_session(|session| {
+			session.file_search_query = value;
+		});
+	}
+
+	pub fn toggle_file_mime(&mut self, idx: u32) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		let mime = {
+			let state = self.block_on(self.ctx.state.server.snapshot());
+			state.search_mime_types.get(idx as usize).cloned()
+		};
+		let Some(mime) = mime else {
+			return;
+		};
+		self.update_session(|session| {
+			if let Some(pos) = session
+				.file_selected_mimes
+				.iter()
+				.position(|item| item == &mime)
+			{
+				session.file_selected_mimes.remove(pos);
+			} else {
+				session.file_selected_mimes.push(mime);
+			}
+		});
+	}
+
+	pub fn clear_file_mimes(&mut self) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		self.update_session(|session| {
+			session.file_selected_mimes.clear();
+		});
+	}
+
+	pub fn set_files_view_thumbnails(&mut self) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		self.update_session(|session| {
+			session.file_view_table = false;
+		});
+	}
+
+	pub fn set_files_view_table(&mut self) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		self.update_session(|session| {
+			session.file_view_table = true;
+		});
 	}
 
 	pub fn refresh_users(&mut self) {
@@ -1030,6 +1352,200 @@ impl UiRootController {
 		}
 		self.update_session(|session| {
 			session.update_version = value;
+		});
+	}
+
+	pub fn edit_scan_path(&mut self, value: String) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		self.update_session(|session| {
+			session.scan_path = value;
+		});
+	}
+
+	pub fn open_scan_folder_modal(&mut self) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		self.update_session(|session| {
+			session.scan_folder_modal_open = true;
+		});
+	}
+
+	pub fn close_scan_folder_modal(&mut self) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		self.update_session(|session| {
+			session.scan_folder_modal_open = false;
+		});
+	}
+
+	pub fn start_peer_scan(&mut self) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		let selected_peer = self.block_on(self.ctx.state.server.snapshot()).selected_peer;
+		let Some(selected_peer) = selected_peer else {
+			self.update_session(|session| {
+				session.scan_status = String::from("Select a peer first");
+			});
+			return;
+		};
+		let Ok(peer) = PeerId::from_str(&selected_peer) else {
+			self.update_session(|session| {
+				session.scan_status = String::from("Invalid selected peer");
+			});
+			return;
+		};
+		let path = {
+			let session = self.current_session();
+			session.scan_path.trim().to_string()
+		};
+		if path.is_empty() {
+			self.update_session(|session| {
+				session.scan_status = String::from("Scan path is required");
+			});
+			return;
+		}
+		let local_peer = self.block_on(self.ctx.state.server.local_peer_id());
+		let is_local_scan = local_peer.as_ref().map(|id| *id == peer).unwrap_or(false);
+		if is_local_scan && !Path::new(&path).is_dir() {
+			self.update_session(|session| {
+				session.scan_status =
+					String::from("Local scan path must be an existing directory");
+				session.scan_in_progress = false;
+				session.scan_rx = None;
+				session.scan_handle = None;
+			});
+			return;
+		}
+		log::info!(
+			"starting {} scan for peer {} path {}",
+			if is_local_scan { "local" } else { "remote" },
+			selected_peer,
+			path
+		);
+		match self.ctx.state.server.puppy.scan_remote_peer(peer, path.clone()) {
+			Ok(handle) => {
+				let receiver = handle.receiver();
+				self.update_session(|session| {
+					session.scan_rx = Some(receiver);
+					session.scan_handle = Some(handle);
+					session.scan_in_progress = true;
+					session.scan_events.clear();
+					session.scan_status = if is_local_scan {
+						format!("Local scan started for {}", path)
+					} else {
+						format!("Remote scan requested for {} (waiting for peer)", path)
+					};
+				});
+				self.poll_peer_scan();
+			}
+			Err(err) => {
+				log::warn!("failed to start scan for peer {}: {}", selected_peer, err);
+				self.update_session(|session| {
+					session.scan_status = format!("Failed to start scan: {err}");
+				});
+			}
+		}
+	}
+
+	pub fn poll_peer_scan(&mut self) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		let rx = self.current_session().scan_rx;
+		let Some(rx) = rx else {
+			self.update_session(|session| {
+				session.scan_status = String::from("No scan in progress");
+			});
+			return;
+		};
+		let (events, disconnected) = {
+			let mut events = Vec::new();
+			let mut disconnected = false;
+			let stream = match rx.lock() {
+				Ok(guard) => guard,
+				Err(err) => {
+					self.update_session(|session| {
+						session.scan_status = format!("Scan stream lock failed: {err}");
+						session.scan_in_progress = false;
+						session.scan_rx = None;
+						session.scan_handle = None;
+					});
+					return;
+				}
+			};
+			loop {
+				match stream.try_recv() {
+					Ok(event) => events.push(event),
+					Err(TryRecvError::Empty) => break,
+					Err(TryRecvError::Disconnected) => {
+						disconnected = true;
+						break;
+					}
+				}
+			}
+			(events, disconnected)
+		};
+		if events.is_empty() {
+			self.update_session(|session| {
+				if disconnected {
+					session.scan_status = String::from("Scan stream closed");
+					session.scan_in_progress = false;
+					session.scan_rx = None;
+					session.scan_handle = None;
+				} else if session.scan_in_progress {
+					session.scan_status = String::from("Waiting for scan events...");
+				}
+			});
+			return;
+		}
+		let mut completed = false;
+		let lines = events
+			.into_iter()
+			.map(|event| {
+				if matches!(event, ScanEvent::Finished(_)) {
+					completed = true;
+				}
+				format_scan_event(&event)
+			})
+			.collect::<Vec<_>>();
+		self.update_session(|session| {
+			for line in lines {
+				session.scan_status = line.clone();
+				session.scan_events.push(line);
+			}
+			if completed {
+				session.scan_in_progress = false;
+				session.scan_rx = None;
+				session.scan_handle = None;
+			}
+		});
+	}
+
+	pub fn cancel_peer_scan(&mut self) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		let handle = self.current_session().scan_handle;
+		let Some(handle) = handle else {
+			self.update_session(|session| {
+				session.scan_status = String::from("No scan in progress");
+			});
+			return;
+		};
+		handle.cancel();
+		self.update_session(|session| {
+			session.scan_status = String::from("Cancelling scan...");
 		});
 	}
 
@@ -1423,6 +1939,13 @@ impl UiServer {
 					let mut state = self.state.lock().await;
 					state.status = format!("Failed to load CPU info for {peer_id}");
 				}
+				if let Ok(disks) = self.puppy.list_disks(peer).await {
+					let mut state = self.state.lock().await;
+					state.peer_disks = disks;
+				} else {
+					let mut state = self.state.lock().await;
+					state.status = format!("Failed to load disks for {peer_id}");
+				}
 				if let Ok(interfaces) = self.puppy.list_interfaces(peer).await {
 					let mut state = self.state.lock().await;
 					state.peer_interfaces = interfaces;
@@ -1514,6 +2037,49 @@ fn format_size(bytes: u64) -> String {
 	format!("{:.2} {}", size, UNITS[unit])
 }
 
+fn short_peer_id(peer_id: &str) -> String {
+	const LIMIT: usize = 16;
+	if peer_id.chars().count() <= LIMIT {
+		return peer_id.to_string();
+	}
+	let mut out = String::new();
+	for (idx, ch) in peer_id.chars().enumerate() {
+		if idx >= 12 {
+			break;
+		}
+		out.push(ch);
+	}
+	out.push_str("...");
+	out
+}
+
+fn short_hash(hash: &[u8]) -> String {
+	let text = format_hash(hash);
+	let mut out = String::new();
+	for (idx, ch) in text.chars().enumerate() {
+		if idx >= 12 {
+			break;
+		}
+		out.push(ch);
+	}
+	out.push_str("...");
+	out
+}
+
+fn url_encode(input: &str) -> String {
+	let mut out = String::with_capacity(input.len());
+	for b in input.bytes() {
+		let is_unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~');
+		if is_unreserved {
+			out.push(b as char);
+		} else {
+			out.push('%');
+			out.push_str(&format!("{b:02X}"));
+		}
+	}
+	out
+}
+
 fn format_update_progress(progress: &UpdateProgress) -> String {
 	match progress {
 		UpdateProgress::FetchingRelease => String::from("Fetching release metadata"),
@@ -1526,6 +2092,27 @@ fn format_update_progress(progress: &UpdateProgress) -> String {
 		UpdateProgress::AlreadyUpToDate { current_version } => {
 			format!("Already up to date ({current_version})")
 		}
+	}
+}
+
+fn format_scan_event(event: &ScanEvent) -> String {
+	match event {
+		ScanEvent::Progress(progress) => format!(
+			"Scanned {}/{} files (inserted {}, updated {}, removed {})",
+			progress.processed_files,
+			progress.total_files,
+			progress.inserted_count,
+			progress.updated_count,
+			progress.removed_count
+		),
+		ScanEvent::Finished(Ok(result)) => format!(
+			"Scan finished: inserted {}, updated {}, removed {} ({:.2}s)",
+			result.inserted_count,
+			result.updated_count,
+			result.removed_count,
+			result.duration.as_secs_f64()
+		),
+		ScanEvent::Finished(Err(err)) => format!("Scan failed: {err}"),
 	}
 }
 
