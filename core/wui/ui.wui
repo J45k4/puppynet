@@ -138,12 +138,55 @@
               <Text value="No file entries recorded." />
             </If>
             <Else>
-              <For each={state.files} itemAs="entry" indexAs="i">
-                <HStack spacing=6>
-                  <Text value={entry.line} grow=1 />
-                  <Button text="Preview" onClick="PreviewLocalFile" arg={i} />
-                </HStack>
-              </For>
+              <HStack spacing=10>
+                <VStack spacing=8 grow=1 border="1px solid #dcdcdc" padding=8 minHeight=520 backgroundColor="#ffffff">
+                  <If test={state.has_file_selected}>
+                    <If test={state.file_selected_is_image}>
+                      <Image src={state.file_selected_thumbnail_url} alt={state.file_selected_name} objectFit="contain" maxWidth=920 maxHeight=560 />
+                    </If>
+                    <Else>
+                      <VStack spacing=6 padding=20 backgroundColor="#efefef" minHeight=400>
+                        <Text value={state.file_selected_name} />
+                        <Text value={state.file_selected_meta} />
+                      </VStack>
+                    </Else>
+                  </If>
+                </VStack>
+                <VStack width=320 minWidth=260 maxWidth=360 spacing=8 border="1px solid #dcdcdc" padding=8 backgroundColor="#f7f7f7">
+                  <Text value={state.file_selected_when} />
+                  <Text value={state.file_selected_device} />
+                  <Text value="Tags" />
+                  <TextInput value={state.file_search_query} placeholder="Search word" onTextChanged="EditFileSearchQuery" />
+                  <If test={!state.has_file_mime_options}>
+                    <Text value="No tags available." />
+                  </If>
+                  <Else>
+                    <VStack maxHeight=180 overflow="scroll" spacing=4>
+                      <For each={state.file_mime_options} itemAs="mime" indexAs="i">
+                        <HStack spacing=6>
+                          <Checkbox checked={mime.selected} onClick="ToggleFileMime" arg={i} />
+                          <Text value={mime.name} grow=1 />
+                        </HStack>
+                      </For>
+                    </VStack>
+                    <Button text="Clear tags" onClick="ClearFileMimes" />
+                  </Else>
+                  <Text value="Nodes" />
+                  <For each={state.file_nodes} itemAs="node">
+                    <Text value={node} />
+                  </For>
+                </VStack>
+              </HStack>
+              <HStack spacing=8 wrap=true overflow="auto">
+                <For each={state.files} itemAs="entry" indexAs="i">
+                  <VStack spacing=4 width=160 minWidth=160 padding=6 border="1px solid #dedede" backgroundColor="#ffffff">
+                    <Text value={entry.title} />
+                    <Text value={entry.kind} />
+                    <Button text="Open" onClick="SelectLocalFile" arg={i} />
+                    <Button text="Preview" onClick="PreviewLocalFile" arg={i} />
+                  </VStack>
+                </For>
+              </HStack>
             </Else>
           </VStack>
         </If>
