@@ -1,0 +1,8 @@
+<VStack spacing=8 padding=10 fill=true>
+  <Import src="../partials/navbar.wui" />
+  <VStack spacing=4>
+    <Text value="Settings" />
+    <Text value="Configuration panels will land here soon." />
+  </VStack>
+  <Text value={state.status} breakWords=true />
+</VStack>

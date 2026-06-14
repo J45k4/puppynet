@@ -1,0 +1,15 @@
+<Modal open={state.file_preview_modal_open} onClick="CloseFilePreviewModal">
+  <VStack spacing=6 padding=10 fill=true maxWidth=900 maxHeight=520 overflow="scroll" backgroundColor="#ffffff" border="1px solid #d9d9d9">
+    <HStack spacing=6 wrap=true fill=true>
+      <Text value="File preview" grow=1 minWidth=0 />
+      <Button text="Close" onClick="CloseFilePreviewModal" />
+    </HStack>
+    <HStack spacing=6 wrap=true fill=true>
+      <TextInput value={state.file_preview_peer} placeholder="Peer id (optional)" onTextChanged="EditFilePreviewPeer" grow=1 minWidth=0 />
+      <TextInput value={state.file_preview_path} placeholder="Path to read" onTextChanged="EditFilePreviewPath" grow=1 minWidth=0 />
+      <Button text="Load preview" onClick="LoadFilePreview" />
+    </HStack>
+    <Text value={state.file_preview_status} breakWords=true />
+    <Text value={state.file_preview_content} breakWords=true />
+  </VStack>
+</Modal>

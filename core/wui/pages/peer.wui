@@ -1,0 +1,56 @@
+<VStack spacing=8 padding=10 fill=true>
+  <Import src="../partials/navbar.wui" />
+  <VStack spacing=6 fill=true>
+    <Text value={state.selected_peer} breakWords=true />
+    <Text value="CPUs:" />
+    <If test={!state.has_cpus}>
+      <Text value="No CPU data available." />
+    </If>
+    <Else>
+      <For each={state.cpus} itemAs="cpu">
+        <Text value={cpu.line} breakWords=true />
+      </For>
+    </Else>
+    <Text value="Interfaces:" />
+    <If test={!state.has_interfaces}>
+      <Text value="No interface data." />
+    </If>
+    <Else>
+      <For each={state.interfaces} itemAs="iface">
+        <Text value={iface.line} breakWords=true />
+      </For>
+    </Else>
+    <Text value="Remote shell" />
+    <HStack spacing=6 wrap=true fill=true>
+      <Button text="Start shell" onClick="StartShell" />
+      <Text value={state.shell_status} grow=1 minWidth=0 breakWords=true />
+    </HStack>
+    <HStack spacing=6 wrap=true fill=true>
+      <TextInput value={state.shell_input} placeholder="Shell command (include newline)" onTextChanged="EditShellInput" grow=1 minWidth=0 />
+      <Button text="Send" onClick="SendShellInput" />
+    </HStack>
+    <If test={!state.shell_has_session}>
+      <Text value="No shell session started yet." />
+    </If>
+    <Else>
+      <Text value={state.shell_output} breakWords=true />
+    </Else>
+    <Text value="Peer updates" />
+    <HStack spacing=6 wrap=true fill=true>
+      <TextInput value={state.update_version} placeholder="Optional version tag" onTextChanged="EditUpdateVersion" grow=1 minWidth=0 />
+      <Button text="Start update" onClick="StartPeerUpdate" />
+      <Button text="Poll events" onClick="PollPeerUpdate" />
+    </HStack>
+    <Text value={state.update_status} breakWords=true />
+    <If test={!state.has_update_events}>
+      <Text value="No update events yet." />
+    </If>
+    <Else>
+      <For each={state.update_events} itemAs="event">
+        <Text value={event} breakWords=true />
+      </For>
+    </Else>
+    <Button text="Back" onClick="PeerBack" />
+  </VStack>
+  <Text value={state.status} breakWords=true />
+</VStack>

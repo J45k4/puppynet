@@ -1,0 +1,18 @@
+<VStack spacing=8 padding=10 fill=true>
+  <Import src="../partials/navbar.wui" />
+  <VStack spacing=6 fill=true>
+    <HStack spacing=6 wrap=true fill=true>
+      <Text value="Storage snapshot" grow=1 minWidth=0 />
+      <Button text="Refresh" onClick="RefreshStorage" />
+    </HStack>
+    <If test={!state.has_storage_rows}>
+      <Text value="No storage data captured yet." />
+    </If>
+    <Else>
+      <For each={state.storage_rows} itemAs="entry">
+        <Text value={entry.line} breakWords=true />
+      </For>
+    </Else>
+  </VStack>
+  <Text value={state.status} breakWords=true />
+</VStack>

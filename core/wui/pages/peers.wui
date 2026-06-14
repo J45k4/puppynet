@@ -1,0 +1,27 @@
+<VStack spacing=8 padding=10 fill=true>
+  <Import src="../partials/navbar.wui" />
+  <VStack spacing=6 fill=true>
+    <HStack spacing=6 wrap=true fill=true>
+      <Text value="Discovered peers" grow=1 minWidth=0 />
+      <Button text="Refresh" onClick="RefreshPeers" />
+    </HStack>
+    <Text value={state.current_peer} breakWords=true />
+    <If test={!state.has_peers}>
+      <Text value="No peers discovered yet." />
+    </If>
+    <Else>
+      <VStack spacing=4 fill=true>
+        <For each={state.peers} itemAs="peer" indexAs="i">
+          <HStack spacing=6 wrap=true fill=true>
+            <VStack spacing=2 grow=1 minWidth=0>
+              <Text value={peer.label} breakWords=true />
+              <Text value={peer.short_id} breakWords=true />
+            </VStack>
+            <Button text="Details" onClick="PeerRow" arg={i} />
+          </HStack>
+        </For>
+      </VStack>
+    </Else>
+  </VStack>
+  <Text value={state.status} />
+</VStack>

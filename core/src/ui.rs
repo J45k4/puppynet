@@ -3,19 +3,26 @@ use crate::p2p::{CpuInfo, InterfaceInfo};
 use crate::updater::UpdateProgress;
 use crate::{PuppyNet, StorageUsageFile};
 use anyhow::Result;
-use async_trait::async_trait;
 use libp2p::PeerId;
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::mpsc;
-use std::sync::mpsc::TryRecvError;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::mpsc;
+use std::sync::mpsc::TryRecvError;
 use tokio::{signal, sync::Mutex, task};
-use wgui::wgui_controller;
-use wgui::wui::runtime::{Component, Ctx};
-use wgui::{Wgui, WuiModel};
+use wgui::wui::runtime::Ctx;
+use wgui::{Wgui, WguiModel};
+
+#[path = "pages/mod.rs"]
+mod pages;
+
+use pages::{
+	FilesController, HomeController, LoginController, NotFoundController, PeerController,
+	PeersController, SearchController, SettingsController, StorageController, UpdatesController,
+	UsersController,
+};
 
 #[derive(Clone, PartialEq, Eq)]
 enum Page {
@@ -89,84 +96,51 @@ enum UiAction {
 	RefreshSearchOptions,
 }
 
-pub async fn run_ui(puppy: Arc<PuppyNet>, bind: SocketAddr) -> Result<()> {
-	log::info!("starting PuppyNet UI on {}", bind);
-	let mut wgui = Wgui::new(bind);
-	let server_state = Arc::new(UiServer::new(puppy));
-	server_state.refresh_all().await;
-
-	let ctx = Arc::new(Ctx::new(UiContext {
-		server: Arc::clone(&server_state),
-		sessions: std::sync::Mutex::new(HashMap::new()),
-	}));
-	wgui.set_ctx(ctx);
-	wgui.add_component::<UiRootController>("/");
-
-	let shutdown = signal::ctrl_c();
-	tokio::pin!(shutdown);
-	let mut run_task = tokio::spawn(async move { wgui.run().await });
-
-	tokio::select! {
-		_ = &mut run_task => {}
-		_ = &mut shutdown => {
-			log::info!("shutting down UI");
-		}
-	}
-	if !run_task.is_finished() {
-		run_task.abort();
-	}
-	let _ = run_task.await;
-	Ok(())
-}
-
-struct UiServer {
+pub(super) struct UiServer {
 	puppy: Arc<PuppyNet>,
 	state: Mutex<UiState>,
 }
 
-struct UiRootController {
-	ctx: Arc<Ctx<UiContext>>,
-}
-
-struct UiContext {
+pub(super) struct UiContext {
 	server: Arc<UiServer>,
 	sessions: std::sync::Mutex<HashMap<String, UiClientSession>>,
 }
 
-#[derive(Clone, WuiModel)]
+#[derive(Clone, WguiModel)]
 struct UiPeer {
 	id: String,
+	short_id: String,
 	label: String,
 }
 
-#[derive(Clone, WuiModel)]
+#[derive(Clone, WguiModel)]
 struct UiCpu {
 	line: String,
 }
 
-#[derive(Clone, WuiModel)]
+#[derive(Clone, WguiModel)]
 struct UiInterface {
 	line: String,
 }
 
-#[derive(Clone, WuiModel)]
+#[derive(Clone, WguiModel)]
 struct UiFileRow {
 	hash: String,
 	line: String,
 }
 
-#[derive(Clone, WuiModel)]
+#[derive(Clone, WguiModel)]
 struct UiStorageRow {
 	line: String,
 }
 
-#[derive(Clone, WuiModel)]
+#[derive(Clone, WguiModel)]
 struct UiMimeOption {
 	name: String,
 	selected: bool,
 }
 
-#[derive(Clone, WuiModel)]
+#[derive(Clone, WguiModel)]
 struct UiSearchRow {
 	name: String,
 	path: String,
@@ -175,7 +149,7 @@ struct UiSearchRow {
 	peer_id: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct UiClientSession {
 	authenticated: bool,
 	username: String,
@@ -206,42 +180,8 @@ struct UiClientSession {
 	update_rx: Option<Arc<std::sync::Mutex<mpsc::Receiver<UpdateProgress>>>>,
 }
 
-impl Default for UiClientSession {
-	fn default() -> Self {
-		Self {
-			authenticated: false,
-			username: String::new(),
-			login_username: String::new(),
-			login_password: String::new(),
-			login_error: String::new(),
-			search_name_query: String::new(),
-			search_selected_mimes: Vec::new(),
-			search_results: Vec::new(),
-			search_status: String::new(),
-			new_user_username: String::new(),
-			new_user_password: String::new(),
-			new_user_status: String::new(),
-			file_preview_peer: String::new(),
-			file_preview_path: String::new(),
-			file_preview_status: String::new(),
-			file_preview_content: String::new(),
-			file_preview_modal_open: false,
-			shell_peer: String::new(),
-			shell_input: String::new(),
-			shell_output: String::new(),
-			shell_status: String::new(),
-			shell_session_id: None,
-			update_version: String::new(),
-			update_status: String::new(),
-			update_events: Vec::new(),
-			update_in_progress: false,
-			update_rx: None,
-		}
-	}
-}
-
-#[derive(Clone, WuiModel)]
-struct UiViewState {
+#[derive(Clone, WguiModel)]
+pub(super) struct UiViewState {
 	page: String,
 	status: String,
 	authenticated: bool,
@@ -294,8 +234,12 @@ struct UiViewState {
 	users: Vec<String>,
 }
 
-impl UiRootController {
-	fn new(ctx: Arc<Ctx<UiContext>>) -> Self {
+pub(super) struct UiControllerCore<'a> {
+	ctx: &'a Arc<Ctx<UiContext, ()>>,
+}
+
+impl<'a> UiControllerCore<'a> {
+	pub(super) fn new(ctx: &'a Arc<Ctx<UiContext, ()>>) -> Self {
 		Self { ctx }
 	}
 
@@ -328,14 +272,30 @@ impl UiRootController {
 		f(entry);
 	}
 
-	fn is_authenticated(&self) -> bool {
+	pub(super) fn is_authenticated(&self) -> bool {
 		self.current_session().authenticated
 	}
 }
 
-#[wgui_controller]
-impl UiRootController {
-	pub fn state(&self) -> UiViewState {
+fn short_peer_id(peer_id: &str) -> String {
+	const EDGE: usize = 10;
+	if peer_id.chars().count() <= EDGE * 2 + 1 {
+		return peer_id.to_string();
+	}
+	let start = peer_id.chars().take(EDGE).collect::<String>();
+	let end = peer_id
+		.chars()
+		.rev()
+		.take(EDGE)
+		.collect::<String>()
+		.chars()
+		.rev()
+		.collect::<String>();
+	format!("{start}...{end}")
+}
+
+impl UiControllerCore<'_> {
+	pub(super) fn state(&self) -> UiViewState {
 		let state = self.block_on(self.ctx.state.server.snapshot());
 		let session = self.current_session();
 		let peers = state
@@ -343,6 +303,7 @@ impl UiRootController {
 			.into_iter()
 			.map(|peer| UiPeer {
 				id: peer.id.clone(),
+				short_id: short_peer_id(&peer.id),
 				label: if peer.local {
 					format!("{} (you)", peer.name)
 				} else {
@@ -459,15 +420,70 @@ impl UiRootController {
 		}
 	}
 
-	pub fn open_login(&mut self) {
+	fn state_for_page(&self, page: Page) -> UiViewState {
+		self.block_on(self.ctx.state.server.set_page(page));
+		self.state()
+	}
+
+	pub(super) fn files_state(&self) -> UiViewState {
+		self.state_for_page(Page::Files)
+	}
+
+	pub(super) fn home_state(&self) -> UiViewState {
+		self.state_for_page(Page::Home)
+	}
+
+	pub(super) fn peer_state(&self, peer_id: String) -> UiViewState {
+		let should_refresh =
+			self.block_on(self.ctx.state.server.snapshot())
+				.selected_peer
+				.as_deref() != Some(peer_id.as_str());
+		self.block_on(
+			self.ctx
+				.state
+				.server
+				.set_page(Page::PeerDetail(peer_id.clone())),
+		);
+		if should_refresh {
+			self.block_on(self.ctx.state.server.refresh_peer_detail(&peer_id));
+		}
+		self.state()
+	}
+
+	pub(super) fn peers_state(&self) -> UiViewState {
+		self.state_for_page(Page::Peers)
+	}
+
+	pub(super) fn search_state(&self) -> UiViewState {
+		self.state_for_page(Page::Search)
+	}
+
+	pub(super) fn settings_state(&self) -> UiViewState {
+		self.state_for_page(Page::Settings)
+	}
+
+	pub(super) fn storage_state(&self) -> UiViewState {
+		self.state_for_page(Page::Storage)
+	}
+
+	pub(super) fn updates_state(&self) -> UiViewState {
+		self.state_for_page(Page::Updates)
+	}
+
+	pub(super) fn users_state(&self) -> UiViewState {
+		self.state_for_page(Page::Users)
+	}
+
+	pub fn open_login(&self) {
 		self.ctx.push_state("/login");
 	}
 
-	pub fn open_app(&mut self) {
+	pub fn open_app(&self) {
+		self.block_on(self.ctx.state.server.handle_action(UiAction::NavHome));
 		self.ctx.push_state("/");
 	}
 
-	pub fn logout(&mut self) {
+	pub fn logout(&self) {
 		self.update_session(|session| {
 			session.authenticated = false;
 			session.username.clear();
@@ -475,21 +491,21 @@ impl UiRootController {
 		self.ctx.push_state("/login");
 	}
 
-	pub fn edit_login_username(&mut self, value: String) {
+	pub fn edit_login_username(&self, value: String) {
 		self.update_session(|session| {
 			session.login_username = value;
 			session.login_error.clear();
 		});
 	}
 
-	pub fn edit_login_password(&mut self, value: String) {
+	pub fn edit_login_password(&self, value: String) {
 		self.update_session(|session| {
 			session.login_password = value;
 			session.login_error.clear();
 		});
 	}
 
-	pub fn login(&mut self) {
+	pub fn login(&self) {
 		let (username, password) = {
 			let session = self.current_session();
 			(
@@ -503,7 +519,13 @@ impl UiRootController {
 			});
 			return;
 		}
-		match self.ctx.state.server.puppy.verify_user_credentials(&username, &password) {
+		match self
+			.ctx
+			.state
+			.server
+			.puppy
+			.verify_user_credentials(&username, &password)
+		{
 			Ok(true) => {
 				self.update_session(|session| {
 					session.authenticated = true;
@@ -526,31 +548,34 @@ impl UiRootController {
 		}
 	}
 
-	pub fn nav_home(&mut self) {
+	pub fn nav_home(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
 		}
 		self.block_on(self.ctx.state.server.handle_action(UiAction::NavHome));
+		self.ctx.push_state("/");
 	}
 
-	pub fn nav_peers(&mut self) {
+	pub fn nav_peers(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
 		}
 		self.block_on(self.ctx.state.server.handle_action(UiAction::NavPeers));
+		self.ctx.push_state("/peers");
 	}
 
-	pub fn nav_files(&mut self) {
+	pub fn nav_files(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
 		}
 		self.block_on(self.ctx.state.server.handle_action(UiAction::NavFiles));
+		self.ctx.push_state("/files");
 	}
 
-	pub fn nav_search(&mut self) {
+	pub fn nav_search(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
@@ -562,57 +587,75 @@ impl UiRootController {
 				.server
 				.handle_action(UiAction::RefreshSearchOptions),
 		);
+		self.ctx.push_state("/search");
 	}
 
-	pub fn nav_storage(&mut self) {
+	pub fn nav_storage(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
 		}
 		self.block_on(self.ctx.state.server.handle_action(UiAction::NavStorage));
+		self.ctx.push_state("/storage");
 	}
 
-	pub fn nav_users(&mut self) {
+	pub fn nav_users(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
 		}
 		self.block_on(self.ctx.state.server.handle_action(UiAction::NavUsers));
+		self.ctx.push_state("/users");
 	}
 
-	pub fn nav_updates(&mut self) {
+	pub fn nav_updates(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
 		}
 		self.block_on(self.ctx.state.server.handle_action(UiAction::NavUpdates));
+		self.ctx.push_state("/updates");
 	}
 
-	pub fn nav_settings(&mut self) {
+	pub fn nav_settings(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
 		}
 		self.block_on(self.ctx.state.server.handle_action(UiAction::NavSettings));
+		self.ctx.push_state("/settings");
 	}
 
-	pub fn peer_row(&mut self, idx: u32) {
+	pub fn peer_row(&self, idx: u32) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
 		}
-		self.block_on(self.ctx.state.server.handle_action(UiAction::PeerRow(idx as usize)));
+		let peer_id = {
+			let state = self.block_on(self.ctx.state.server.snapshot());
+			state.peers.get(idx as usize).map(|peer| peer.id.clone())
+		};
+		self.block_on(
+			self.ctx
+				.state
+				.server
+				.handle_action(UiAction::PeerRow(idx as usize)),
+		);
+		if let Some(peer_id) = peer_id {
+			self.ctx.push_state(format!("/peers/{peer_id}"));
+		}
 	}
 
-	pub fn peer_back(&mut self) {
+	pub fn peer_back(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
 		}
 		self.block_on(self.ctx.state.server.handle_action(UiAction::PeerBack));
+		self.ctx.push_state("/peers");
 	}
 
-	pub fn refresh_peers(&mut self) {
+	pub fn refresh_peers(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
@@ -620,7 +663,7 @@ impl UiRootController {
 		self.block_on(self.ctx.state.server.handle_action(UiAction::RefreshPeers));
 	}
 
-	pub fn refresh_files(&mut self) {
+	pub fn refresh_files(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
@@ -628,19 +671,25 @@ impl UiRootController {
 		self.block_on(self.ctx.state.server.handle_action(UiAction::RefreshFiles));
 	}
 
-	pub fn preview_local_file(&mut self, idx: u32) {
+	pub fn preview_local_file(&self, idx: u32) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
 		}
 		let hash = {
 			let state = self.block_on(self.ctx.state.server.snapshot());
-			state.files.get(idx as usize).map(|entry| entry.hash.clone())
+			state.files.get(idx as usize).map(|entry| entry.hash)
 		};
 		let Some(hash) = hash else {
 			return;
 		};
-		match self.ctx.state.server.puppy.resolve_local_file_by_hash(&hash) {
+		match self
+			.ctx
+			.state
+			.server
+			.puppy
+			.resolve_local_file_by_hash(&hash)
+		{
 			Ok(Some((path, _entry))) => {
 				self.update_session(|session| {
 					session.file_preview_peer.clear();
@@ -667,15 +716,20 @@ impl UiRootController {
 		}
 	}
 
-	pub fn refresh_storage(&mut self) {
+	pub fn refresh_storage(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
 		}
-		self.block_on(self.ctx.state.server.handle_action(UiAction::RefreshStorage));
+		self.block_on(
+			self.ctx
+				.state
+				.server
+				.handle_action(UiAction::RefreshStorage),
+		);
 	}
 
-	pub fn refresh_users(&mut self) {
+	pub fn refresh_users(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
@@ -683,7 +737,7 @@ impl UiRootController {
 		self.block_on(self.ctx.state.server.handle_action(UiAction::RefreshUsers));
 	}
 
-	pub fn edit_search_name_query(&mut self, value: String) {
+	pub fn edit_search_name_query(&self, value: String) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
@@ -693,7 +747,7 @@ impl UiRootController {
 		});
 	}
 
-	pub fn toggle_search_mime(&mut self, idx: u32) {
+	pub fn toggle_search_mime(&self, idx: u32) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
@@ -718,7 +772,7 @@ impl UiRootController {
 		});
 	}
 
-	pub fn clear_search_mimes(&mut self) {
+	pub fn clear_search_mimes(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
@@ -728,7 +782,7 @@ impl UiRootController {
 		});
 	}
 
-	pub fn run_search(&mut self) {
+	pub fn run_search(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
@@ -773,7 +827,7 @@ impl UiRootController {
 		}
 	}
 
-	pub fn search_preview(&mut self, idx: u32) {
+	pub fn search_preview(&self, idx: u32) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
@@ -794,7 +848,7 @@ impl UiRootController {
 		}
 	}
 
-	pub fn close_file_preview_modal(&mut self) {
+	pub fn close_file_preview_modal(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
@@ -804,7 +858,7 @@ impl UiRootController {
 		});
 	}
 
-	pub fn edit_file_preview_path(&mut self, value: String) {
+	pub fn edit_file_preview_path(&self, value: String) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
@@ -814,7 +868,7 @@ impl UiRootController {
 		});
 	}
 
-	pub fn edit_file_preview_peer(&mut self, value: String) {
+	pub fn edit_file_preview_peer(&self, value: String) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
@@ -824,7 +878,7 @@ impl UiRootController {
 		});
 	}
 
-	pub fn load_file_preview(&mut self) {
+	pub fn load_file_preview(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
@@ -856,7 +910,8 @@ impl UiRootController {
 					Some(local) => local,
 					None => {
 						self.update_session(|session| {
-							session.file_preview_status = String::from("Invalid or missing peer id");
+							session.file_preview_status =
+								String::from("Invalid or missing peer id");
 							session.file_preview_content.clear();
 						});
 						return;
@@ -864,13 +919,12 @@ impl UiRootController {
 				}
 			}
 		};
-		match self.block_on(
-			self.ctx
-				.state
-				.server
-				.puppy
-				.read_file(peer, path.clone(), 0, Some(8 * 1024)),
-		) {
+		match self.block_on(self.ctx.state.server.puppy.read_file(
+			peer,
+			path.clone(),
+			0,
+			Some(8 * 1024),
+		)) {
 			Ok(chunk) => {
 				let preview = format_preview_bytes(&chunk.data);
 				self.update_session(|session| {
@@ -902,27 +956,23 @@ impl UiRootController {
 		}
 		let snapshot = self.block_on(self.ctx.state.server.snapshot());
 		let local = snapshot.local_peer_id.clone();
-		if let Some(local_id) = local {
-			if peer_to_node_id_hex(&local_id) == target {
-				if let Ok(peer) = PeerId::from_str(&local_id) {
-					return Some(peer);
-				}
-			}
+		if let Some(local_id) = local
+			&& peer_to_node_id_hex(&local_id) == target
+			&& let Ok(peer) = PeerId::from_str(&local_id)
+		{
+			return Some(peer);
 		}
-		snapshot
-			.peers
-			.iter()
-			.find_map(|peer| {
-				let node_id = peer_to_node_id_hex(&peer.id);
-				if node_id == target {
-					PeerId::from_str(&peer.id).ok()
-				} else {
-					None
-				}
-			})
+		snapshot.peers.iter().find_map(|peer| {
+			let node_id = peer_to_node_id_hex(&peer.id);
+			if node_id == target {
+				PeerId::from_str(&peer.id).ok()
+			} else {
+				None
+			}
+		})
 	}
 
-	pub fn edit_shell_input(&mut self, value: String) {
+	pub fn edit_shell_input(&self, value: String) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
@@ -932,12 +982,14 @@ impl UiRootController {
 		});
 	}
 
-	pub fn start_shell(&mut self) {
+	pub fn start_shell(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
 		}
-		let selected_peer = self.block_on(self.ctx.state.server.snapshot()).selected_peer;
+		let selected_peer = self
+			.block_on(self.ctx.state.server.snapshot())
+			.selected_peer;
 		let Some(selected_peer) = selected_peer else {
 			self.update_session(|session| {
 				session.shell_status = String::from("Select a peer first");
@@ -954,9 +1006,7 @@ impl UiRootController {
 			.duration_since(std::time::UNIX_EPOCH)
 			.map(|value| value.as_millis() as u64)
 			.unwrap_or(1);
-		match self
-			.block_on(self.ctx.state.server.puppy.start_shell(peer, session_id))
-		{
+		match self.block_on(self.ctx.state.server.puppy.start_shell(peer, session_id)) {
 			Ok(remote_session) => {
 				self.update_session(|session| {
 					session.shell_peer = selected_peer;
@@ -973,7 +1023,7 @@ impl UiRootController {
 		}
 	}
 
-	pub fn send_shell_input(&mut self) {
+	pub fn send_shell_input(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
@@ -1023,7 +1073,7 @@ impl UiRootController {
 		}
 	}
 
-	pub fn edit_update_version(&mut self, value: String) {
+	pub fn edit_update_version(&self, value: String) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
@@ -1033,12 +1083,14 @@ impl UiRootController {
 		});
 	}
 
-	pub fn start_peer_update(&mut self) {
+	pub fn start_peer_update(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
 		}
-		let selected_peer = self.block_on(self.ctx.state.server.snapshot()).selected_peer;
+		let selected_peer = self
+			.block_on(self.ctx.state.server.snapshot())
+			.selected_peer;
 		let Some(selected_peer) = selected_peer else {
 			self.update_session(|session| {
 				session.update_status = String::from("Select a peer first");
@@ -1060,7 +1112,13 @@ impl UiRootController {
 				Some(trimmed)
 			}
 		};
-		match self.ctx.state.server.puppy.update_remote_peer(peer, version) {
+		match self
+			.ctx
+			.state
+			.server
+			.puppy
+			.update_remote_peer(peer, version)
+		{
 			Ok(rx) => {
 				self.update_session(|session| {
 					session.update_rx = Some(rx);
@@ -1078,7 +1136,7 @@ impl UiRootController {
 		}
 	}
 
-	pub fn poll_peer_update(&mut self) {
+	pub fn poll_peer_update(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
@@ -1147,7 +1205,7 @@ impl UiRootController {
 		});
 	}
 
-	pub fn edit_new_user_username(&mut self, value: String) {
+	pub fn edit_new_user_username(&self, value: String) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
@@ -1157,7 +1215,7 @@ impl UiRootController {
 		});
 	}
 
-	pub fn edit_new_user_password(&mut self, value: String) {
+	pub fn edit_new_user_password(&self, value: String) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
@@ -1167,7 +1225,7 @@ impl UiRootController {
 		});
 	}
 
-	pub fn create_user(&mut self) {
+	pub fn create_user(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
@@ -1200,22 +1258,6 @@ impl UiRootController {
 			}
 		}
 	}
-}
-
-#[async_trait]
-impl Component for UiRootController {
-	type Context = UiContext;
-	type Model = UiViewState;
-
-	async fn mount(ctx: Arc<Ctx<Self::Context>>) -> Self {
-		Self::new(ctx)
-	}
-
-	fn render(&self, _ctx: &Ctx<Self::Context>) -> Self::Model {
-		self.state()
-	}
-
-	fn unmount(self, _ctx: Arc<Ctx<Self::Context>>) {}
 }
 
 struct UiControllers<'a> {
@@ -1273,7 +1315,9 @@ impl<'a> UiControllers<'a> {
 			state.peers.get(idx).map(|peer| peer.id.clone())
 		};
 		if let Some(peer_id) = target {
-			self.server.set_page(Page::PeerDetail(peer_id.clone())).await;
+			self.server
+				.set_page(Page::PeerDetail(peer_id.clone()))
+				.await;
 			self.server.refresh_peer_detail(&peer_id).await;
 		}
 	}
@@ -1551,4 +1595,75 @@ fn peer_to_node_id_hex(peer: &str) -> String {
 	let len = node.len().min(bytes.len());
 	node[..len].copy_from_slice(&bytes[..len]);
 	format_hash(&node)
+}
+
+pub async fn run_ui(puppy: Arc<PuppyNet>, bind: SocketAddr) -> Result<()> {
+	log::info!("starting PuppyNet UI on {}", bind);
+	let mut wgui = Wgui::new(bind);
+	let server_state = Arc::new(UiServer::new(puppy));
+	server_state.refresh_all().await;
+
+	let ctx = Arc::new(Ctx::new(UiContext {
+		server: Arc::clone(&server_state),
+		sessions: std::sync::Mutex::new(HashMap::new()),
+	}));
+	wgui.set_ctx(ctx);
+	wgui.add_page::<HomeController>("/");
+	wgui.add_page::<LoginController>("/login");
+	wgui.add_page::<PeersController>("/peers");
+	wgui.add_page::<PeerController>("/peers/:peer_id");
+	wgui.add_page::<FilesController>("/files");
+	wgui.add_page::<SearchController>("/search");
+	wgui.add_page::<StorageController>("/storage");
+	wgui.add_page::<UsersController>("/users");
+	wgui.add_page::<UpdatesController>("/updates");
+	wgui.add_page::<SettingsController>("/settings");
+	wgui.add_page::<NotFoundController>("/*");
+
+	let shutdown = signal::ctrl_c();
+	tokio::pin!(shutdown);
+	let mut run_task = tokio::spawn(async move { wgui.run().await });
+
+	tokio::select! {
+		_ = &mut run_task => {}
+		_ = &mut shutdown => {
+			log::info!("shutting down UI");
+		}
+	}
+	if !run_task.is_finished() {
+		run_task.abort();
+	}
+	let _ = run_task.await;
+	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use std::path::Path;
+
+	use wgui::wui::runtime::Template;
+
+	#[test]
+	fn wui_templates_parse() {
+		let base_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("wui");
+		for module_name in [
+			"pages/home",
+			"pages/login",
+			"pages/peers",
+			"pages/peer",
+			"pages/files",
+			"pages/search",
+			"pages/storage",
+			"pages/users",
+			"pages/updates",
+			"pages/settings",
+			"pages/not_found",
+		] {
+			let path = base_dir.join(format!("{module_name}.wui"));
+			let source = std::fs::read_to_string(&path).unwrap();
+			Template::parse_with_dir(&source, module_name, path.parent()).unwrap_or_else(
+				|diagnostics| panic!("failed to parse {module_name}: {diagnostics:?}"),
+			);
+		}
+	}
 }

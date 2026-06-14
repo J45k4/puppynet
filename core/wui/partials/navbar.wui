@@ -1,0 +1,14 @@
+<HStack spacing=6 wrap=true fill=true>
+  <Text value={state.username} grow=1 minWidth=0 breakWords=true />
+  <Button text="Logout" onClick="Logout" />
+</HStack>
+<HStack spacing=6 wrap=true fill=true>
+  <Button text="Home" onClick="NavHome" />
+  <Button text="Peers" onClick="NavPeers" />
+  <Button text="Files" onClick="NavFiles" />
+  <Button text="Search" onClick="NavSearch" />
+  <Button text="Storage" onClick="NavStorage" />
+  <Button text="Users" onClick="NavUsers" />
+  <Button text="Updates" onClick="NavUpdates" />
+  <Button text="Settings" onClick="NavSettings" />
+</HStack>

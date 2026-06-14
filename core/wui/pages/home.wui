@@ -1,0 +1,10 @@
+<VStack spacing=8 padding=10 fill=true>
+  <Import src="../partials/navbar.wui" />
+  <VStack spacing=4>
+    <Text value={state.home_peers} />
+    <Text value={state.home_files} />
+    <Text value={state.home_storage} />
+    <Text value={state.home_users} />
+  </VStack>
+  <Text value={state.status} breakWords=true />
+</VStack>

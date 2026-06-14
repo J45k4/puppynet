@@ -1,0 +1,45 @@
+<VStack spacing=8 padding=10 fill=true>
+  <Import src="../partials/navbar.wui" />
+  <VStack spacing=6 fill=true>
+    <HStack spacing=6 wrap=true fill=true>
+      <TextInput value={state.search_name_query} placeholder="Search by file name" onTextChanged="EditSearchNameQuery" grow=1 minWidth=0 />
+      <Button text="Search" onClick="RunSearch" />
+    </HStack>
+    <HStack spacing=6 wrap=true fill=true>
+      <Text value="Mime filters:" />
+      <Text value={state.search_selected_mimes_text} grow=1 minWidth=0 breakWords=true />
+      <Button text="Clear" onClick="ClearSearchMimes" />
+    </HStack>
+    <If test={!state.has_search_mime_options}>
+      <Text value="No mime options available." />
+    </If>
+    <Else>
+      <VStack fill=true maxWidth=380 maxHeight=180 overflow="scroll" spacing=4>
+        <For each={state.search_mime_options} itemAs="mime" indexAs="i">
+          <HStack spacing=6 wrap=true fill=true>
+            <Checkbox checked={mime.selected} onClick="ToggleSearchMime" arg={i} />
+            <Text value={mime.name} grow=1 minWidth=0 breakWords=true />
+          </HStack>
+        </For>
+      </VStack>
+    </Else>
+    <Text value={state.search_status} breakWords=true />
+    <If test={!state.search_has_results}>
+      <Text value="No results." />
+    </If>
+    <Else>
+      <For each={state.search_results} itemAs="row" indexAs="i">
+        <VStack spacing=2 fill=true>
+          <Text value={row.name} breakWords=true />
+          <Text value={row.path} breakWords=true />
+          <Text value={row.size} />
+          <Text value={row.replicas} />
+          <Text value={row.peer_id} breakWords=true />
+          <Button text="Preview file" onClick="SearchPreview" arg={i} />
+        </VStack>
+      </For>
+    </Else>
+  </VStack>
+  <Import src="../partials/file_preview_modal.wui" />
+  <Text value={state.status} breakWords=true />
+</VStack>

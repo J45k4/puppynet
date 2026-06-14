@@ -1,0 +1,24 @@
+<VStack spacing=8 padding=10 fill=true>
+  <Import src="../partials/navbar.wui" />
+  <VStack spacing=6 fill=true>
+    <HStack spacing=6 wrap=true fill=true>
+      <Text value="Local users" grow=1 minWidth=0 />
+      <Button text="Refresh" onClick="RefreshUsers" />
+    </HStack>
+    <HStack spacing=6 wrap=true fill=true>
+      <TextInput value={state.new_user_username} placeholder="New username" onTextChanged="EditNewUserUsername" grow=1 minWidth=0 />
+      <TextInput value={state.new_user_password} placeholder="New password" onTextChanged="EditNewUserPassword" grow=1 minWidth=0 />
+      <Button text="Create" onClick="CreateUser" />
+    </HStack>
+    <Text value={state.new_user_status} breakWords=true />
+    <If test={!state.has_users}>
+      <Text value="No local users recorded." />
+    </If>
+    <Else>
+      <For each={state.users} itemAs="user">
+        <Text value={user} breakWords=true />
+      </For>
+    </Else>
+  </VStack>
+  <Text value={state.status} breakWords=true />
+</VStack>

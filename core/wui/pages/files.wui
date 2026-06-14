@@ -1,0 +1,22 @@
+<VStack spacing=8 padding=10 fill=true>
+  <Import src="../partials/navbar.wui" />
+  <VStack spacing=6 fill=true>
+    <HStack spacing=6 wrap=true fill=true>
+      <Text value="Local files" grow=1 minWidth=0 />
+      <Button text="Refresh" onClick="RefreshFiles" />
+    </HStack>
+    <If test={!state.has_files}>
+      <Text value="No file entries recorded." />
+    </If>
+    <Else>
+      <For each={state.files} itemAs="entry" indexAs="i">
+        <HStack spacing=6 wrap=true fill=true>
+          <Text value={entry.line} grow=1 minWidth=0 breakWords=true />
+          <Button text="Preview" onClick="PreviewLocalFile" arg={i} />
+        </HStack>
+      </For>
+    </Else>
+  </VStack>
+  <Import src="../partials/file_preview_modal.wui" />
+  <Text value={state.status} breakWords=true />
+</VStack>

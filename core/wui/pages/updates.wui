@@ -1,0 +1,8 @@
+<VStack spacing=8 padding=10 fill=true>
+  <Import src="../partials/navbar.wui" />
+  <VStack spacing=4>
+    <Text value="Updates" />
+    <Text value="Open a peer details page to start or monitor peer updates." />
+  </VStack>
+  <Text value={state.status} breakWords=true />
+</VStack>

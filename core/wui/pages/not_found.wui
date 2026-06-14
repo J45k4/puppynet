@@ -1,0 +1,4 @@
+<VStack spacing=8 padding=12 fill=true>
+  <Text value="Page not found" />
+  <Button text="Back to app" onClick="NavHome" />
+</VStack>

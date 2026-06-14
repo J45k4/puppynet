@@ -9,6 +9,4 @@ indent_style = tab
 
 dont modify readme unless given instruction to do that
 
-if you make changes you web you should run
-- bun run check in web folder
-- bun run build to generate latest assets
+Functions inside the file should be sorted by the dependency graph for example main goes to bottom and above it comes things it calls etc...

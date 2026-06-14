@@ -1,0 +1,9 @@
+<VStack spacing=8 padding=12 fill=true maxWidth=360>
+  <Text value="Login" />
+  <TextInput value={state.login_username} placeholder="Username" onTextChanged="EditLoginUsername" fill=true />
+  <TextInput value={state.login_password} placeholder="Password" onTextChanged="EditLoginPassword" fill=true />
+  <If test={state.login_error != ""}>
+    <Text value={state.login_error} color="#b30000" />
+  </If>
+  <Button text="Login" onClick="Login" />
+</VStack>
