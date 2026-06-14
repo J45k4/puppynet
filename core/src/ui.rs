@@ -1,8 +1,9 @@
 use crate::db::FileEntry;
-use crate::p2p::{CpuInfo, InterfaceInfo};
+use crate::p2p::{CpuInfo, DirEntry, InterfaceInfo};
 use crate::updater::UpdateProgress;
 use crate::{PuppyNet, StorageUsageFile};
 use anyhow::Result;
+use base64::Engine;
 use libp2p::PeerId;
 use std::collections::HashMap;
 use std::future::Future;
@@ -20,8 +21,8 @@ mod pages;
 
 use pages::{
 	FilesController, HomeController, LoginController, NotFoundController, PeerController,
-	PeersController, SearchController, SettingsController, StorageController, UpdatesController,
-	UsersController,
+	PeerFilesController, PeersController, SearchController, SettingsController, StorageController,
+	UpdatesController, UsersController,
 };
 
 #[derive(Clone, PartialEq, Eq)]
@@ -29,6 +30,7 @@ enum Page {
 	Home,
 	Peers,
 	PeerDetail(String),
+	PeerFiles { peer_id: String, path: String },
 	Files,
 	Search,
 	Storage,
@@ -53,6 +55,8 @@ struct UiState {
 	search_mime_types: Vec<String>,
 	peer_cpus: Vec<CpuInfo>,
 	peer_interfaces: Vec<InterfaceInfo>,
+	peer_files_path: String,
+	peer_files: Vec<DirEntry>,
 	files: Vec<FileEntry>,
 	storage: Vec<StorageUsageFile>,
 	users: Vec<String>,
@@ -69,6 +73,8 @@ impl UiState {
 			search_mime_types: Vec::new(),
 			peer_cpus: Vec::new(),
 			peer_interfaces: Vec::new(),
+			peer_files_path: String::from("/"),
+			peer_files: Vec::new(),
 			files: Vec::new(),
 			storage: Vec::new(),
 			users: Vec::new(),
@@ -122,6 +128,14 @@ struct UiFileRow {
 }
 
 #[derive(Clone, WguiModel)]
+struct UiPeerFileRow {
+	name: String,
+	summary: String,
+	href: String,
+	is_dir: bool,
+}
+
+#[derive(Clone, WguiModel)]
 struct UiStorageRow {
 	line: String,
 }
@@ -159,6 +173,7 @@ struct UiClientSession {
 	file_preview_path: String,
 	file_preview_status: String,
 	file_preview_content: String,
+	file_preview_image_src: String,
 	file_preview_modal_open: bool,
 	shell_peer: String,
 	shell_input: String,
@@ -195,6 +210,8 @@ pub(super) struct UiViewState {
 	file_preview_path: String,
 	file_preview_status: String,
 	file_preview_content: String,
+	file_preview_image_src: String,
+	file_preview_has_image: bool,
 	file_preview_modal_open: bool,
 	shell_peer: String,
 	shell_input: String,
@@ -215,6 +232,12 @@ pub(super) struct UiViewState {
 	has_cpus: bool,
 	has_interfaces: bool,
 	has_files: bool,
+	has_peer_files: bool,
+	peer_files_path: String,
+	selected_peer_details_href: String,
+	selected_peer_files_href: String,
+	peer_files_parent_href: String,
+	peer_files_has_parent: bool,
 	has_storage_rows: bool,
 	has_users: bool,
 	selected_peer: String,
@@ -222,6 +245,7 @@ pub(super) struct UiViewState {
 	cpus: Vec<UiCpu>,
 	interfaces: Vec<UiInterface>,
 	files: Vec<UiFileRow>,
+	peer_files: Vec<UiPeerFileRow>,
 	storage_rows: Vec<UiStorageRow>,
 	users: Vec<String>,
 }
@@ -286,6 +310,57 @@ fn short_peer_id(peer_id: &str) -> String {
 	format!("{start}...{end}")
 }
 
+fn normalize_peer_file_path(path: String) -> String {
+	let path = path.trim();
+	if path.is_empty() {
+		String::from("/")
+	} else {
+		path.to_string()
+	}
+}
+
+fn parent_peer_file_path(path: &str) -> Option<String> {
+	let normalized = normalize_peer_file_path(path.to_string());
+	if normalized == "/" {
+		return None;
+	}
+	let trimmed = normalized.trim_end_matches('/');
+	match trimmed.rsplit_once('/') {
+		Some(("", _)) => Some(String::from("/")),
+		Some((parent, _)) => Some(parent.to_string()),
+		None => Some(String::from("/")),
+	}
+}
+
+fn child_peer_file_path(path: &str, name: &str) -> String {
+	let normalized = normalize_peer_file_path(path.to_string());
+	if normalized == "/" {
+		format!("/{name}")
+	} else if normalized.ends_with('/') {
+		format!("{normalized}{name}")
+	} else {
+		format!("{normalized}/{name}")
+	}
+}
+
+fn peer_files_href(peer_id: &str, path: &str) -> String {
+	if peer_id.is_empty() {
+		return String::from("/peers");
+	}
+	let query = url::form_urlencoded::Serializer::new(String::new())
+		.append_pair("path", path)
+		.finish();
+	format!("/peers/{peer_id}/files?{query}")
+}
+
+fn peer_details_href(peer_id: &str) -> String {
+	if peer_id.is_empty() {
+		String::from("/peers")
+	} else {
+		format!("/peers/{peer_id}")
+	}
+}
+
 impl UiControllerCore<'_> {
 	pub(super) fn state(&self) -> UiViewState {
 		let state = self.block_on(self.ctx.state.server.snapshot());
@@ -326,6 +401,38 @@ impl UiControllerCore<'_> {
 				line: format!("{} — {} bytes", format_hash(&entry.hash), entry.size),
 			})
 			.collect::<Vec<_>>();
+		let peer_files = state
+			.peer_files
+			.iter()
+			.map(|entry| UiPeerFileRow {
+				name: entry.name.clone(),
+				summary: if entry.is_dir {
+					String::from("Directory")
+				} else {
+					let kind = entry
+						.mime
+						.clone()
+						.or_else(|| entry.extension.clone())
+						.unwrap_or_else(|| String::from("File"));
+					format!("{kind} - {}", format_size(entry.size))
+				},
+				href: peer_files_href(
+					state.selected_peer.as_deref().unwrap_or_default(),
+					&child_peer_file_path(&state.peer_files_path, &entry.name),
+				),
+				is_dir: entry.is_dir,
+			})
+			.collect::<Vec<_>>();
+		let peer_files_parent_href = state
+			.selected_peer
+			.as_deref()
+			.zip(parent_peer_file_path(&state.peer_files_path))
+			.map(|(peer_id, parent)| peer_files_href(peer_id, &parent))
+			.unwrap_or_default();
+		let selected_peer_details_href =
+			peer_details_href(state.selected_peer.as_deref().unwrap_or_default());
+		let selected_peer_files_href =
+			peer_files_href(state.selected_peer.as_deref().unwrap_or_default(), "/");
 		let storage_rows = state
 			.storage
 			.into_iter()
@@ -377,6 +484,8 @@ impl UiControllerCore<'_> {
 			file_preview_path: session.file_preview_path,
 			file_preview_status: session.file_preview_status,
 			file_preview_content: session.file_preview_content,
+			file_preview_has_image: !session.file_preview_image_src.is_empty(),
+			file_preview_image_src: session.file_preview_image_src,
 			file_preview_modal_open: session.file_preview_modal_open,
 			shell_peer: session.shell_peer,
 			shell_input: session.shell_input,
@@ -400,6 +509,12 @@ impl UiControllerCore<'_> {
 			has_cpus: !cpus.is_empty(),
 			has_interfaces: !interfaces.is_empty(),
 			has_files: !files.is_empty(),
+			has_peer_files: !peer_files.is_empty(),
+			peer_files_path: state.peer_files_path,
+			selected_peer_details_href,
+			selected_peer_files_href,
+			peer_files_has_parent: !peer_files_parent_href.is_empty(),
+			peer_files_parent_href,
 			has_storage_rows: !storage_rows.is_empty(),
 			has_users: !users.is_empty(),
 			selected_peer: state.selected_peer.unwrap_or_default(),
@@ -407,6 +522,7 @@ impl UiControllerCore<'_> {
 			cpus,
 			interfaces,
 			files,
+			peer_files,
 			storage_rows,
 			users,
 		}
@@ -438,6 +554,21 @@ impl UiControllerCore<'_> {
 		);
 		if should_refresh {
 			self.block_on(self.ctx.state.server.refresh_peer_detail(&peer_id));
+		}
+		self.state()
+	}
+
+	pub(super) fn peer_files_state(&self, peer_id: String, path: String) -> UiViewState {
+		let path = normalize_peer_file_path(path);
+		let snapshot = self.block_on(self.ctx.state.server.snapshot());
+		let page = Page::PeerFiles {
+			peer_id: peer_id.clone(),
+			path: path.clone(),
+		};
+		let should_refresh = snapshot.page != page;
+		self.block_on(self.ctx.state.server.set_page(page));
+		if should_refresh {
+			self.block_on(self.ctx.state.server.refresh_peer_files(&peer_id, &path));
 		}
 		self.state()
 	}
@@ -560,6 +691,23 @@ impl UiControllerCore<'_> {
 		self.ctx.push_state("/peers");
 	}
 
+	pub fn refresh_peer_files(&self) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		let snapshot = self.block_on(self.ctx.state.server.snapshot());
+		let Some(peer_id) = snapshot.selected_peer else {
+			return;
+		};
+		self.block_on(
+			self.ctx
+				.state
+				.server
+				.refresh_peer_files(&peer_id, &snapshot.peer_files_path),
+		);
+	}
+
 	pub fn refresh_peers(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
@@ -599,6 +747,9 @@ impl UiControllerCore<'_> {
 				self.update_session(|session| {
 					session.file_preview_peer.clear();
 					session.file_preview_path = path.to_string_lossy().into_owned();
+					session.file_preview_status.clear();
+					session.file_preview_content.clear();
+					session.file_preview_image_src.clear();
 					session.file_preview_modal_open = true;
 				});
 				self.load_file_preview();
@@ -609,6 +760,7 @@ impl UiControllerCore<'_> {
 					session.file_preview_status =
 						String::from("Local file path not found for selected hash");
 					session.file_preview_content.clear();
+					session.file_preview_image_src.clear();
 				});
 			}
 			Err(err) => {
@@ -616,9 +768,45 @@ impl UiControllerCore<'_> {
 					session.file_preview_modal_open = true;
 					session.file_preview_status = format!("Failed to resolve file: {err}");
 					session.file_preview_content.clear();
+					session.file_preview_image_src.clear();
 				});
 			}
 		}
+	}
+
+	pub fn preview_peer_file(&self, idx: u32) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		let target = {
+			let state = self.block_on(self.ctx.state.server.snapshot());
+			let Some(peer_id) = state.selected_peer else {
+				return;
+			};
+			state.peer_files.get(idx as usize).and_then(|entry| {
+				if entry.is_dir {
+					None
+				} else {
+					Some((
+						peer_id,
+						child_peer_file_path(&state.peer_files_path, &entry.name),
+					))
+				}
+			})
+		};
+		let Some((peer_id, path)) = target else {
+			return;
+		};
+		self.update_session(|session| {
+			session.file_preview_peer = peer_id;
+			session.file_preview_path = path;
+			session.file_preview_status.clear();
+			session.file_preview_content.clear();
+			session.file_preview_image_src.clear();
+			session.file_preview_modal_open = true;
+		});
+		self.load_file_preview();
 	}
 
 	pub fn refresh_storage(&self) {
@@ -747,6 +935,8 @@ impl UiControllerCore<'_> {
 				session.file_preview_path = row.path;
 				session.file_preview_peer = row.peer_id;
 				session.file_preview_status.clear();
+				session.file_preview_content.clear();
+				session.file_preview_image_src.clear();
 				session.file_preview_modal_open = true;
 			});
 			self.load_file_preview();
@@ -770,6 +960,9 @@ impl UiControllerCore<'_> {
 		}
 		self.update_session(|session| {
 			session.file_preview_path = value;
+			session.file_preview_status.clear();
+			session.file_preview_content.clear();
+			session.file_preview_image_src.clear();
 		});
 	}
 
@@ -780,6 +973,9 @@ impl UiControllerCore<'_> {
 		}
 		self.update_session(|session| {
 			session.file_preview_peer = value;
+			session.file_preview_status.clear();
+			session.file_preview_content.clear();
+			session.file_preview_image_src.clear();
 		});
 	}
 
@@ -799,6 +995,7 @@ impl UiControllerCore<'_> {
 			self.update_session(|session| {
 				session.file_preview_status = String::from("Path is required");
 				session.file_preview_content.clear();
+				session.file_preview_image_src.clear();
 			});
 			return;
 		}
@@ -818,12 +1015,43 @@ impl UiControllerCore<'_> {
 							session.file_preview_status =
 								String::from("Invalid or missing peer id");
 							session.file_preview_content.clear();
+							session.file_preview_image_src.clear();
 						});
 						return;
 					}
 				}
 			}
 		};
+		if is_image_path(&path) {
+			match self.block_on(self.ctx.state.server.puppy.get_thumbnail(
+				peer,
+				path.clone(),
+				900,
+				700,
+			)) {
+				Ok(thumbnail) => {
+					let encoded = base64::engine::general_purpose::STANDARD.encode(thumbnail.data);
+					self.update_session(|session| {
+						session.file_preview_status = format!(
+							"Loaded image preview from {} ({}x{})",
+							path, thumbnail.width, thumbnail.height
+						);
+						session.file_preview_image_src =
+							format!("data:{};base64,{encoded}", thumbnail.mime_type);
+						session.file_preview_content.clear();
+					});
+				}
+				Err(err) => {
+					self.update_session(|session| {
+						session.file_preview_status =
+							format!("Failed to load image preview: {err}");
+						session.file_preview_content.clear();
+						session.file_preview_image_src.clear();
+					});
+				}
+			}
+			return;
+		}
 		match self.block_on(self.ctx.state.server.puppy.read_file(
 			peer,
 			path.clone(),
@@ -840,12 +1068,14 @@ impl UiControllerCore<'_> {
 						if chunk.eof { "" } else { " (truncated)" }
 					);
 					session.file_preview_content = preview;
+					session.file_preview_image_src.clear();
 				});
 			}
 			Err(err) => {
 				self.update_session(|session| {
 					session.file_preview_status = format!("Failed to read file: {err}");
 					session.file_preview_content.clear();
+					session.file_preview_image_src.clear();
 				});
 			}
 		}
@@ -1293,6 +1523,37 @@ impl UiServer {
 		}
 	}
 
+	async fn refresh_peer_files(&self, peer_id: &str, path: &str) {
+		match PeerId::from_str(peer_id) {
+			Ok(peer) => match self.puppy.list_dir(peer, path.to_string()).await {
+				Ok(mut entries) => {
+					entries.sort_by(|left, right| {
+						right
+							.is_dir
+							.cmp(&left.is_dir)
+							.then_with(|| left.name.cmp(&right.name))
+					});
+					let mut state = self.state.lock().await;
+					state.peer_files = entries;
+					state.peer_files_path = path.to_string();
+					state.status = format!("Loaded {} item(s) from {path}", state.peer_files.len());
+				}
+				Err(err) => {
+					let mut state = self.state.lock().await;
+					state.peer_files.clear();
+					state.peer_files_path = path.to_string();
+					state.status = format!("Failed to load {path}: {err}");
+				}
+			},
+			Err(err) => {
+				let mut state = self.state.lock().await;
+				state.peer_files.clear();
+				state.peer_files_path = path.to_string();
+				state.status = format!("Invalid peer id: {err}");
+			}
+		}
+	}
+
 	async fn refresh_storage(&self) {
 		match self.puppy.list_storage_files().await {
 			Ok(entries) => {
@@ -1374,6 +1635,10 @@ impl UiServer {
 		state.page = page.clone();
 		state.selected_peer = match page {
 			Page::PeerDetail(peer_id) => Some(peer_id),
+			Page::PeerFiles { peer_id, path } => {
+				state.peer_files_path = path;
+				Some(peer_id)
+			}
 			_ => None,
 		};
 	}
@@ -1388,6 +1653,7 @@ fn page_label(page: &Page) -> &'static str {
 		Page::Home => "home",
 		Page::Peers => "peers",
 		Page::PeerDetail(_) => "peer_detail",
+		Page::PeerFiles { .. } => "peer_files",
 		Page::Files => "files",
 		Page::Search => "search",
 		Page::Storage => "storage",
@@ -1458,6 +1724,13 @@ fn peer_to_node_id_hex(peer: &str) -> String {
 	format_hash(&node)
 }
 
+fn is_image_path(path: &str) -> bool {
+	mime_guess::from_path(path)
+		.first_raw()
+		.map(|mime| mime.starts_with("image/"))
+		.unwrap_or(false)
+}
+
 pub async fn run_ui(puppy: Arc<PuppyNet>, bind: SocketAddr) -> Result<()> {
 	log::info!("starting PuppyNet UI on {}", bind);
 	let mut wgui = Wgui::new(bind);
@@ -1472,6 +1745,7 @@ pub async fn run_ui(puppy: Arc<PuppyNet>, bind: SocketAddr) -> Result<()> {
 	wgui.add_page::<HomeController>("/");
 	wgui.add_page::<LoginController>("/login");
 	wgui.add_page::<PeersController>("/peers");
+	wgui.add_page::<PeerFilesController>("/peers/:peer_id/files");
 	wgui.add_page::<PeerController>("/peers/:peer_id");
 	wgui.add_page::<FilesController>("/files");
 	wgui.add_page::<SearchController>("/search");
@@ -1511,6 +1785,7 @@ mod tests {
 			"pages/home",
 			"pages/login",
 			"pages/peers",
+			"pages/peer_files",
 			"pages/peer",
 			"pages/files",
 			"pages/search",

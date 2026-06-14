@@ -10,6 +10,11 @@
       <Button text="Load preview" onClick="LoadFilePreview" />
     </HStack>
     <Text value={state.file_preview_status} breakWords=true />
-    <Text value={state.file_preview_content} breakWords=true />
+    <If test={state.file_preview_has_image}>
+      <Image src={state.file_preview_image_src} alt="File preview" maxWidth=860 maxHeight=420 objectFit="contain" />
+    </If>
+    <Else>
+      <Text value={state.file_preview_content} breakWords=true />
+    </Else>
   </VStack>
 </Modal>

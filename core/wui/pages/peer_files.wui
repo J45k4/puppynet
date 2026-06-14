@@ -1,0 +1,57 @@
+<VStack spacing=8 padding=10 fill=true>
+  <Import src="../partials/navbar.wui" />
+  <VStack spacing=8 fill=true>
+    <HStack spacing=6 wrap=true fill=true>
+      <VStack spacing=2 grow=1 minWidth=0>
+        <Text value="Peer files" />
+        <Text value={state.selected_peer} breakWords=true />
+        <Text value={state.peer_files_path} breakWords=true />
+      </VStack>
+      <Button text="Refresh" onClick="RefreshPeerFiles" />
+    </HStack>
+    <HStack spacing=6 wrap=true fill=true>
+      <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
+        <Link text="Peer details" href={state.selected_peer_details_href} />
+      </VStack>
+      <If test={state.peer_files_has_parent}>
+        <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
+          <Link text="Up" href={state.peer_files_parent_href} />
+        </VStack>
+      </If>
+    </HStack>
+    <If test={!state.has_peer_files}>
+      <Text value="No files found for this directory." />
+    </If>
+    <Else>
+      <VStack spacing=0 fill=true border="1px solid #cbd5e1">
+        <HStack spacing=8 padding=6 fill=true backgroundColor="#f1f5f9">
+          <Text value="Name" grow=1 minWidth=0 />
+          <Text value="Action" minWidth=76 />
+        </HStack>
+        <For each={state.peer_files} itemAs="entry" indexAs="i">
+          <VStack spacing=4 padding=6 fill=true border="1px solid #e2e8f0">
+            <HStack spacing=8 fill=true>
+              <VStack grow=1 minWidth=0>
+                <If test={entry.is_dir}>
+                  <Link text={entry.name} href={entry.href} />
+                </If>
+                <Else>
+                  <Text value={entry.name} breakWords=true />
+                </Else>
+              </VStack>
+              <If test={!entry.is_dir}>
+                <Button text="Preview" onClick="PreviewPeerFile" arg={i} />
+              </If>
+              <Else>
+                <Text value="" minWidth=76 />
+              </Else>
+            </HStack>
+            <Text value={entry.summary} breakWords=true />
+          </VStack>
+        </For>
+      </VStack>
+    </Else>
+  </VStack>
+  <Import src="../partials/file_preview_modal.wui" />
+  <Text value={state.status} breakWords=true />
+</VStack>
