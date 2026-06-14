@@ -35,10 +35,6 @@ impl LoginController {
 	pub fn login(&mut self) {
 		self.core().login();
 	}
-
-	pub fn open_app(&mut self) {
-		self.core().open_app();
-	}
 }
 
 #[async_trait]

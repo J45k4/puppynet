@@ -79,14 +79,6 @@ impl UiState {
 
 #[derive(Clone, Copy, Debug)]
 enum UiAction {
-	NavHome,
-	NavPeers,
-	NavFiles,
-	NavSearch,
-	NavStorage,
-	NavUsers,
-	NavUpdates,
-	NavSettings,
 	PeerRow(usize),
 	PeerBack,
 	RefreshPeers,
@@ -474,15 +466,6 @@ impl UiControllerCore<'_> {
 		self.state_for_page(Page::Users)
 	}
 
-	pub fn open_login(&self) {
-		self.ctx.push_state("/login");
-	}
-
-	pub fn open_app(&self) {
-		self.block_on(self.ctx.state.server.handle_action(UiAction::NavHome));
-		self.ctx.push_state("/");
-	}
-
 	pub fn logout(&self) {
 		self.update_session(|session| {
 			session.authenticated = false;
@@ -546,84 +529,6 @@ impl UiControllerCore<'_> {
 				});
 			}
 		}
-	}
-
-	pub fn nav_home(&self) {
-		if !self.is_authenticated() {
-			self.ctx.push_state("/login");
-			return;
-		}
-		self.block_on(self.ctx.state.server.handle_action(UiAction::NavHome));
-		self.ctx.push_state("/");
-	}
-
-	pub fn nav_peers(&self) {
-		if !self.is_authenticated() {
-			self.ctx.push_state("/login");
-			return;
-		}
-		self.block_on(self.ctx.state.server.handle_action(UiAction::NavPeers));
-		self.ctx.push_state("/peers");
-	}
-
-	pub fn nav_files(&self) {
-		if !self.is_authenticated() {
-			self.ctx.push_state("/login");
-			return;
-		}
-		self.block_on(self.ctx.state.server.handle_action(UiAction::NavFiles));
-		self.ctx.push_state("/files");
-	}
-
-	pub fn nav_search(&self) {
-		if !self.is_authenticated() {
-			self.ctx.push_state("/login");
-			return;
-		}
-		self.block_on(self.ctx.state.server.handle_action(UiAction::NavSearch));
-		self.block_on(
-			self.ctx
-				.state
-				.server
-				.handle_action(UiAction::RefreshSearchOptions),
-		);
-		self.ctx.push_state("/search");
-	}
-
-	pub fn nav_storage(&self) {
-		if !self.is_authenticated() {
-			self.ctx.push_state("/login");
-			return;
-		}
-		self.block_on(self.ctx.state.server.handle_action(UiAction::NavStorage));
-		self.ctx.push_state("/storage");
-	}
-
-	pub fn nav_users(&self) {
-		if !self.is_authenticated() {
-			self.ctx.push_state("/login");
-			return;
-		}
-		self.block_on(self.ctx.state.server.handle_action(UiAction::NavUsers));
-		self.ctx.push_state("/users");
-	}
-
-	pub fn nav_updates(&self) {
-		if !self.is_authenticated() {
-			self.ctx.push_state("/login");
-			return;
-		}
-		self.block_on(self.ctx.state.server.handle_action(UiAction::NavUpdates));
-		self.ctx.push_state("/updates");
-	}
-
-	pub fn nav_settings(&self) {
-		if !self.is_authenticated() {
-			self.ctx.push_state("/login");
-			return;
-		}
-		self.block_on(self.ctx.state.server.handle_action(UiAction::NavSettings));
-		self.ctx.push_state("/settings");
 	}
 
 	pub fn peer_row(&self, idx: u32) {
@@ -1269,44 +1174,8 @@ impl<'a> UiControllers<'a> {
 		Self { server }
 	}
 
-	async fn nav_home(&self) {
-		self.server.set_page(Page::Home).await;
-	}
-
-	async fn nav_peers(&self) {
-		self.server.set_page(Page::Peers).await;
-		self.server.refresh_peers().await;
-	}
-
-	async fn nav_files(&self) {
-		self.server.set_page(Page::Files).await;
-		self.server.refresh_files().await;
-	}
-
-	async fn nav_search(&self) {
-		self.server.set_page(Page::Search).await;
-	}
-
 	async fn refresh_search_options(&self) {
 		self.server.refresh_search_mime_types().await;
-	}
-
-	async fn nav_storage(&self) {
-		self.server.set_page(Page::Storage).await;
-		self.server.refresh_storage().await;
-	}
-
-	async fn nav_users(&self) {
-		self.server.set_page(Page::Users).await;
-		self.server.refresh_users().await;
-	}
-
-	async fn nav_updates(&self) {
-		self.server.set_page(Page::Updates).await;
-	}
-
-	async fn nav_settings(&self) {
-		self.server.set_page(Page::Settings).await;
 	}
 
 	async fn open_peer_row(&self, idx: usize) {
@@ -1490,14 +1359,6 @@ impl UiServer {
 	async fn handle_action(&self, action: UiAction) {
 		let controllers = UiControllers::new(self);
 		match action {
-			UiAction::NavHome => controllers.nav_home().await,
-			UiAction::NavPeers => controllers.nav_peers().await,
-			UiAction::NavFiles => controllers.nav_files().await,
-			UiAction::NavSearch => controllers.nav_search().await,
-			UiAction::NavStorage => controllers.nav_storage().await,
-			UiAction::NavUsers => controllers.nav_users().await,
-			UiAction::NavUpdates => controllers.nav_updates().await,
-			UiAction::NavSettings => controllers.nav_settings().await,
 			UiAction::PeerRow(idx) => controllers.open_peer_row(idx).await,
 			UiAction::PeerBack => controllers.peer_back().await,
 			UiAction::RefreshPeers => controllers.refresh_peers().await,

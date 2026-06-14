@@ -1,4 +1,4 @@
-use super::{UiContext, UiControllerCore, UiViewState};
+use super::{UiAction, UiContext, UiControllerCore, UiViewState};
 use async_trait::async_trait;
 use std::sync::Arc;
 use wgui::wgui_controller;
@@ -24,44 +24,8 @@ impl SearchController {
 		String::from("Search - PuppyNet UI")
 	}
 
-	pub fn open_login(&mut self) {
-		self.core().open_login();
-	}
-
 	pub fn logout(&mut self) {
 		self.core().logout();
-	}
-
-	pub fn nav_home(&mut self) {
-		self.core().nav_home();
-	}
-
-	pub fn nav_peers(&mut self) {
-		self.core().nav_peers();
-	}
-
-	pub fn nav_files(&mut self) {
-		self.core().nav_files();
-	}
-
-	pub fn nav_search(&mut self) {
-		self.core().nav_search();
-	}
-
-	pub fn nav_storage(&mut self) {
-		self.core().nav_storage();
-	}
-
-	pub fn nav_users(&mut self) {
-		self.core().nav_users();
-	}
-
-	pub fn nav_updates(&mut self) {
-		self.core().nav_updates();
-	}
-
-	pub fn nav_settings(&mut self) {
-		self.core().nav_settings();
 	}
 
 	pub fn edit_search_name_query(&mut self, value: String) {
@@ -114,6 +78,10 @@ impl Component for SearchController {
 		if let Some(result) = super::redirect_unauthenticated(&ctx) {
 			return result;
 		}
+		ctx.state
+			.server
+			.handle_action(UiAction::RefreshSearchOptions)
+			.await;
 		MountResult::Ready(Self { ctx })
 	}
 

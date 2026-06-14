@@ -3,12 +3,12 @@
   <Button text="Logout" onClick="Logout" />
 </HStack>
 <HStack spacing=6 wrap=true fill=true>
-  <Button text="Home" onClick="NavHome" />
-  <Button text="Peers" onClick="NavPeers" />
-  <Button text="Files" onClick="NavFiles" />
-  <Button text="Search" onClick="NavSearch" />
-  <Button text="Storage" onClick="NavStorage" />
-  <Button text="Users" onClick="NavUsers" />
-  <Button text="Updates" onClick="NavUpdates" />
-  <Button text="Settings" onClick="NavSettings" />
+  <Link text="Home" href="/" />
+  <Link text="Peers" href="/peers" />
+  <Link text="Files" href="/files" />
+  <Link text="Search" href="/search" />
+  <Link text="Storage" href="/storage" />
+  <Link text="Users" href="/users" />
+  <Link text="Updates" href="/updates" />
+  <Link text="Settings" href="/settings" />
 </HStack>

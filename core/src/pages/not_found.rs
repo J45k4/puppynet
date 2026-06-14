@@ -23,14 +23,6 @@ impl NotFoundController {
 	pub fn title(&self) -> String {
 		String::from("Page not found - PuppyNet UI")
 	}
-
-	pub fn nav_home(&mut self) {
-		self.core().nav_home();
-	}
-
-	pub fn open_login(&mut self) {
-		self.core().open_login();
-	}
 }
 
 #[async_trait]
