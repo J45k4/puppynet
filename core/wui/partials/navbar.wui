@@ -1,35 +1,33 @@
 <VStack spacing=10 fill=true padding=12 backgroundColor="#f7f9fc" border="1px solid #d8e0ea">
   <HStack spacing=10 wrap=true fill=true>
-    <VStack spacing=2 grow=1 minWidth=180>
-      <Text value="PuppyNet" />
-    </VStack>
+    <Text value="PuppyNet" />
+    <HStack spacing=6 wrap=true grow=1 minWidth=0>
+      <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
+        <Link text="Home" href="/" />
+      </VStack>
+      <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
+        <Link text="Peers" href="/peers" />
+      </VStack>
+      <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
+        <Link text="Files" href="/files" />
+      </VStack>
+      <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
+        <Link text="Search" href="/search" />
+      </VStack>
+      <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
+        <Link text="Storage" href="/storage" />
+      </VStack>
+      <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
+        <Link text="Users" href="/users" />
+      </VStack>
+      <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
+        <Link text="Updates" href="/updates" />
+      </VStack>
+      <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
+        <Link text="Settings" href="/settings" />
+      </VStack>
+    </HStack>
     <Text value={state.username} breakWords=true />
     <Button text="Logout" onClick="Logout" />
-  </HStack>
-  <HStack spacing=6 wrap=true fill=true>
-    <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
-      <Link text="Home" href="/" />
-    </VStack>
-    <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
-      <Link text="Peers" href="/peers" />
-    </VStack>
-    <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
-      <Link text="Files" href="/files" />
-    </VStack>
-    <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
-      <Link text="Search" href="/search" />
-    </VStack>
-    <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
-      <Link text="Storage" href="/storage" />
-    </VStack>
-    <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
-      <Link text="Users" href="/users" />
-    </VStack>
-    <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
-      <Link text="Updates" href="/updates" />
-    </VStack>
-    <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
-      <Link text="Settings" href="/settings" />
-    </VStack>
   </HStack>
 </VStack>
