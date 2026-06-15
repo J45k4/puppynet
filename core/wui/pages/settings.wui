@@ -1,8 +1,9 @@
-<VStack spacing=8 padding=10 fill=true>
-  <Import src="../partials/navbar.wui" />
+<Import name="AppLayout" from="../layouts/app" />
+
+<AppLayout>
   <VStack spacing=4>
     <Text value="Settings" />
     <Text value="Configuration panels will land here soon." />
   </VStack>
   <Text value={state.status} breakWords=true />
-</VStack>
+</AppLayout>

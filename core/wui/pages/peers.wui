@@ -1,5 +1,6 @@
-<VStack spacing=8 padding=10 fill=true>
-  <Import src="../partials/navbar.wui" />
+<Import name="AppLayout" from="../layouts/app" />
+
+<AppLayout>
   <VStack spacing=6 fill=true>
     <HStack spacing=6 wrap=true fill=true>
       <Text value="Discovered peers" grow=1 minWidth=0 />
@@ -24,4 +25,4 @@
     </Else>
   </VStack>
   <Text value={state.status} />
-</VStack>
+</AppLayout>

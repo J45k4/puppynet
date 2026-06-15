@@ -1,3 +1,4 @@
+use crate::auth;
 use crate::db::FileEntry;
 use crate::p2p::{CpuInfo, DirEntry, InterfaceInfo};
 use crate::updater::UpdateProgress;
@@ -5,6 +6,8 @@ use crate::{PuppyNet, StorageUsageFile};
 use anyhow::Result;
 use base64::Engine;
 use libp2p::PeerId;
+use rand::RngCore;
+use rand::rngs::OsRng;
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -14,7 +17,10 @@ use std::sync::mpsc;
 use std::sync::mpsc::TryRecvError;
 use tokio::{signal, sync::Mutex, task};
 use wgui::wui::runtime::Ctx;
-use wgui::{Wgui, WguiModel};
+use wgui::{HttpRequest, HttpResponse, Wgui, WguiModel};
+
+const SESSION_COOKIE: &str = "sid";
+const SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 7;
 
 #[path = "pages/mod.rs"]
 mod pages;
@@ -102,6 +108,7 @@ pub(super) struct UiServer {
 pub(super) struct UiContext {
 	server: Arc<UiServer>,
 	sessions: std::sync::Mutex<HashMap<String, UiClientSession>>,
+	pending_login_tokens: std::sync::Mutex<HashMap<String, String>>,
 }
 
 #[derive(Clone, WguiModel)]
@@ -288,8 +295,19 @@ impl<'a> UiControllerCore<'a> {
 		f(entry);
 	}
 
+	fn authenticated_username(&self) -> Option<String> {
+		if let Some(session_id) = self.ctx.session_id() {
+			let hash = auth::token_hash(&session_id);
+			if let Ok(Some(username)) = self.ctx.state.server.puppy.http_me(&hash) {
+				return Some(username);
+			}
+		}
+		let session = self.current_session();
+		session.authenticated.then_some(session.username)
+	}
+
 	pub(super) fn is_authenticated(&self) -> bool {
-		self.current_session().authenticated
+		self.authenticated_username().is_some()
 	}
 }
 
@@ -361,10 +379,50 @@ fn peer_details_href(peer_id: &str) -> String {
 	}
 }
 
+fn cookie_value(headers: &HashMap<String, String>, name: &str) -> Option<String> {
+	let header = headers.get("cookie")?;
+	for part in header.split(';') {
+		let mut kv = part.trim().splitn(2, '=');
+		let (Some(key), Some(value)) = (kv.next(), kv.next()) else {
+			continue;
+		};
+		if key == name && !value.is_empty() {
+			return Some(value.to_string());
+		}
+	}
+	None
+}
+
+fn clear_session_cookie() -> String {
+	format!("{SESSION_COOKIE}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax")
+}
+
+fn generate_login_nonce() -> String {
+	let mut bytes = [0u8; 16];
+	OsRng.fill_bytes(&mut bytes);
+	bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn json_response(status: u16, value: serde_json::Value) -> HttpResponse {
+	HttpResponse::new(status, value.to_string()).header("content-type", "application/json")
+}
+
+fn redirect_response(location: &str) -> HttpResponse {
+	HttpResponse::new(303, Vec::new()).header("location", location)
+}
+
+fn session_cookie(token: &str) -> String {
+	format!(
+		"{}={}; HttpOnly; Path=/; Max-Age={}; SameSite=Lax",
+		SESSION_COOKIE, token, SESSION_TTL_SECS
+	)
+}
+
 impl UiControllerCore<'_> {
 	pub(super) fn state(&self) -> UiViewState {
 		let state = self.block_on(self.ctx.state.server.snapshot());
 		let session = self.current_session();
+		let authenticated_username = self.authenticated_username();
 		let peers = state
 			.peers
 			.into_iter()
@@ -461,8 +519,8 @@ impl UiControllerCore<'_> {
 		UiViewState {
 			page: page_label(&state.page).to_string(),
 			status: state.status,
-			authenticated: session.authenticated,
-			username: session.username,
+			authenticated: authenticated_username.is_some(),
+			username: authenticated_username.unwrap_or(session.username),
 			login_username: session.login_username,
 			login_password: session.login_password,
 			login_error: session.login_error,
@@ -598,11 +656,15 @@ impl UiControllerCore<'_> {
 	}
 
 	pub fn logout(&self) {
+		if let Some(session_id) = self.ctx.session_id() {
+			let hash = auth::token_hash(&session_id);
+			let _ = self.ctx.state.server.puppy.drop_session(&hash);
+		}
 		self.update_session(|session| {
 			session.authenticated = false;
 			session.username.clear();
 		});
-		self.ctx.push_state("/login");
+		self.ctx.navigate("/auth/logout");
 	}
 
 	pub fn edit_login_username(&self, value: String) {
@@ -641,13 +703,33 @@ impl UiControllerCore<'_> {
 			.verify_user_credentials(&username, &password)
 		{
 			Ok(true) => {
+				let (token, hash) = auth::generate_session_token();
+				if let Err(err) =
+					self.ctx
+						.state
+						.server
+						.puppy
+						.save_session(&hash, &username, SESSION_TTL_SECS)
+				{
+					self.update_session(|session| {
+						session.login_error = format!("Login failed: {err}");
+					});
+					return;
+				}
+				let nonce = generate_login_nonce();
+				self.ctx
+					.state
+					.pending_login_tokens
+					.lock()
+					.unwrap()
+					.insert(nonce.clone(), token);
 				self.update_session(|session| {
 					session.authenticated = true;
 					session.username = username.clone();
 					session.login_password.clear();
 					session.login_error.clear();
 				});
-				self.ctx.push_state("/");
+				self.ctx.navigate(format!("/auth/finish?nonce={nonce}"));
 			}
 			Ok(false) => {
 				self.update_session(|session| {
@@ -1731,6 +1813,54 @@ fn is_image_path(path: &str) -> bool {
 		.unwrap_or(false)
 }
 
+async fn handle_ui_http(
+	request: HttpRequest,
+	ctx: Arc<Ctx<UiContext, ()>>,
+) -> Option<HttpResponse> {
+	match (request.method.as_str(), request.path.as_str()) {
+		("GET", "/auth/finish") => {
+			let token = request
+				.query
+				.get("nonce")
+				.and_then(|nonce| ctx.state.pending_login_tokens.lock().unwrap().remove(nonce));
+			let Some(token) = token else {
+				return Some(
+					redirect_response("/login")
+						.header("cache-control", "no-store")
+						.header("set-cookie", clear_session_cookie()),
+				);
+			};
+			Some(
+				redirect_response("/")
+					.header("cache-control", "no-store")
+					.header("set-cookie", session_cookie(&token)),
+			)
+		}
+		("GET", "/auth/logout") | ("POST", "/auth/logout") => {
+			if let Some(sid) = cookie_value(&request.headers, SESSION_COOKIE) {
+				let hash = auth::token_hash(&sid);
+				let _ = ctx.state.server.puppy.drop_session(&hash);
+			}
+			Some(
+				redirect_response("/login")
+					.header("cache-control", "no-store")
+					.header("set-cookie", clear_session_cookie()),
+			)
+		}
+		("GET", "/auth/me") => {
+			let user = cookie_value(&request.headers, SESSION_COOKIE).and_then(|sid| {
+				let hash = auth::token_hash(&sid);
+				ctx.state.server.puppy.http_me(&hash).ok().flatten()
+			});
+			Some(match user {
+				Some(user) => json_response(200, serde_json::json!({ "user": user })),
+				None => json_response(401, serde_json::json!({ "error": "not authenticated" })),
+			})
+		}
+		_ => None,
+	}
+}
+
 pub async fn run_ui(puppy: Arc<PuppyNet>, bind: SocketAddr) -> Result<()> {
 	log::info!("starting PuppyNet UI on {}", bind);
 	let mut wgui = Wgui::new(bind);
@@ -1740,7 +1870,13 @@ pub async fn run_ui(puppy: Arc<PuppyNet>, bind: SocketAddr) -> Result<()> {
 	let ctx = Arc::new(Ctx::new(UiContext {
 		server: Arc::clone(&server_state),
 		sessions: std::sync::Mutex::new(HashMap::new()),
+		pending_login_tokens: std::sync::Mutex::new(HashMap::new()),
 	}));
+	let http_ctx = Arc::clone(&ctx);
+	wgui.set_http_handler(move |request| {
+		let http_ctx = Arc::clone(&http_ctx);
+		async move { handle_ui_http(request, http_ctx).await }
+	});
 	wgui.set_ctx(ctx);
 	wgui.add_page::<HomeController>("/");
 	wgui.add_page::<LoginController>("/login");

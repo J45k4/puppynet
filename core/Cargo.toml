@@ -40,4 +40,4 @@ homedir = "0.3"
 hyper = { version = "0.14", features = ["full"] }
 url = "2"
 axum = "0.7"
-wgui = { git = "https://github.com/J45k4/wgui.git", rev = "a39ced7c7bdff3560f89d2eb10c226f19cc89199" }
+wgui = { git = "https://github.com/J45k4/wgui.git", rev = "fcc21aace250b93ab9a355cfab3751e43c4deb0e" }

@@ -1,5 +1,6 @@
-<VStack spacing=8 padding=10 fill=true>
-  <Import src="../partials/navbar.wui" />
+<Import name="AppLayout" from="../layouts/app" />
+
+<AppLayout>
   <VStack spacing=6 fill=true>
     <Text value={state.selected_peer} breakWords=true />
     <HStack spacing=6 wrap=true fill=true>
@@ -58,4 +59,4 @@
     <Button text="Back" onClick="PeerBack" />
   </VStack>
   <Text value={state.status} breakWords=true />
-</VStack>
+</AppLayout>

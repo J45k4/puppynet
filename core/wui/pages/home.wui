@@ -1,5 +1,6 @@
-<VStack spacing=12 padding=16 fill=true backgroundColor="#f3f6f9">
-  <Import src="../partials/navbar.wui" />
+<Import name="AppLayout" from="../layouts/app" />
+
+<AppLayout>
   <VStack spacing=10 padding=12 fill=true backgroundColor="#ffffff" border="1px solid #d8e0ea">
     <Text value="Overview" />
     <HStack spacing=8 wrap=true fill=true>
@@ -20,4 +21,4 @@
   <VStack padding=8 backgroundColor="#ffffff" border="1px solid #d8e0ea">
     <Text value={state.status} breakWords=true />
   </VStack>
-</VStack>
+</AppLayout>

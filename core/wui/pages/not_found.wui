@@ -1,4 +1,4 @@
-<VStack spacing=8 padding=12 fill=true>
+<VStack spacing=8 fill=true>
   <Text value="Page not found" />
   <Link text="Back to app" href="/" />
 </VStack>

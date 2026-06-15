@@ -2,8 +2,8 @@
   <HStack spacing=10 wrap=true fill=true>
     <VStack spacing=2 grow=1 minWidth=180>
       <Text value="PuppyNet" />
-      <Text value={state.username} breakWords=true />
     </VStack>
+    <Text value={state.username} breakWords=true />
     <Button text="Logout" onClick="Logout" />
   </HStack>
   <HStack spacing=6 wrap=true fill=true>

@@ -1,4 +1,4 @@
-<VStack spacing=8 padding=12 fill=true maxWidth=360>
+<VStack spacing=8 fill=true maxWidth=360>
   <Text value="Login" />
   <TextInput value={state.login_username} placeholder="Username" onTextChanged="EditLoginUsername" fill=true />
   <TextInput value={state.login_password} placeholder="Password" onTextChanged="EditLoginPassword" fill=true />
