@@ -61,6 +61,16 @@ pub enum PeerReq {
 	ListCpus,
 	ListDisks,
 	ListInterfaces,
+	AudioCapability,
+	ListAudioDevices,
+	SetAudioMuted {
+		device_id: Option<String>,
+		muted: bool,
+	},
+	SetAudioVolume {
+		device_id: Option<String>,
+		volume: u8,
+	},
 	StartScan {
 		id: u64,
 		path: String,
@@ -139,6 +149,8 @@ pub enum PeerRes {
 	Cpus(Vec<CpuInfo>),
 	Disks(Vec<DiskInfo>),
 	Interfaces(Vec<InterfaceInfo>),
+	AudioCapability(AudioCapability),
+	AudioDevices(Vec<AudioDevice>),
 	FileEntries(Vec<FileEntry>),
 	ScanStarted(Result<(), String>),
 	ScanEventAck,
@@ -251,6 +263,30 @@ pub struct InterfaceInfo {
 	pub errors_on_received: u64,
 	pub errors_on_transmitted: u64,
 	pub mtu: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AudioDeviceKind {
+	Sink,
+	Source,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioDevice {
+	pub id: String,
+	pub name: String,
+	pub description: String,
+	pub kind: AudioDeviceKind,
+	pub volume: u8,
+	pub muted: bool,
+	pub is_default: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioCapability {
+	pub supported: bool,
+	pub backend: Option<String>,
+	pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

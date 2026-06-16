@@ -1,6 +1,6 @@
 use crate::auth;
 use crate::db::FileEntry;
-use crate::p2p::{CpuInfo, DirEntry, InterfaceInfo};
+use crate::p2p::{AudioCapability, AudioDevice, AudioDeviceKind, CpuInfo, DirEntry, InterfaceInfo};
 use crate::updater::UpdateProgress;
 use crate::{PuppyNet, StorageUsageFile};
 use anyhow::Result;
@@ -62,6 +62,8 @@ struct UiState {
 	search_mime_types: Vec<String>,
 	peer_cpus: Vec<CpuInfo>,
 	peer_interfaces: Vec<InterfaceInfo>,
+	peer_audio_capability: Option<AudioCapability>,
+	peer_audio_devices: Vec<AudioDevice>,
 	peer_files_path: String,
 	peer_files: Vec<DirEntry>,
 	files: Vec<FileEntry>,
@@ -80,6 +82,8 @@ impl UiState {
 			search_mime_types: Vec::new(),
 			peer_cpus: Vec::new(),
 			peer_interfaces: Vec::new(),
+			peer_audio_capability: None,
+			peer_audio_devices: Vec::new(),
 			peer_files_path: String::from("/"),
 			peer_files: Vec::new(),
 			files: Vec::new(),
@@ -126,6 +130,11 @@ struct UiCpu {
 
 #[derive(Clone, WguiModel)]
 struct UiInterface {
+	line: String,
+}
+
+#[derive(Clone, WguiModel)]
+struct UiAudioDevice {
 	line: String,
 }
 
@@ -188,6 +197,7 @@ struct UiClientSession {
 	shell_output: String,
 	shell_status: String,
 	shell_session_id: Option<u64>,
+	audio_status: String,
 	update_version: String,
 	update_status: String,
 	update_events: Vec<String>,
@@ -226,6 +236,13 @@ pub(super) struct UiViewState {
 	shell_output: String,
 	shell_status: String,
 	shell_has_session: bool,
+	audio_status: String,
+	audio_capability_status: String,
+	audio_supported: bool,
+	audio_volume: i32,
+	audio_volume_text: String,
+	audio_muted: bool,
+	audio_mute_label: String,
 	update_version: String,
 	update_status: String,
 	update_events: Vec<String>,
@@ -239,6 +256,7 @@ pub(super) struct UiViewState {
 	has_peers: bool,
 	has_cpus: bool,
 	has_interfaces: bool,
+	has_audio_devices: bool,
 	has_files: bool,
 	has_peer_files: bool,
 	peer_files_path: String,
@@ -252,6 +270,7 @@ pub(super) struct UiViewState {
 	peers: Vec<UiPeer>,
 	cpus: Vec<UiCpu>,
 	interfaces: Vec<UiInterface>,
+	audio_devices: Vec<UiAudioDevice>,
 	files: Vec<UiFileRow>,
 	peer_files: Vec<UiPeerFileRow>,
 	storage_rows: Vec<UiStorageRow>,
@@ -327,6 +346,50 @@ fn short_peer_id(peer_id: &str) -> String {
 		.rev()
 		.collect::<String>();
 	format!("{start}...{end}")
+}
+
+fn audio_device_kind_label(kind: &AudioDeviceKind) -> &'static str {
+	match kind {
+		AudioDeviceKind::Sink => "Output",
+		AudioDeviceKind::Source => "Input",
+	}
+}
+
+fn audio_device_line(device: &AudioDevice) -> String {
+	let muted = if device.muted { "muted" } else { "unmuted" };
+	let default = if device.is_default { "default " } else { "" };
+	format!(
+		"{} — {}{} | {}% | {}",
+		device.name,
+		default,
+		audio_device_kind_label(&device.kind),
+		device.volume,
+		muted
+	)
+}
+
+fn default_audio_output(devices: &[AudioDevice]) -> Option<&AudioDevice> {
+	devices
+		.iter()
+		.find(|device| device.is_default && matches!(device.kind, AudioDeviceKind::Sink))
+		.or_else(|| {
+			devices
+				.iter()
+				.find(|device| matches!(device.kind, AudioDeviceKind::Sink))
+		})
+}
+
+fn audio_capability_status(capability: Option<&AudioCapability>) -> String {
+	match capability {
+		Some(capability) => capability.message.clone(),
+		None => String::from("Audio capability not checked yet."),
+	}
+}
+
+fn audio_supported(capability: Option<&AudioCapability>) -> bool {
+	capability
+		.map(|capability| capability.supported)
+		.unwrap_or(false)
 }
 
 fn normalize_peer_file_path(path: String) -> String {
@@ -457,6 +520,21 @@ impl UiControllerCore<'_> {
 				line: format!("{} — {} | {}", iface.name, iface.mac, iface.ips.join(", ")),
 			})
 			.collect::<Vec<_>>();
+		let audio_volume = default_audio_output(&state.peer_audio_devices)
+			.map(|device| device.volume as i32)
+			.unwrap_or(0);
+		let audio_muted = default_audio_output(&state.peer_audio_devices)
+			.map(|device| device.muted)
+			.unwrap_or(false);
+		let is_audio_supported = audio_supported(state.peer_audio_capability.as_ref());
+		let audio_capability_status = audio_capability_status(state.peer_audio_capability.as_ref());
+		let audio_devices = state
+			.peer_audio_devices
+			.iter()
+			.map(|device| UiAudioDevice {
+				line: audio_device_line(device),
+			})
+			.collect::<Vec<_>>();
 		let files = state
 			.files
 			.into_iter()
@@ -557,6 +635,17 @@ impl UiControllerCore<'_> {
 			shell_output: session.shell_output,
 			shell_status: session.shell_status,
 			shell_has_session: session.shell_session_id.is_some(),
+			audio_status: session.audio_status,
+			audio_capability_status,
+			audio_supported: is_audio_supported,
+			audio_volume,
+			audio_volume_text: format!("{audio_volume}%"),
+			audio_muted,
+			audio_mute_label: if audio_muted {
+				String::from("Unmute")
+			} else {
+				String::from("Mute")
+			},
 			update_version: session.update_version,
 			update_status: session.update_status,
 			update_events: session.update_events.clone(),
@@ -573,6 +662,7 @@ impl UiControllerCore<'_> {
 			has_peers: !peers.is_empty(),
 			has_cpus: !cpus.is_empty(),
 			has_interfaces: !interfaces.is_empty(),
+			has_audio_devices: !audio_devices.is_empty(),
 			has_files: !files.is_empty(),
 			has_peer_files: !peer_files.is_empty(),
 			peer_files_path: state.peer_files_path,
@@ -586,6 +676,7 @@ impl UiControllerCore<'_> {
 			peers,
 			cpus,
 			interfaces,
+			audio_devices,
 			files,
 			peer_files,
 			storage_rows,
@@ -795,6 +886,121 @@ impl UiControllerCore<'_> {
 				.server
 				.refresh_peer_files(&peer_id, &snapshot.peer_files_path),
 		);
+	}
+
+	pub fn refresh_audio(&self) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		let snapshot = self.block_on(self.ctx.state.server.snapshot());
+		let Some(peer_id) = snapshot.selected_peer else {
+			self.update_session(|session| {
+				session.audio_status = String::from("Select a peer first");
+			});
+			return;
+		};
+		self.block_on(self.ctx.state.server.refresh_peer_audio(&peer_id));
+	}
+
+	pub fn set_audio_volume(&self, value: i32) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		let snapshot = self.block_on(self.ctx.state.server.snapshot());
+		let Some(peer_id) = snapshot.selected_peer else {
+			self.update_session(|session| {
+				session.audio_status = String::from("Select a peer first");
+			});
+			return;
+		};
+		if !audio_supported(snapshot.peer_audio_capability.as_ref()) {
+			self.update_session(|session| {
+				session.audio_status =
+					audio_capability_status(snapshot.peer_audio_capability.as_ref());
+			});
+			return;
+		}
+		let Ok(peer) = PeerId::from_str(&peer_id) else {
+			self.update_session(|session| {
+				session.audio_status = String::from("Invalid selected peer");
+			});
+			return;
+		};
+		let volume = value.clamp(0, 100) as u8;
+		match self.block_on(
+			self.ctx
+				.state
+				.server
+				.puppy
+				.set_audio_volume(peer, None, volume),
+		) {
+			Ok(devices) => {
+				self.block_on(self.ctx.state.server.set_peer_audio_devices(devices));
+				self.update_session(|session| {
+					session.audio_status = format!("Set volume to {volume}%");
+				});
+			}
+			Err(err) => {
+				self.update_session(|session| {
+					session.audio_status = format!("Failed to set volume: {err}");
+				});
+			}
+		}
+	}
+
+	pub fn toggle_audio_mute(&self) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		let snapshot = self.block_on(self.ctx.state.server.snapshot());
+		let Some(peer_id) = snapshot.selected_peer else {
+			self.update_session(|session| {
+				session.audio_status = String::from("Select a peer first");
+			});
+			return;
+		};
+		if !audio_supported(snapshot.peer_audio_capability.as_ref()) {
+			self.update_session(|session| {
+				session.audio_status =
+					audio_capability_status(snapshot.peer_audio_capability.as_ref());
+			});
+			return;
+		}
+		let Ok(peer) = PeerId::from_str(&peer_id) else {
+			self.update_session(|session| {
+				session.audio_status = String::from("Invalid selected peer");
+			});
+			return;
+		};
+		let muted = !default_audio_output(&snapshot.peer_audio_devices)
+			.map(|device| device.muted)
+			.unwrap_or(false);
+		match self.block_on(
+			self.ctx
+				.state
+				.server
+				.puppy
+				.set_audio_muted(peer, None, muted),
+		) {
+			Ok(devices) => {
+				self.block_on(self.ctx.state.server.set_peer_audio_devices(devices));
+				self.update_session(|session| {
+					session.audio_status = if muted {
+						String::from("Muted default output")
+					} else {
+						String::from("Unmuted default output")
+					};
+				});
+			}
+			Err(err) => {
+				self.update_session(|session| {
+					session.audio_status = format!("Failed to change mute: {err}");
+				});
+			}
+		}
 	}
 
 	pub fn refresh_peers(&self) {
@@ -1676,6 +1882,61 @@ impl UiServer {
 		}
 	}
 
+	async fn set_peer_audio_devices(&self, devices: Vec<AudioDevice>) {
+		let mut state = self.state.lock().await;
+		state.peer_audio_devices = devices;
+	}
+
+	async fn refresh_peer_audio(&self, peer_id: &str) {
+		match PeerId::from_str(peer_id) {
+			Ok(peer) => {
+				let capability = match self.puppy.audio_capability(peer).await {
+					Ok(capability) => capability,
+					Err(err) => {
+						let mut state = self.state.lock().await;
+						state.peer_audio_capability = Some(AudioCapability {
+							supported: false,
+							backend: None,
+							message: format!("Failed to query audio capability: {err}"),
+						});
+						state.peer_audio_devices.clear();
+						return;
+					}
+				};
+				if !capability.supported {
+					let mut state = self.state.lock().await;
+					state.peer_audio_capability = Some(capability);
+					state.peer_audio_devices.clear();
+					return;
+				}
+
+				match self.puppy.list_audio_devices(peer).await {
+					Ok(devices) => {
+						let mut state = self.state.lock().await;
+						state.peer_audio_capability = Some(capability);
+						state.peer_audio_devices = devices;
+					}
+					Err(err) => {
+						let mut state = self.state.lock().await;
+						state.peer_audio_capability = Some(capability);
+						state.peer_audio_devices.clear();
+						state.status = format!("Failed to load audio devices for {peer_id}: {err}");
+					}
+				}
+			}
+			Err(err) => {
+				let mut state = self.state.lock().await;
+				state.peer_audio_capability = Some(AudioCapability {
+					supported: false,
+					backend: None,
+					message: format!("Invalid peer id: {err}"),
+				});
+				state.peer_audio_devices.clear();
+				state.status = format!("Invalid peer id: {err}");
+			}
+		}
+	}
+
 	async fn refresh_peer_detail(&self, peer_id: &str) {
 		match PeerId::from_str(peer_id) {
 			Ok(peer) => {
@@ -1694,6 +1955,7 @@ impl UiServer {
 					let mut state = self.state.lock().await;
 					state.status = format!("Failed to load interfaces for {peer_id}");
 				}
+				self.refresh_peer_audio(peer_id).await;
 			}
 			Err(err) => {
 				let mut state = self.state.lock().await;
@@ -1721,6 +1983,7 @@ impl UiServer {
 
 	async fn set_page(&self, page: Page) {
 		let mut state = self.state.lock().await;
+		let previous_peer = state.selected_peer.clone();
 		state.page = page.clone();
 		state.selected_peer = match page {
 			Page::PeerDetail(peer_id) => Some(peer_id),
@@ -1730,6 +1993,10 @@ impl UiServer {
 			}
 			_ => None,
 		};
+		if state.selected_peer != previous_peer {
+			state.peer_audio_capability = None;
+			state.peer_audio_devices.clear();
+		}
 	}
 
 	async fn snapshot(&self) -> UiState {

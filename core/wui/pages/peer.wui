@@ -26,6 +26,31 @@
         <Text value={iface.line} breakWords=true />
       </For>
     </Else>
+    <Text value="Audio mixer" />
+    <HStack spacing=6 wrap=true fill=true>
+      <Button text="Refresh audio" onClick="RefreshAudio" />
+      <Text value={state.audio_status} grow=1 minWidth=0 breakWords=true />
+    </HStack>
+    <Text value={state.audio_capability_status} breakWords=true />
+    <If test={!state.audio_supported}>
+      <Text value="Audio control is not supported on this peer." />
+    </If>
+    <Else>
+      <If test={!state.has_audio_devices}>
+        <Text value="No audio devices available." />
+      </If>
+      <Else>
+        <HStack spacing=6 wrap=true fill=true>
+          <Text value="Volume" />
+          <Slider min=0 max=100 value={state.audio_volume} step=1 onSliderChange="SetAudioVolume" />
+          <Text value={state.audio_volume_text} />
+          <Button text={state.audio_mute_label} onClick="ToggleAudioMute" />
+        </HStack>
+        <For each={state.audio_devices} itemAs="device">
+          <Text value={device.line} breakWords=true />
+        </For>
+      </Else>
+    </Else>
     <Text value="Remote shell" />
     <HStack spacing=6 wrap=true fill=true>
       <Button text="Start shell" onClick="StartShell" />

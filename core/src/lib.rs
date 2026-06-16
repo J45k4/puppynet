@@ -1,4 +1,5 @@
 mod app;
+mod audio;
 pub mod auth;
 mod db;
 pub mod http_api;

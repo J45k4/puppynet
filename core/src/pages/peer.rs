@@ -48,6 +48,18 @@ impl PeerController {
 		self.core().send_shell_input();
 	}
 
+	pub fn refresh_audio(&mut self) {
+		self.core().refresh_audio();
+	}
+
+	pub fn set_audio_volume(&mut self, value: i32) {
+		self.core().set_audio_volume(value);
+	}
+
+	pub fn toggle_audio_mute(&mut self) {
+		self.core().toggle_audio_mute();
+	}
+
 	pub fn edit_update_version(&mut self, value: String) {
 		self.core().edit_update_version(value);
 	}

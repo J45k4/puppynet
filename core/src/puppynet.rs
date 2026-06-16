@@ -7,8 +7,8 @@ use crate::db::{
 	run_migrations, save_session,
 };
 use crate::p2p::{
-	CpuInfo, DirEntry, DiskInfo, InterfaceInfo, PermissionGrant, Thumbnail, grant_from_permission,
-	permission_from_grant,
+	AudioCapability, AudioDevice, CpuInfo, DirEntry, DiskInfo, InterfaceInfo, PermissionGrant,
+	Thumbnail, grant_from_permission, permission_from_grant,
 };
 use crate::scan::ScanEvent;
 use crate::state::{FLAG_READ, FLAG_SEARCH, FLAG_WRITE, Peer, Permission, State};
@@ -333,6 +333,62 @@ impl PuppyNet {
 			.map_err(|e| anyhow!("failed to send ListInterfaces command: {e}"))?;
 		rx.await
 			.map_err(|e| anyhow!("ListInterfaces response channel closed: {e}"))?
+	}
+
+	pub async fn list_audio_devices(&self, peer_id: PeerId) -> Result<Vec<AudioDevice>> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::ListAudioDevices { tx, peer_id })
+			.map_err(|e| anyhow!("failed to send ListAudioDevices command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("ListAudioDevices response channel closed: {e}"))?
+	}
+
+	pub async fn audio_capability(&self, peer_id: PeerId) -> Result<AudioCapability> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::AudioCapability { tx, peer_id })
+			.map_err(|e| anyhow!("failed to send AudioCapability command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("AudioCapability response channel closed: {e}"))?
+	}
+
+	pub async fn set_audio_muted(
+		&self,
+		peer_id: PeerId,
+		device_id: Option<String>,
+		muted: bool,
+	) -> Result<Vec<AudioDevice>> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::SetAudioMuted {
+				tx,
+				peer_id,
+				device_id,
+				muted,
+			})
+			.map_err(|e| anyhow!("failed to send SetAudioMuted command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("SetAudioMuted response channel closed: {e}"))?
+	}
+
+	pub async fn set_audio_volume(
+		&self,
+		peer_id: PeerId,
+		device_id: Option<String>,
+		volume: u8,
+	) -> Result<Vec<AudioDevice>> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::SetAudioVolume {
+				tx,
+				peer_id,
+				device_id,
+				volume,
+			})
+			.map_err(|e| anyhow!("failed to send SetAudioVolume command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("SetAudioVolume response channel closed: {e}"))?
 	}
 
 	pub fn scan_remote_peer(

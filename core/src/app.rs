@@ -1,7 +1,8 @@
+use crate::audio;
 use crate::auth;
 use crate::p2p::{
-	AuthMethod, CpuInfo, DirEntry, DiskInfo, FileWriteAck, InterfaceInfo, PeerReq, PeerRes,
-	PermissionGrant, Thumbnail, permission_from_grant,
+	AudioCapability, AudioDevice, AuthMethod, CpuInfo, DirEntry, DiskInfo, FileWriteAck,
+	InterfaceInfo, PeerReq, PeerRes, PermissionGrant, Thumbnail, permission_from_grant,
 };
 use crate::types::FileChunk;
 use crate::updater::{self, UpdateProgress, UpdateResult};
@@ -76,6 +77,26 @@ pub enum Command {
 	ListInterfaces {
 		tx: oneshot::Sender<Result<Vec<InterfaceInfo>>>,
 		peer_id: PeerId,
+	},
+	AudioCapability {
+		tx: oneshot::Sender<Result<AudioCapability>>,
+		peer_id: PeerId,
+	},
+	ListAudioDevices {
+		tx: oneshot::Sender<Result<Vec<AudioDevice>>>,
+		peer_id: PeerId,
+	},
+	SetAudioMuted {
+		tx: oneshot::Sender<Result<Vec<AudioDevice>>>,
+		peer_id: PeerId,
+		device_id: Option<String>,
+		muted: bool,
+	},
+	SetAudioVolume {
+		tx: oneshot::Sender<Result<Vec<AudioDevice>>>,
+		peer_id: PeerId,
+		device_id: Option<String>,
+		volume: u8,
 	},
 	ListFileEntries {
 		peer: PeerId,
@@ -351,6 +372,24 @@ impl ResponseDecoder for Vec<InterfaceInfo> {
 	fn decode(response: PeerRes) -> anyhow::Result<Self> {
 		match response {
 			PeerRes::Interfaces(interfaces) => Ok(interfaces),
+			other => Err(anyhow!("unexpected response: {:?}", other)),
+		}
+	}
+}
+
+impl ResponseDecoder for AudioCapability {
+	fn decode(response: PeerRes) -> anyhow::Result<Self> {
+		match response {
+			PeerRes::AudioCapability(capability) => Ok(capability),
+			other => Err(anyhow!("unexpected response: {:?}", other)),
+		}
+	}
+}
+
+impl ResponseDecoder for Vec<AudioDevice> {
+	fn decode(response: PeerRes) -> anyhow::Result<Self> {
+		match response {
+			PeerRes::AudioDevices(devices) => Ok(devices),
 			other => Err(anyhow!("unexpected response: {:?}", other)),
 		}
 	}
@@ -978,6 +1017,23 @@ impl App {
 			PeerReq::ListInterfaces => {
 				let interfaces = self.collect_interface_info();
 				PeerRes::Interfaces(interfaces)
+			}
+			PeerReq::AudioCapability => PeerRes::AudioCapability(audio::audio_capability().await),
+			PeerReq::ListAudioDevices => match audio::list_audio_devices().await {
+				Ok(devices) => PeerRes::AudioDevices(devices),
+				Err(err) => PeerRes::Error(err.to_string()),
+			},
+			PeerReq::SetAudioMuted { device_id, muted } => {
+				match audio::set_audio_muted(device_id, muted).await {
+					Ok(devices) => PeerRes::AudioDevices(devices),
+					Err(err) => PeerRes::Error(err.to_string()),
+				}
+			}
+			PeerReq::SetAudioVolume { device_id, volume } => {
+				match audio::set_audio_volume(device_id, volume).await {
+					Ok(devices) => PeerRes::AudioDevices(devices),
+					Err(err) => PeerRes::Error(err.to_string()),
+				}
 			}
 			PeerReq::FileEntries { offset, limit } => {
 				match self.fetch_file_entries(offset, limit) {
@@ -1869,6 +1925,71 @@ impl App {
 					.send_request(&peer_id, PeerReq::ListInterfaces);
 				self.pending_requests
 					.insert(request_id, Pending::<Vec<InterfaceInfo>>::new(tx));
+			}
+			Command::AudioCapability { tx, peer_id } => {
+				if self.state.me == peer_id {
+					let _ = tx.send(Ok(audio::audio_capability().await));
+					return;
+				}
+				let request_id = self
+					.swarm
+					.behaviour_mut()
+					.puppynet
+					.send_request(&peer_id, PeerReq::AudioCapability);
+				self.pending_requests
+					.insert(request_id, Pending::<AudioCapability>::new(tx));
+			}
+			Command::ListAudioDevices { tx, peer_id } => {
+				if self.state.me == peer_id {
+					let result = audio::list_audio_devices().await;
+					let _ = tx.send(result);
+					return;
+				}
+				let request_id = self
+					.swarm
+					.behaviour_mut()
+					.puppynet
+					.send_request(&peer_id, PeerReq::ListAudioDevices);
+				self.pending_requests
+					.insert(request_id, Pending::<Vec<AudioDevice>>::new(tx));
+			}
+			Command::SetAudioMuted {
+				tx,
+				peer_id,
+				device_id,
+				muted,
+			} => {
+				if self.state.me == peer_id {
+					let result = audio::set_audio_muted(device_id, muted).await;
+					let _ = tx.send(result);
+					return;
+				}
+				let request_id = self
+					.swarm
+					.behaviour_mut()
+					.puppynet
+					.send_request(&peer_id, PeerReq::SetAudioMuted { device_id, muted });
+				self.pending_requests
+					.insert(request_id, Pending::<Vec<AudioDevice>>::new(tx));
+			}
+			Command::SetAudioVolume {
+				tx,
+				peer_id,
+				device_id,
+				volume,
+			} => {
+				if self.state.me == peer_id {
+					let result = audio::set_audio_volume(device_id, volume).await;
+					let _ = tx.send(result);
+					return;
+				}
+				let request_id = self
+					.swarm
+					.behaviour_mut()
+					.puppynet
+					.send_request(&peer_id, PeerReq::SetAudioVolume { device_id, volume });
+				self.pending_requests
+					.insert(request_id, Pending::<Vec<AudioDevice>>::new(tx));
 			}
 			Command::ListFileEntries {
 				peer,
