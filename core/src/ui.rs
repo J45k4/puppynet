@@ -21,6 +21,7 @@ use wgui::{HttpRequest, HttpResponse, Wgui, WguiModel};
 
 const SESSION_COOKIE: &str = "sid";
 const SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 7;
+const FAVICON_ICO: &[u8] = include_bytes!("../http_assets/favicon.ico");
 
 #[path = "pages/mod.rs"]
 mod pages;
@@ -409,6 +410,12 @@ fn json_response(status: u16, value: serde_json::Value) -> HttpResponse {
 
 fn redirect_response(location: &str) -> HttpResponse {
 	HttpResponse::new(303, Vec::new()).header("location", location)
+}
+
+fn favicon_response() -> HttpResponse {
+	HttpResponse::new(200, FAVICON_ICO.to_vec())
+		.header("content-type", "image/x-icon")
+		.header("cache-control", "public, max-age=86400")
 }
 
 fn session_cookie(token: &str) -> String {
@@ -1818,6 +1825,7 @@ async fn handle_ui_http(
 	ctx: Arc<Ctx<UiContext, ()>>,
 ) -> Option<HttpResponse> {
 	match (request.method.as_str(), request.path.as_str()) {
+		("GET", "/favicon.ico") => Some(favicon_response()),
 		("GET", "/auth/finish") => {
 			let token = request
 				.query

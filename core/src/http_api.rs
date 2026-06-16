@@ -294,6 +294,8 @@ fn load_asset(name: &str) -> Option<Cow<'static, [u8]>> {
 		"index.html" => Some(Cow::Borrowed(include_bytes!("../http_assets/index.html"))),
 		"index.css" => Some(Cow::Borrowed(include_bytes!("../http_assets/index.css"))),
 		"index.js" => Some(Cow::Borrowed(include_bytes!("../http_assets/index.js"))),
+		"favicon.ico" => Some(Cow::Borrowed(include_bytes!("../http_assets/favicon.ico"))),
+		"favicon.png" => Some(Cow::Borrowed(include_bytes!("../http_assets/favicon.png"))),
 		_ => None,
 	}
 }

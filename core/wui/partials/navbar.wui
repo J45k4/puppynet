@@ -1,31 +1,17 @@
+<Import name="NavLink" from="nav_link" />
+
 <VStack spacing=10 fill=true padding=12 backgroundColor="#f7f9fc" border="1px solid #d8e0ea">
   <HStack spacing=10 wrap=true fill=true>
     <Text value="PuppyNet" />
     <HStack spacing=6 wrap=true grow=1 minWidth=0>
-      <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
-        <Link text="Home" href="/" />
-      </VStack>
-      <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
-        <Link text="Peers" href="/peers" />
-      </VStack>
-      <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
-        <Link text="Files" href="/files" />
-      </VStack>
-      <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
-        <Link text="Search" href="/search" />
-      </VStack>
-      <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
-        <Link text="Storage" href="/storage" />
-      </VStack>
-      <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
-        <Link text="Users" href="/users" />
-      </VStack>
-      <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
-        <Link text="Updates" href="/updates" />
-      </VStack>
-      <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
-        <Link text="Settings" href="/settings" />
-      </VStack>
+      <NavLink text="Home" href="/" />
+      <NavLink text="Peers" href="/peers" activeWhen="/peers/*" />
+      <NavLink text="Files" href="/files" />
+      <NavLink text="Search" href="/search" />
+      <NavLink text="Storage" href="/storage" />
+      <NavLink text="Users" href="/users" />
+      <NavLink text="Updates" href="/updates" />
+      <NavLink text="Settings" href="/settings" />
     </HStack>
     <Text value={state.username} breakWords=true />
     <Button text="Logout" onClick="Logout" />
