@@ -10,6 +10,7 @@ mod state;
 mod types;
 pub mod ui;
 pub mod updater;
+mod webcam;
 pub use state::{FLAG_READ, FLAG_SEARCH, FLAG_WRITE, FolderRule, Permission, Rule, State};
 pub use types::FileChunk;
 pub mod wait_group;

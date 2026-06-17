@@ -7,8 +7,9 @@ use crate::db::{
 	run_migrations, save_session,
 };
 use crate::p2p::{
-	AudioCapability, AudioDevice, CpuInfo, DirEntry, DiskInfo, InterfaceInfo, PermissionGrant,
-	Thumbnail, grant_from_permission, permission_from_grant,
+	AudioCapability, AudioDevice, CpuInfo, DirEntry, DiskInfo, InterfaceInfo, MediaCapability,
+	MediaFrame, MediaSource, PermissionGrant, Thumbnail, grant_from_permission,
+	permission_from_grant,
 };
 use crate::scan::ScanEvent;
 use crate::state::{FLAG_READ, FLAG_SEARCH, FLAG_WRITE, Peer, Permission, State};
@@ -389,6 +390,37 @@ impl PuppyNet {
 			.map_err(|e| anyhow!("failed to send SetAudioVolume command: {e}"))?;
 		rx.await
 			.map_err(|e| anyhow!("SetAudioVolume response channel closed: {e}"))?
+	}
+
+	pub async fn media_capability(&self, peer_id: PeerId) -> Result<MediaCapability> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::MediaCapability { tx, peer_id })
+			.map_err(|e| anyhow!("failed to send MediaCapability command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("MediaCapability response channel closed: {e}"))?
+	}
+
+	pub async fn list_media_sources(&self, peer_id: PeerId) -> Result<Vec<MediaSource>> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::ListMediaSources { tx, peer_id })
+			.map_err(|e| anyhow!("failed to send ListMediaSources command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("ListMediaSources response channel closed: {e}"))?
+	}
+
+	pub async fn get_media_frame(&self, peer_id: PeerId, source_id: String) -> Result<MediaFrame> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::GetMediaFrame {
+				tx,
+				peer_id,
+				source_id,
+			})
+			.map_err(|e| anyhow!("failed to send GetMediaFrame command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("GetMediaFrame response channel closed: {e}"))?
 	}
 
 	pub fn scan_remote_peer(

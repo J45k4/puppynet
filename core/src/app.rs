@@ -2,10 +2,12 @@ use crate::audio;
 use crate::auth;
 use crate::p2p::{
 	AudioCapability, AudioDevice, AuthMethod, CpuInfo, DirEntry, DiskInfo, FileWriteAck,
-	InterfaceInfo, PeerReq, PeerRes, PermissionGrant, Thumbnail, permission_from_grant,
+	InterfaceInfo, MediaCapability, MediaFrame, MediaSource, PeerReq, PeerRes, PermissionGrant,
+	Thumbnail, permission_from_grant,
 };
 use crate::types::FileChunk;
 use crate::updater::{self, UpdateProgress, UpdateResult};
+use crate::webcam;
 use crate::{
 	db::{
 		Cpu as DbCpu, FileEntry, Interface as DbInterface, Node, NodeID, StorageUsageFile,
@@ -97,6 +99,19 @@ pub enum Command {
 		peer_id: PeerId,
 		device_id: Option<String>,
 		volume: u8,
+	},
+	MediaCapability {
+		tx: oneshot::Sender<Result<MediaCapability>>,
+		peer_id: PeerId,
+	},
+	ListMediaSources {
+		tx: oneshot::Sender<Result<Vec<MediaSource>>>,
+		peer_id: PeerId,
+	},
+	GetMediaFrame {
+		tx: oneshot::Sender<Result<MediaFrame>>,
+		peer_id: PeerId,
+		source_id: String,
 	},
 	ListFileEntries {
 		peer: PeerId,
@@ -390,6 +405,33 @@ impl ResponseDecoder for Vec<AudioDevice> {
 	fn decode(response: PeerRes) -> anyhow::Result<Self> {
 		match response {
 			PeerRes::AudioDevices(devices) => Ok(devices),
+			other => Err(anyhow!("unexpected response: {:?}", other)),
+		}
+	}
+}
+
+impl ResponseDecoder for MediaCapability {
+	fn decode(response: PeerRes) -> anyhow::Result<Self> {
+		match response {
+			PeerRes::MediaCapability(capability) => Ok(capability),
+			other => Err(anyhow!("unexpected response: {:?}", other)),
+		}
+	}
+}
+
+impl ResponseDecoder for Vec<MediaSource> {
+	fn decode(response: PeerRes) -> anyhow::Result<Self> {
+		match response {
+			PeerRes::MediaSources(sources) => Ok(sources),
+			other => Err(anyhow!("unexpected response: {:?}", other)),
+		}
+	}
+}
+
+impl ResponseDecoder for MediaFrame {
+	fn decode(response: PeerRes) -> anyhow::Result<Self> {
+		match response {
+			PeerRes::MediaFrame(frame) => Ok(frame),
 			other => Err(anyhow!("unexpected response: {:?}", other)),
 		}
 	}
@@ -1032,6 +1074,17 @@ impl App {
 			PeerReq::SetAudioVolume { device_id, volume } => {
 				match audio::set_audio_volume(device_id, volume).await {
 					Ok(devices) => PeerRes::AudioDevices(devices),
+					Err(err) => PeerRes::Error(err.to_string()),
+				}
+			}
+			PeerReq::MediaCapability => PeerRes::MediaCapability(webcam::media_capability().await),
+			PeerReq::ListMediaSources => match webcam::list_media_sources().await {
+				Ok(sources) => PeerRes::MediaSources(sources),
+				Err(err) => PeerRes::Error(err.to_string()),
+			},
+			PeerReq::GetMediaFrame { source_id } => {
+				match webcam::capture_media_frame(source_id).await {
+					Ok(frame) => PeerRes::MediaFrame(frame),
 					Err(err) => PeerRes::Error(err.to_string()),
 				}
 			}
@@ -1990,6 +2043,51 @@ impl App {
 					.send_request(&peer_id, PeerReq::SetAudioVolume { device_id, volume });
 				self.pending_requests
 					.insert(request_id, Pending::<Vec<AudioDevice>>::new(tx));
+			}
+			Command::MediaCapability { tx, peer_id } => {
+				if self.state.me == peer_id {
+					let _ = tx.send(Ok(webcam::media_capability().await));
+					return;
+				}
+				let request_id = self
+					.swarm
+					.behaviour_mut()
+					.puppynet
+					.send_request(&peer_id, PeerReq::MediaCapability);
+				self.pending_requests
+					.insert(request_id, Pending::<MediaCapability>::new(tx));
+			}
+			Command::ListMediaSources { tx, peer_id } => {
+				if self.state.me == peer_id {
+					let result = webcam::list_media_sources().await;
+					let _ = tx.send(result);
+					return;
+				}
+				let request_id = self
+					.swarm
+					.behaviour_mut()
+					.puppynet
+					.send_request(&peer_id, PeerReq::ListMediaSources);
+				self.pending_requests
+					.insert(request_id, Pending::<Vec<MediaSource>>::new(tx));
+			}
+			Command::GetMediaFrame {
+				tx,
+				peer_id,
+				source_id,
+			} => {
+				if self.state.me == peer_id {
+					let result = webcam::capture_media_frame(source_id).await;
+					let _ = tx.send(result);
+					return;
+				}
+				let request_id = self
+					.swarm
+					.behaviour_mut()
+					.puppynet
+					.send_request(&peer_id, PeerReq::GetMediaFrame { source_id });
+				self.pending_requests
+					.insert(request_id, Pending::<MediaFrame>::new(tx));
 			}
 			Command::ListFileEntries {
 				peer,

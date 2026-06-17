@@ -7,6 +7,9 @@
       <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
         <Link text="Browse files" href={state.selected_peer_files_href} />
       </VStack>
+      <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
+        <Link text="View webcams" href={state.selected_peer_webcams_href} />
+      </VStack>
     </HStack>
     <Text value="CPUs:" />
     <If test={!state.has_cpus}>

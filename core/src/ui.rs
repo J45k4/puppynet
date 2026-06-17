@@ -1,6 +1,9 @@
 use crate::auth;
 use crate::db::FileEntry;
-use crate::p2p::{AudioCapability, AudioDevice, AudioDeviceKind, CpuInfo, DirEntry, InterfaceInfo};
+use crate::p2p::{
+	AudioCapability, AudioDevice, AudioDeviceKind, CpuInfo, DirEntry, InterfaceInfo,
+	MediaCapability, MediaSource, MediaSourceKind,
+};
 use crate::updater::UpdateProgress;
 use crate::{PuppyNet, StorageUsageFile};
 use anyhow::Result;
@@ -9,6 +12,7 @@ use libp2p::PeerId;
 use rand::RngCore;
 use rand::rngs::OsRng;
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -28,8 +32,8 @@ mod pages;
 
 use pages::{
 	FilesController, HomeController, LoginController, NotFoundController, PeerController,
-	PeerFilesController, PeersController, SearchController, SettingsController, StorageController,
-	UpdatesController, UsersController,
+	PeerFilesController, PeerWebcamsController, PeersController, SearchController,
+	SettingsController, StorageController, UpdatesController, UsersController,
 };
 
 #[derive(Clone, PartialEq, Eq)]
@@ -38,6 +42,7 @@ enum Page {
 	Peers,
 	PeerDetail(String),
 	PeerFiles { peer_id: String, path: String },
+	PeerWebcams { peer_id: String },
 	Files,
 	Search,
 	Storage,
@@ -64,6 +69,8 @@ struct UiState {
 	peer_interfaces: Vec<InterfaceInfo>,
 	peer_audio_capability: Option<AudioCapability>,
 	peer_audio_devices: Vec<AudioDevice>,
+	peer_webcam_capability: Option<MediaCapability>,
+	peer_webcams: Vec<MediaSource>,
 	peer_files_path: String,
 	peer_files: Vec<DirEntry>,
 	files: Vec<FileEntry>,
@@ -84,6 +91,8 @@ impl UiState {
 			peer_interfaces: Vec::new(),
 			peer_audio_capability: None,
 			peer_audio_devices: Vec::new(),
+			peer_webcam_capability: None,
+			peer_webcams: Vec::new(),
 			peer_files_path: String::from("/"),
 			peer_files: Vec::new(),
 			files: Vec::new(),
@@ -136,6 +145,13 @@ struct UiInterface {
 #[derive(Clone, WguiModel)]
 struct UiAudioDevice {
 	line: String,
+}
+
+#[derive(Clone, WguiModel)]
+struct UiWebcamDevice {
+	id: String,
+	name: String,
+	selected: bool,
 }
 
 #[derive(Clone, WguiModel)]
@@ -198,6 +214,8 @@ struct UiClientSession {
 	shell_status: String,
 	shell_session_id: Option<u64>,
 	audio_status: String,
+	webcam_status: String,
+	webcam_selected_device: String,
 	update_version: String,
 	update_status: String,
 	update_events: Vec<String>,
@@ -243,6 +261,12 @@ pub(super) struct UiViewState {
 	audio_volume_text: String,
 	audio_muted: bool,
 	audio_mute_label: String,
+	webcam_status: String,
+	webcam_capability_status: String,
+	webcam_supported: bool,
+	has_webcam_devices: bool,
+	webcam_stream_src: String,
+	webcam_has_stream: bool,
 	update_version: String,
 	update_status: String,
 	update_events: Vec<String>,
@@ -262,6 +286,7 @@ pub(super) struct UiViewState {
 	peer_files_path: String,
 	selected_peer_details_href: String,
 	selected_peer_files_href: String,
+	selected_peer_webcams_href: String,
 	peer_files_parent_href: String,
 	peer_files_has_parent: bool,
 	has_storage_rows: bool,
@@ -271,6 +296,7 @@ pub(super) struct UiViewState {
 	cpus: Vec<UiCpu>,
 	interfaces: Vec<UiInterface>,
 	audio_devices: Vec<UiAudioDevice>,
+	webcam_devices: Vec<UiWebcamDevice>,
 	files: Vec<UiFileRow>,
 	peer_files: Vec<UiPeerFileRow>,
 	storage_rows: Vec<UiStorageRow>,
@@ -392,6 +418,19 @@ fn audio_supported(capability: Option<&AudioCapability>) -> bool {
 		.unwrap_or(false)
 }
 
+fn webcam_capability_status(capability: Option<&MediaCapability>) -> String {
+	match capability {
+		Some(capability) => capability.message.clone(),
+		None => String::from("Webcam capability not checked yet."),
+	}
+}
+
+fn webcam_supported(capability: Option<&MediaCapability>) -> bool {
+	capability
+		.map(|capability| capability.supported)
+		.unwrap_or(false)
+}
+
 fn normalize_peer_file_path(path: String) -> String {
 	let path = path.trim();
 	if path.is_empty() {
@@ -441,6 +480,21 @@ fn peer_details_href(peer_id: &str) -> String {
 	} else {
 		format!("/peers/{peer_id}")
 	}
+}
+
+fn peer_webcams_href(peer_id: &str) -> String {
+	if peer_id.is_empty() {
+		String::from("/peers")
+	} else {
+		format!("/peers/{peer_id}/webcams")
+	}
+}
+
+fn webcam_stream_href(peer_id: &str, device_id: &str) -> String {
+	let query = url::form_urlencoded::Serializer::new(String::new())
+		.append_pair("device", device_id)
+		.finish();
+	format!("/api/peers/{peer_id}/webcam.mjpeg?{query}")
 }
 
 fn cookie_value(headers: &HashMap<String, String>, name: &str) -> Option<String> {
@@ -535,6 +589,27 @@ impl UiControllerCore<'_> {
 				line: audio_device_line(device),
 			})
 			.collect::<Vec<_>>();
+		let is_webcam_supported = webcam_supported(state.peer_webcam_capability.as_ref());
+		let webcam_capability_status =
+			webcam_capability_status(state.peer_webcam_capability.as_ref());
+		let selected_webcam_device = if session.webcam_selected_device.is_empty() {
+			state
+				.peer_webcams
+				.first()
+				.map(|device| device.id.clone())
+				.unwrap_or_default()
+		} else {
+			session.webcam_selected_device.clone()
+		};
+		let webcam_devices = state
+			.peer_webcams
+			.iter()
+			.map(|device| UiWebcamDevice {
+				id: device.id.clone(),
+				name: device.name.clone(),
+				selected: device.id == selected_webcam_device,
+			})
+			.collect::<Vec<_>>();
 		let files = state
 			.files
 			.into_iter()
@@ -576,6 +651,15 @@ impl UiControllerCore<'_> {
 			peer_details_href(state.selected_peer.as_deref().unwrap_or_default());
 		let selected_peer_files_href =
 			peer_files_href(state.selected_peer.as_deref().unwrap_or_default(), "/");
+		let selected_peer_webcams_href =
+			peer_webcams_href(state.selected_peer.as_deref().unwrap_or_default());
+		let webcam_stream_src = state
+			.selected_peer
+			.as_deref()
+			.filter(|_| is_webcam_supported)
+			.filter(|_| !selected_webcam_device.is_empty())
+			.map(|peer_id| webcam_stream_href(peer_id, &selected_webcam_device))
+			.unwrap_or_default();
 		let storage_rows = state
 			.storage
 			.into_iter()
@@ -646,6 +730,12 @@ impl UiControllerCore<'_> {
 			} else {
 				String::from("Mute")
 			},
+			webcam_status: session.webcam_status,
+			webcam_capability_status,
+			webcam_supported: is_webcam_supported,
+			has_webcam_devices: !webcam_devices.is_empty(),
+			webcam_stream_src: webcam_stream_src.clone(),
+			webcam_has_stream: !webcam_stream_src.is_empty(),
 			update_version: session.update_version,
 			update_status: session.update_status,
 			update_events: session.update_events.clone(),
@@ -668,6 +758,7 @@ impl UiControllerCore<'_> {
 			peer_files_path: state.peer_files_path,
 			selected_peer_details_href,
 			selected_peer_files_href,
+			selected_peer_webcams_href,
 			peer_files_has_parent: !peer_files_parent_href.is_empty(),
 			peer_files_parent_href,
 			has_storage_rows: !storage_rows.is_empty(),
@@ -677,6 +768,7 @@ impl UiControllerCore<'_> {
 			cpus,
 			interfaces,
 			audio_devices,
+			webcam_devices,
 			files,
 			peer_files,
 			storage_rows,
@@ -725,6 +817,19 @@ impl UiControllerCore<'_> {
 		self.block_on(self.ctx.state.server.set_page(page));
 		if should_refresh {
 			self.block_on(self.ctx.state.server.refresh_peer_files(&peer_id, &path));
+		}
+		self.state()
+	}
+
+	pub(super) fn peer_webcams_state(&self, peer_id: String) -> UiViewState {
+		let snapshot = self.block_on(self.ctx.state.server.snapshot());
+		let page = Page::PeerWebcams {
+			peer_id: peer_id.clone(),
+		};
+		let should_refresh = snapshot.page != page;
+		self.block_on(self.ctx.state.server.set_page(page));
+		if should_refresh {
+			self.block_on(self.ctx.state.server.refresh_peer_webcams(&peer_id));
 		}
 		self.state()
 	}
@@ -901,6 +1006,41 @@ impl UiControllerCore<'_> {
 			return;
 		};
 		self.block_on(self.ctx.state.server.refresh_peer_audio(&peer_id));
+	}
+
+	pub fn refresh_webcams(&self) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		let snapshot = self.block_on(self.ctx.state.server.snapshot());
+		let Some(peer_id) = snapshot.selected_peer else {
+			self.update_session(|session| {
+				session.webcam_status = String::from("Select a peer first");
+			});
+			return;
+		};
+		self.block_on(self.ctx.state.server.refresh_peer_webcams(&peer_id));
+	}
+
+	pub fn view_webcam(&self, idx: u32) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		let snapshot = self.block_on(self.ctx.state.server.snapshot());
+		let Some(device) = snapshot.peer_webcams.get(idx as usize) else {
+			self.update_session(|session| {
+				session.webcam_status = String::from("Unknown webcam device");
+			});
+			return;
+		};
+		let device_id = device.id.clone();
+		let device_name = device.name.clone();
+		self.update_session(|session| {
+			session.webcam_selected_device = device_id;
+			session.webcam_status = format!("Viewing {device_name}");
+		});
 	}
 
 	pub fn set_audio_volume(&self, value: i32) {
@@ -1887,6 +2027,59 @@ impl UiServer {
 		state.peer_audio_devices = devices;
 	}
 
+	async fn refresh_peer_webcams(&self, peer_id: &str) {
+		match PeerId::from_str(peer_id) {
+			Ok(peer) => {
+				let capability = match self.puppy.media_capability(peer).await {
+					Ok(capability) => capability,
+					Err(err) => {
+						let mut state = self.state.lock().await;
+						state.peer_webcam_capability = Some(MediaCapability {
+							supported: false,
+							backend: None,
+							message: format!("Failed to query media capability: {err}"),
+						});
+						state.peer_webcams.clear();
+						return;
+					}
+				};
+				if !capability.supported {
+					let mut state = self.state.lock().await;
+					state.peer_webcam_capability = Some(capability);
+					state.peer_webcams.clear();
+					return;
+				}
+
+				match self.puppy.list_media_sources(peer).await {
+					Ok(sources) => {
+						let mut state = self.state.lock().await;
+						state.peer_webcam_capability = Some(capability);
+						state.peer_webcams = sources
+							.into_iter()
+							.filter(|source| source.kind == MediaSourceKind::Webcam)
+							.collect();
+					}
+					Err(err) => {
+						let mut state = self.state.lock().await;
+						state.peer_webcam_capability = Some(capability);
+						state.peer_webcams.clear();
+						state.status = format!("Failed to load webcams for {peer_id}: {err}");
+					}
+				}
+			}
+			Err(err) => {
+				let mut state = self.state.lock().await;
+				state.peer_webcam_capability = Some(MediaCapability {
+					supported: false,
+					backend: None,
+					message: format!("Invalid peer id: {err}"),
+				});
+				state.peer_webcams.clear();
+				state.status = format!("Invalid peer id: {err}");
+			}
+		}
+	}
+
 	async fn refresh_peer_audio(&self, peer_id: &str) {
 		match PeerId::from_str(peer_id) {
 			Ok(peer) => {
@@ -1991,11 +2184,14 @@ impl UiServer {
 				state.peer_files_path = path;
 				Some(peer_id)
 			}
+			Page::PeerWebcams { peer_id } => Some(peer_id),
 			_ => None,
 		};
 		if state.selected_peer != previous_peer {
 			state.peer_audio_capability = None;
 			state.peer_audio_devices.clear();
+			state.peer_webcam_capability = None;
+			state.peer_webcams.clear();
 		}
 	}
 
@@ -2010,6 +2206,7 @@ fn page_label(page: &Page) -> &'static str {
 		Page::Peers => "peers",
 		Page::PeerDetail(_) => "peer_detail",
 		Page::PeerFiles { .. } => "peer_files",
+		Page::PeerWebcams { .. } => "peer_webcams",
 		Page::Files => "files",
 		Page::Search => "search",
 		Page::Storage => "storage",
@@ -2087,11 +2284,100 @@ fn is_image_path(path: &str) -> bool {
 		.unwrap_or(false)
 }
 
+fn decode_query_value(value: &str) -> String {
+	url::form_urlencoded::parse(format!("value={value}").as_bytes())
+		.find_map(|(key, value)| {
+			if key == "value" {
+				Some(value.into_owned())
+			} else {
+				None
+			}
+		})
+		.unwrap_or_else(|| value.to_string())
+}
+
+fn peer_webcam_stream_peer(path: &str) -> Option<&str> {
+	let rest = path.strip_prefix("/api/peers/")?;
+	rest.strip_suffix("/webcam.mjpeg")
+}
+
+fn mjpeg_frame_chunk(mime: &str, data: &[u8]) -> Vec<u8> {
+	let mut chunk = Vec::new();
+	chunk.extend_from_slice(b"--puppynetframe\r\n");
+	chunk.extend_from_slice(format!("Content-Type: {mime}\r\n").as_bytes());
+	chunk.extend_from_slice(format!("Content-Length: {}\r\n\r\n", data.len()).as_bytes());
+	chunk.extend_from_slice(data);
+	chunk.extend_from_slice(b"\r\n");
+	chunk
+}
+
+async fn handle_peer_webcam_stream(
+	request: HttpRequest,
+	ctx: Arc<Ctx<UiContext, ()>>,
+) -> HttpResponse {
+	let authenticated = cookie_value(&request.headers, SESSION_COOKIE)
+		.and_then(|sid| {
+			let hash = auth::token_hash(&sid);
+			ctx.state.server.puppy.http_me(&hash).ok().flatten()
+		})
+		.is_some();
+	if !authenticated {
+		return HttpResponse::new(401, "not authenticated")
+			.header("content-type", "text/plain")
+			.header("cache-control", "no-store");
+	}
+	let Some(peer_id) = peer_webcam_stream_peer(&request.path) else {
+		return HttpResponse::new(404, "webcam stream not found")
+			.header("content-type", "text/plain")
+			.header("cache-control", "no-store");
+	};
+	let Ok(peer) = PeerId::from_str(peer_id) else {
+		return HttpResponse::new(400, "invalid peer id")
+			.header("content-type", "text/plain")
+			.header("cache-control", "no-store");
+	};
+	let device_id = request
+		.query
+		.get("device")
+		.map(|value| decode_query_value(value))
+		.unwrap_or_default();
+	if device_id.is_empty() {
+		return HttpResponse::new(400, "missing webcam device")
+			.header("content-type", "text/plain")
+			.header("cache-control", "no-store");
+	}
+
+	let puppy = Arc::clone(&ctx.state.server.puppy);
+	let stream = futures::stream::unfold((puppy, peer, device_id), |state| async move {
+		let (puppy, peer, device_id) = state;
+		match puppy.get_media_frame(peer, device_id.clone()).await {
+			Ok(frame) => {
+				let chunk = mjpeg_frame_chunk(&frame.mime, &frame.data);
+				Some((Ok::<_, Infallible>(chunk), (puppy, peer, device_id)))
+			}
+			Err(err) => {
+				log::warn!("webcam stream stopped: {err}");
+				None
+			}
+		}
+	});
+	HttpResponse::stream(200, stream)
+		.header(
+			"content-type",
+			"multipart/x-mixed-replace; boundary=puppynetframe",
+		)
+		.header("cache-control", "no-store")
+		.header("x-accel-buffering", "no")
+}
+
 async fn handle_ui_http(
 	request: HttpRequest,
 	ctx: Arc<Ctx<UiContext, ()>>,
 ) -> Option<HttpResponse> {
 	match (request.method.as_str(), request.path.as_str()) {
+		("GET", path) if peer_webcam_stream_peer(path).is_some() => {
+			Some(handle_peer_webcam_stream(request, ctx).await)
+		}
 		("GET", "/favicon.ico") => Some(favicon_response()),
 		("GET", "/auth/finish") => {
 			let token = request
@@ -2157,6 +2443,7 @@ pub async fn run_ui(puppy: Arc<PuppyNet>, bind: SocketAddr) -> Result<()> {
 	wgui.add_page::<LoginController>("/login");
 	wgui.add_page::<PeersController>("/peers");
 	wgui.add_page::<PeerFilesController>("/peers/:peer_id/files");
+	wgui.add_page::<PeerWebcamsController>("/peers/:peer_id/webcams");
 	wgui.add_page::<PeerController>("/peers/:peer_id");
 	wgui.add_page::<FilesController>("/files");
 	wgui.add_page::<SearchController>("/search");

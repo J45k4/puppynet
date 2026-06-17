@@ -71,6 +71,11 @@ pub enum PeerReq {
 		device_id: Option<String>,
 		volume: u8,
 	},
+	MediaCapability,
+	ListMediaSources,
+	GetMediaFrame {
+		source_id: String,
+	},
 	StartScan {
 		id: u64,
 		path: String,
@@ -151,6 +156,9 @@ pub enum PeerRes {
 	Interfaces(Vec<InterfaceInfo>),
 	AudioCapability(AudioCapability),
 	AudioDevices(Vec<AudioDevice>),
+	MediaCapability(MediaCapability),
+	MediaSources(Vec<MediaSource>),
+	MediaFrame(MediaFrame),
 	FileEntries(Vec<FileEntry>),
 	ScanStarted(Result<(), String>),
 	ScanEventAck,
@@ -287,6 +295,50 @@ pub struct AudioCapability {
 	pub supported: bool,
 	pub backend: Option<String>,
 	pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaCapability {
+	pub supported: bool,
+	pub backend: Option<String>,
+	pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MediaSourceKind {
+	Webcam,
+	Screen,
+	Microphone,
+	SpeakerMonitor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MediaTransport {
+	Snapshot,
+	Stream,
+	WebRtc,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaOutput {
+	pub transport: MediaTransport,
+	pub mime: String,
+	pub codec: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaSource {
+	pub id: String,
+	pub name: String,
+	pub kind: MediaSourceKind,
+	pub live: bool,
+	pub outputs: Vec<MediaOutput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaFrame {
+	pub mime: String,
+	pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
