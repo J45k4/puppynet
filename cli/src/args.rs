@@ -1,6 +1,6 @@
 use clap::Parser;
 #[derive(Debug, Parser)]
-#[clap(name = "puppyagent")]
+#[clap(name = "puppynet")]
 pub struct Args {
 	#[clap(long)]
 	pub peer: Vec<String>,

@@ -17,7 +17,7 @@ async fn main() {
 	simple_logger::init_with_level(log::Level::Info).unwrap();
 
 	let version_label = utility::get_version_label().unwrap_or("dev");
-	log::info!("puppyagent version {}", version_label);
+	log::info!("puppynet version {}", version_label);
 
 	#[cfg(feature = "rayon")]
 	log::info!("rayon enabled");

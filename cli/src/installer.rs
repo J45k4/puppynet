@@ -1,7 +1,7 @@
 use service_manager::*;
 use std::{env, path::PathBuf};
 
-const SERVICE_LABEL: &str = "com.puppy.puppyagent";
+const SERVICE_LABEL: &str = "puppynet";
 
 fn current_exe() -> PathBuf {
 	env::current_exe().expect("failed to get current exe")

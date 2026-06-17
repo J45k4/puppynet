@@ -56,6 +56,7 @@ struct PeerRow {
 	id: String,
 	name: String,
 	local: bool,
+	version: String,
 }
 
 #[derive(Clone)]
@@ -130,6 +131,7 @@ struct UiPeer {
 	id: String,
 	short_id: String,
 	label: String,
+	version: String,
 }
 
 #[derive(Clone, WguiModel)]
@@ -558,6 +560,7 @@ impl UiControllerCore<'_> {
 				} else {
 					peer.name
 				},
+				version: format!("Version: {}", peer.version),
 			})
 			.collect::<Vec<_>>();
 		let cpus = state
@@ -1653,6 +1656,91 @@ impl UiControllerCore<'_> {
 		});
 	}
 
+	fn watch_peer_update(&self, rx: Arc<std::sync::Mutex<mpsc::Receiver<UpdateProgress>>>) {
+		let Some(client_id) = self.ctx.client_id() else {
+			return;
+		};
+		let session_key = self.session_key();
+		let route_path = self
+			.ctx
+			.route()
+			.map(|route| route.path)
+			.unwrap_or_else(|| String::from("/peers"));
+		let ctx = Arc::clone(self.ctx);
+		std::thread::spawn(move || {
+			loop {
+				let event = match rx.lock() {
+					Ok(stream) => stream.recv(),
+					Err(err) => {
+						if let Ok(mut sessions) = ctx.state.sessions.lock()
+							&& let Some(session) = sessions.get_mut(&session_key)
+						{
+							session.update_status = format!("Update stream lock failed: {err}");
+							session.update_in_progress = false;
+							if session
+								.update_rx
+								.as_ref()
+								.map(|current| Arc::ptr_eq(current, &rx))
+								.unwrap_or(false)
+							{
+								session.update_rx = None;
+							}
+						}
+						ctx.push_state_for_client(client_id, route_path.clone());
+						break;
+					}
+				};
+				let event = match event {
+					Ok(event) => event,
+					Err(_) => {
+						if let Ok(mut sessions) = ctx.state.sessions.lock()
+							&& let Some(session) = sessions.get_mut(&session_key)
+							&& session
+								.update_rx
+								.as_ref()
+								.map(|current| Arc::ptr_eq(current, &rx))
+								.unwrap_or(false)
+						{
+							session.update_in_progress = false;
+							session.update_rx = None;
+						}
+						ctx.push_state_for_client(client_id, route_path.clone());
+						break;
+					}
+				};
+				let completed = matches!(
+					event,
+					UpdateProgress::Completed { .. }
+						| UpdateProgress::Failed { .. }
+						| UpdateProgress::AlreadyUpToDate { .. }
+				);
+				let line = format_update_progress(&event);
+				if let Ok(mut sessions) = ctx.state.sessions.lock()
+					&& let Some(session) = sessions.get_mut(&session_key)
+				{
+					if !session
+						.update_rx
+						.as_ref()
+						.map(|current| Arc::ptr_eq(current, &rx))
+						.unwrap_or(false)
+					{
+						break;
+					}
+					session.update_status = line.clone();
+					session.update_events.push(line);
+					if completed {
+						session.update_in_progress = false;
+						session.update_rx = None;
+					}
+				}
+				ctx.push_state_for_client(client_id, route_path.clone());
+				if completed {
+					break;
+				}
+			}
+		});
+	}
+
 	pub fn start_peer_update(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
@@ -1690,13 +1778,14 @@ impl UiControllerCore<'_> {
 			.update_remote_peer(peer, version)
 		{
 			Ok(rx) => {
+				let update_rx = Arc::clone(&rx);
 				self.update_session(|session| {
 					session.update_rx = Some(rx);
 					session.update_in_progress = true;
 					session.update_events.clear();
 					session.update_status = String::from("Update started");
 				});
-				self.poll_peer_update();
+				self.watch_peer_update(update_rx);
 			}
 			Err(err) => {
 				self.update_session(|session| {
@@ -1907,24 +1996,43 @@ impl UiServer {
 		}
 	}
 
+	async fn peer_version(&self, peer_id: &str) -> String {
+		let Ok(peer) = PeerId::from_str(peer_id) else {
+			return String::from("unknown");
+		};
+		tokio::time::timeout(
+			std::time::Duration::from_millis(1500),
+			self.puppy.peer_info(peer),
+		)
+		.await
+		.ok()
+		.and_then(Result::ok)
+		.map(|info| info.version)
+		.unwrap_or_else(|| String::from("unknown"))
+	}
+
 	async fn refresh_peers(&self) {
 		match self.puppy.state_snapshot().await {
 			Some(snapshot) => {
 				let local_id = snapshot.me.to_string();
-				let mut peers = snapshot
-					.peers
-					.iter()
-					.map(|peer| PeerRow {
+				let mut peers = Vec::new();
+				for peer in &snapshot.peers {
+					let id = peer.id.to_string();
+					let version = self.peer_version(&id).await;
+					peers.push(PeerRow {
 						id: peer.id.to_string(),
 						name: peer.name.clone().unwrap_or_else(|| "Unnamed".to_string()),
 						local: peer.id.to_string() == local_id,
-					})
-					.collect::<Vec<_>>();
+						version,
+					});
+				}
 				if !peers.iter().any(|peer| peer.id == local_id) {
+					let version = self.peer_version(&local_id).await;
 					peers.push(PeerRow {
 						id: local_id.clone(),
 						name: String::from("Current peer"),
 						local: true,
+						version,
 					});
 				}
 				let mut state = self.state.lock().await;

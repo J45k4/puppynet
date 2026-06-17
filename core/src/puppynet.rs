@@ -8,7 +8,7 @@ use crate::db::{
 };
 use crate::p2p::{
 	AudioCapability, AudioDevice, CpuInfo, DirEntry, DiskInfo, InterfaceInfo, MediaCapability,
-	MediaFrame, MediaSource, PermissionGrant, Thumbnail, grant_from_permission,
+	MediaFrame, MediaSource, PeerInfo, PermissionGrant, Thumbnail, grant_from_permission,
 	permission_from_grant,
 };
 use crate::scan::ScanEvent;
@@ -399,6 +399,15 @@ impl PuppyNet {
 			.map_err(|e| anyhow!("failed to send MediaCapability command: {e}"))?;
 		rx.await
 			.map_err(|e| anyhow!("MediaCapability response channel closed: {e}"))?
+	}
+
+	pub async fn peer_info(&self, peer_id: PeerId) -> Result<PeerInfo> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::PeerInfo { tx, peer_id })
+			.map_err(|e| anyhow!("failed to send PeerInfo command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("PeerInfo response channel closed: {e}"))?
 	}
 
 	pub async fn list_media_sources(&self, peer_id: PeerId) -> Result<Vec<MediaSource>> {

@@ -17,6 +17,7 @@
             <VStack spacing=2 grow=1 minWidth=0>
               <Text value={peer.label} breakWords=true />
               <Text value={peer.short_id} breakWords=true />
+              <Text value={peer.version} breakWords=true />
             </VStack>
             <Button text="Details" onClick="PeerRow" arg={i} />
           </HStack>

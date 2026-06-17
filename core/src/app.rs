@@ -2,11 +2,12 @@ use crate::audio;
 use crate::auth;
 use crate::p2p::{
 	AudioCapability, AudioDevice, AuthMethod, CpuInfo, DirEntry, DiskInfo, FileWriteAck,
-	InterfaceInfo, MediaCapability, MediaFrame, MediaSource, PeerReq, PeerRes, PermissionGrant,
-	Thumbnail, permission_from_grant,
+	InterfaceInfo, MediaCapability, MediaFrame, MediaSource, PeerInfo, PeerReq, PeerRes,
+	PermissionGrant, Thumbnail, permission_from_grant,
 };
 use crate::types::FileChunk;
 use crate::updater::{self, UpdateProgress, UpdateResult};
+use crate::version;
 use crate::webcam;
 use crate::{
 	db::{
@@ -59,6 +60,10 @@ pub struct ReadFileCmd {
 }
 
 pub enum Command {
+	PeerInfo {
+		tx: oneshot::Sender<Result<PeerInfo>>,
+		peer_id: PeerId,
+	},
 	Connect {
 		peer_id: libp2p::PeerId,
 		addr: libp2p::Multiaddr,
@@ -345,6 +350,15 @@ trait ResponseDecoder: Sized + Send + 'static {
 pub(crate) struct AccessGrantAck {
 	pub(crate) username: String,
 	pub(crate) permissions: Vec<PermissionGrant>,
+}
+
+impl ResponseDecoder for PeerInfo {
+	fn decode(response: PeerRes) -> anyhow::Result<Self> {
+		match response {
+			PeerRes::PeerInfo(info) => Ok(info),
+			other => Err(anyhow!("unexpected response: {:?}", other)),
+		}
+	}
 }
 
 impl ResponseDecoder for Vec<DirEntry> {
@@ -893,12 +907,19 @@ impl App {
 		(app, tx)
 	}
 
+	fn local_peer_info() -> PeerInfo {
+		PeerInfo {
+			version: version::version_label(),
+		}
+	}
+
 	async fn handle_puppy_peer_req(
 		&mut self,
 		peer: PeerId,
 		req: PeerReq,
 	) -> anyhow::Result<PeerRes> {
 		let res = match req {
+			PeerReq::PeerInfo => PeerRes::PeerInfo(Self::local_peer_info()),
 			PeerReq::ListDir { path } => {
 				log::info!("[{}] ListDir {}", peer, path);
 				let canonical = match fs::canonicalize(&path).await {
@@ -1913,6 +1934,19 @@ impl App {
 
 	async fn handle_cmd(&mut self, cmd: Command) {
 		match cmd {
+			Command::PeerInfo { tx, peer_id } => {
+				if self.state.me == peer_id {
+					let _ = tx.send(Ok(Self::local_peer_info()));
+					return;
+				}
+				let request_id = self
+					.swarm
+					.behaviour_mut()
+					.puppynet
+					.send_request(&peer_id, PeerReq::PeerInfo);
+				self.pending_requests
+					.insert(request_id, Pending::<PeerInfo>::new(tx));
+			}
 			Command::Connect { peer_id: _, addr } => {
 				if let Err(err) = self.swarm.dial(addr) {
 					log::error!("dial failed: {err}");

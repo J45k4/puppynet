@@ -42,6 +42,7 @@ const DEFAULT_SESSION_TTL: u64 = 60 * 60; // 1 hour sessions for credential auth
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PeerReq {
+	PeerInfo,
 	ListDir {
 		path: String,
 	},
@@ -147,6 +148,7 @@ pub enum PeerReq {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PeerRes {
+	PeerInfo(PeerInfo),
 	DirEntries(Vec<DirEntry>),
 	FileStat(DirEntry),
 	FileChunk(FileChunk),
@@ -210,6 +212,11 @@ pub enum PeerRes {
 	ShellExited {
 		id: u64,
 	},
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerInfo {
+	pub version: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

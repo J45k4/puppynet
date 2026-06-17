@@ -73,7 +73,6 @@
     <HStack spacing=6 wrap=true fill=true>
       <TextInput value={state.update_version} placeholder="Optional version tag" onTextChanged="EditUpdateVersion" grow=1 minWidth=0 />
       <Button text="Start update" onClick="StartPeerUpdate" />
-      <Button text="Poll events" onClick="PollPeerUpdate" />
     </HStack>
     <Text value={state.update_status} breakWords=true />
     <If test={!state.has_update_events}>
