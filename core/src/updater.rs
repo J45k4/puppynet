@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+use std::process::{Command, Stdio};
 use std::{
 	io::BufReader,
 	path::{Path, PathBuf},
@@ -16,6 +18,7 @@ use zip::ZipArchive;
 
 /// Path resolution: this file is core/src/updater.rs; the key lives at repository root.
 pub const PUBLIC_KEY: &str = include_str!("../../public_key.pem");
+const SERVICE_LABEL: &str = "puppynet";
 
 /// Progress information during an update operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,8 +51,6 @@ pub struct UpdateResult {
 
 pub fn verify_signature(bin: &Path, sig: &Path) -> anyhow::Result<bool> {
 	log::info!("verifying {} with {}", bin.display(), sig.display());
-	let public_key = RsaPublicKey::from_public_key_pem(PUBLIC_KEY).unwrap();
-	let verifying_key = pkcs1v15::VerifyingKey::<Sha256>::new(public_key);
 	let signature = std::fs::read(sig)?;
 	let signature = rsa::pkcs1v15::Signature::try_from(signature.as_slice())?;
 	let data = std::fs::read(bin)?;
@@ -60,7 +61,7 @@ pub fn verify_signature(bin: &Path, sig: &Path) -> anyhow::Result<bool> {
 
 fn get_os_name() -> String {
 	let os = std::env::consts::OS;
-	format!("{}", os)
+	os.to_string()
 }
 
 fn app_dir() -> PathBuf {
@@ -77,6 +78,76 @@ fn bin_dir() -> PathBuf {
 		std::fs::create_dir_all(&path).unwrap();
 	}
 	path
+}
+
+async fn install_binary(source: &Path, bin_name: &str) -> anyhow::Result<()> {
+	let target = bin_dir().join(bin_name);
+	let temp_target = target.with_extension("new");
+
+	if temp_target.exists() {
+		tokio::fs::remove_file(&temp_target).await?;
+	}
+
+	tokio::fs::copy(source, &temp_target).await?;
+
+	#[cfg(windows)]
+	if target.exists() {
+		tokio::fs::remove_file(&target).await?;
+	}
+
+	tokio::fs::rename(&temp_target, &target).await?;
+	log::info!("installed update to {}", target.display());
+
+	Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn systemctl_is_active(args: &[&str]) -> bool {
+	Command::new("systemctl")
+		.args(args)
+		.stdin(Stdio::null())
+		.stdout(Stdio::null())
+		.stderr(Stdio::null())
+		.status()
+		.is_ok_and(|status| status.success())
+}
+
+#[cfg(target_os = "linux")]
+fn systemctl_restart(args: &[&str]) -> anyhow::Result<()> {
+	Command::new("systemctl")
+		.args(args)
+		.stdin(Stdio::null())
+		.stdout(Stdio::null())
+		.stderr(Stdio::null())
+		.spawn()?;
+	Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn restart_active_service() {
+	if systemctl_is_active(&["--user", "is-active", "--quiet", SERVICE_LABEL]) {
+		if let Err(err) = systemctl_restart(&["--user", "--no-block", "restart", SERVICE_LABEL]) {
+			log::warn!("failed to restart user service {}: {err}", SERVICE_LABEL);
+		}
+		return;
+	}
+
+	if systemctl_is_active(&["is-active", "--quiet", SERVICE_LABEL]) {
+		if let Err(err) = systemctl_restart(&["--no-block", "restart", SERVICE_LABEL]) {
+			log::warn!("failed to restart system service {}: {err}", SERVICE_LABEL);
+		}
+		return;
+	}
+
+	log::info!(
+		"service {} is not active; update installed without restart",
+		SERVICE_LABEL
+	);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn restart_active_service() {
+	log::info!("automatic service restart is not supported on this platform");
 }
 
 async fn fetch_release(version: Option<&str>) -> anyhow::Result<Value> {
@@ -105,7 +176,7 @@ async fn download_bin(url: &str, filename: &str) -> anyhow::Result<PathBuf> {
 		bail!("Failed to download asset. HTTP status: {}", res.status());
 	}
 	let bytes = res.bytes().await?;
-	let path = app_dir().join(&filename);
+	let path = app_dir().join(filename);
 	let mut file = File::create(&path).await?;
 	file.write_all(&bytes).await?;
 	Ok(path)
@@ -238,8 +309,8 @@ where
 			let buf_reader = BufReader::new(file);
 			let decoder = GzDecoder::new(buf_reader);
 			let mut archive = Archive::new(decoder);
-			let mut entries = archive.entries()?;
-			while let Some(file) = entries.next() {
+			let entries = archive.entries()?;
+			for file in entries {
 				let mut file = file?;
 				let name = match file.path() {
 					Ok(name) => name,
@@ -337,12 +408,13 @@ where
 
 	progress_callback(UpdateProgress::Installing);
 
-	tokio::fs::copy(&bin_path, bin_dir().join(bin_name)).await?;
+	install_binary(&bin_path, bin_name).await?;
 	tokio::fs::remove_file(&bin_path).await?;
 	tokio::fs::remove_file(&sig_path).await?;
 
 	let tag_clone = tag.clone();
 	progress_callback(UpdateProgress::Completed { version: tag_clone });
+	restart_active_service();
 
 	Ok(UpdateResult {
 		success: true,
