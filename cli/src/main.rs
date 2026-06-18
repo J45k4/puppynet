@@ -31,11 +31,17 @@ async fn main() {
 			return;
 		}
 		Some(Command::Install) => {
-			installer::install();
+			if let Err(err) = installer::install() {
+				log::error!("failed to install service: {err:?}");
+				std::process::exit(1);
+			}
 			return;
 		}
 		Some(Command::Uninstall) => {
-			installer::uninstall();
+			if let Err(err) = installer::uninstall() {
+				log::error!("failed to uninstall service: {err:?}");
+				std::process::exit(1);
+			}
 			return;
 		}
 		Some(Command::Update { version }) => {
