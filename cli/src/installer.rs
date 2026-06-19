@@ -3,6 +3,7 @@ use service_manager::*;
 use std::path::PathBuf;
 
 const SERVICE_LABEL: &str = "puppynet";
+const SYSTEM_BINARY_PATH: &str = "/usr/local/bin/puppynet";
 
 fn current_exe() -> anyhow::Result<PathBuf> {
 	std::env::current_exe().context("failed to get current exe")
@@ -23,7 +24,7 @@ fn bin_dir() -> anyhow::Result<PathBuf> {
 	Ok(path)
 }
 
-fn managed_binary_path() -> anyhow::Result<PathBuf> {
+fn user_binary_path() -> anyhow::Result<PathBuf> {
 	Ok(bin_dir()?.join(if cfg!(windows) {
 		"puppynet.exe"
 	} else {
@@ -31,12 +32,31 @@ fn managed_binary_path() -> anyhow::Result<PathBuf> {
 	}))
 }
 
-fn copy_current_exe_to_managed_path() -> anyhow::Result<PathBuf> {
+fn system_binary_path() -> PathBuf {
+	PathBuf::from(if cfg!(windows) {
+		"puppynet.exe"
+	} else {
+		SYSTEM_BINARY_PATH
+	})
+}
+
+fn managed_binary_path(level: ServiceLevel) -> anyhow::Result<PathBuf> {
+	match level {
+		ServiceLevel::User => user_binary_path(),
+		ServiceLevel::System => Ok(system_binary_path()),
+	}
+}
+
+fn copy_current_exe_to_managed_path(level: ServiceLevel) -> anyhow::Result<PathBuf> {
 	let source = current_exe()?;
-	let target = managed_binary_path()?;
+	let target = managed_binary_path(level)?;
 
 	if source == target {
 		return Ok(target);
+	}
+
+	if let Some(parent) = target.parent() {
+		std::fs::create_dir_all(parent).context("failed to create puppynet bin directory")?;
 	}
 
 	let temp_target = target.with_extension("new");
@@ -56,19 +76,28 @@ fn copy_current_exe_to_managed_path() -> anyhow::Result<PathBuf> {
 	Ok(target)
 }
 
-fn service_manager() -> anyhow::Result<Box<dyn ServiceManager>> {
+fn install_level(system: bool) -> ServiceLevel {
+	if system {
+		ServiceLevel::System
+	} else {
+		ServiceLevel::User
+	}
+}
+
+fn service_manager(level: ServiceLevel) -> anyhow::Result<Box<dyn ServiceManager>> {
 	let mut manager =
 		<dyn ServiceManager>::native().context("no supported service manager found")?;
-	if let Err(err) = manager.set_level(ServiceLevel::User) {
-		log::info!("user-level service is not supported by this service manager: {err}");
-	}
+	manager
+		.set_level(level)
+		.with_context(|| format!("service manager does not support {level:?} services"))?;
 	Ok(manager)
 }
 
-pub fn install() -> anyhow::Result<()> {
+pub fn install(system: bool) -> anyhow::Result<()> {
+	let level = install_level(system);
 	let label: ServiceLabel = SERVICE_LABEL.parse()?;
-	let manager = service_manager()?;
-	let program = copy_current_exe_to_managed_path()?;
+	let manager = service_manager(level)?;
+	let program = copy_current_exe_to_managed_path(level)?;
 	manager.install(ServiceInstallCtx {
 		label: label.clone(),
 		program,
@@ -85,9 +114,10 @@ pub fn install() -> anyhow::Result<()> {
 	Ok(())
 }
 
-pub fn uninstall() -> anyhow::Result<()> {
+pub fn uninstall(system: bool) -> anyhow::Result<()> {
+	let level = install_level(system);
 	let label: ServiceLabel = SERVICE_LABEL.parse()?;
-	let manager = service_manager()?;
+	let manager = service_manager(level)?;
 	manager.uninstall(ServiceUninstallCtx { label })?;
 	log::info!("Service uninstalled: {}", SERVICE_LABEL);
 	Ok(())

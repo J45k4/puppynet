@@ -27,8 +27,14 @@ pub enum Command {
 	Scan {
 		path: String,
 	},
-	Install,
-	Uninstall,
+	Install {
+		#[clap(long)]
+		system: bool,
+	},
+	Uninstall {
+		#[clap(long)]
+		system: bool,
+	},
 	Update {
 		version: Option<String>,
 	},

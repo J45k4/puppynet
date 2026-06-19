@@ -30,15 +30,15 @@ async fn main() {
 			log::info!("scanning {} (database disabled)", path);
 			return;
 		}
-		Some(Command::Install) => {
-			if let Err(err) = installer::install() {
+		Some(Command::Install { system }) => {
+			if let Err(err) = installer::install(*system) {
 				log::error!("failed to install service: {err:?}");
 				std::process::exit(1);
 			}
 			return;
 		}
-		Some(Command::Uninstall) => {
-			if let Err(err) = installer::uninstall() {
+		Some(Command::Uninstall { system }) => {
+			if let Err(err) = installer::uninstall(*system) {
 				log::error!("failed to uninstall service: {err:?}");
 				std::process::exit(1);
 			}
