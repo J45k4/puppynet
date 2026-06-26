@@ -5,10 +5,14 @@ use puppynet_core::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(unix)]
 use std::time::Duration;
+#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+#[cfg(unix)]
 const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(100);
+#[cfg(unix)]
 const CONNECT_RETRY_COUNT: usize = 30;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -64,6 +68,7 @@ fn error_response(message: impl Into<String>) -> ControlResponse {
 	}
 }
 
+#[cfg(unix)]
 async fn connect_socket(path: &PathBuf) -> Result<tokio::net::UnixStream> {
 	tokio::net::UnixStream::connect(path)
 		.await
@@ -75,6 +80,7 @@ async fn connect_socket(path: &PathBuf) -> Result<tokio::net::UnixStream> {
 		})
 }
 
+#[cfg(unix)]
 async fn write_response(
 	stream: &mut tokio::net::UnixStream,
 	response: &ControlResponse,
@@ -87,6 +93,7 @@ async fn write_response(
 		.context("failed to write control response")
 }
 
+#[cfg(unix)]
 async fn read_request(stream: &mut tokio::net::UnixStream) -> Result<ControlRequest> {
 	let mut reader = BufReader::new(stream);
 	let mut line = String::new();
@@ -165,6 +172,7 @@ async fn handle_request(peer: &PuppyNet, request: ControlRequest) -> ControlResp
 	}
 }
 
+#[cfg(unix)]
 async fn handle_connection(peer: Arc<PuppyNet>, mut stream: tokio::net::UnixStream) {
 	let response = match read_request(&mut stream).await {
 		Ok(request) => handle_request(&peer, request).await,
@@ -175,6 +183,7 @@ async fn handle_connection(peer: Arc<PuppyNet>, mut stream: tokio::net::UnixStre
 	}
 }
 
+#[cfg(unix)]
 async fn remove_stale_socket(path: &PathBuf) -> Result<()> {
 	if !path.exists() {
 		return Ok(());
@@ -208,6 +217,7 @@ fn restrict_socket_permissions(path: &PathBuf) -> Result<()> {
 	})
 }
 
+#[cfg(unix)]
 async fn start_user_service() -> Result<()> {
 	let status = tokio::process::Command::new("systemctl")
 		.arg("--user")
@@ -223,6 +233,7 @@ async fn start_user_service() -> Result<()> {
 	}
 }
 
+#[cfg(unix)]
 async fn connect_socket_after_service_start(path: &PathBuf) -> Result<tokio::net::UnixStream> {
 	for _ in 0..CONNECT_RETRY_COUNT {
 		match tokio::net::UnixStream::connect(path).await {
@@ -233,6 +244,7 @@ async fn connect_socket_after_service_start(path: &PathBuf) -> Result<tokio::net
 	connect_socket(path).await
 }
 
+#[cfg(unix)]
 async fn connect_or_start_daemon(path: &PathBuf) -> Result<tokio::net::UnixStream> {
 	match connect_socket(path).await {
 		Ok(stream) => Ok(stream),
@@ -246,6 +258,7 @@ async fn connect_or_start_daemon(path: &PathBuf) -> Result<tokio::net::UnixStrea
 	}
 }
 
+#[cfg(unix)]
 async fn send_request(request: ControlRequest) -> Result<String> {
 	let path = socket_path()?;
 	let mut stream = connect_or_start_daemon(&path).await?;
@@ -269,6 +282,11 @@ async fn send_request(request: ControlRequest) -> Result<String> {
 	} else {
 		bail!("{}", response.message)
 	}
+}
+
+#[cfg(not(unix))]
+async fn send_request(_request: ControlRequest) -> Result<String> {
+	bail!("daemon control socket is only supported on Unix platforms")
 }
 
 fn validate_grant_options(all: bool, read: &[String], write: &[String]) -> Result<()> {
@@ -308,6 +326,7 @@ pub async fn update(version: Option<&str>, current_version: u32) -> Result<Strin
 	send_request(request).await
 }
 
+#[cfg(unix)]
 pub async fn run(peer: Arc<PuppyNet>) -> Result<()> {
 	let path = socket_path()?;
 	remove_stale_socket(&path).await?;
@@ -326,4 +345,9 @@ pub async fn run(peer: Arc<PuppyNet>) -> Result<()> {
 			}
 		}
 	}
+}
+
+#[cfg(not(unix))]
+pub async fn run(_peer: Arc<PuppyNet>) -> Result<()> {
+	bail!("daemon control socket is only supported on Unix platforms")
 }
