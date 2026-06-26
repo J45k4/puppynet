@@ -17,6 +17,11 @@ const escapeHtml = (value: string) =>
 		.replace(/</g, "&lt;")
 		.replace(/>/g, "&gt;")
 
+const escapeAttribute = (value: string) =>
+	escapeHtml(value)
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&#39;")
+
 const formatFrequency = (hz: number) => {
 	if (hz >= 1_000_000_000) {
 		return `${(hz / 1_000_000_000).toFixed(2)} GHz`
@@ -47,6 +52,15 @@ const joinIps = (ips: string[]) => {
 	}
 	return ips.join(", ")
 }
+
+const shortPeerId = (id: string) => {
+	if (id.length <= 18) {
+		return id
+	}
+	return `${id.slice(0, 8)}...${id.slice(-6)}`
+}
+
+const grantCommand = (peerId: string) => `puppynet grant ${peerId} --all`
 
 const renderCpuRows = (cpus: CpuInfo[]): string =>
 	cpus
@@ -127,12 +141,19 @@ const renderCpuRows = (cpus: CpuInfo[]): string =>
 			<h1>Peers</h1>
 			<p class="lede">Connected peers discovered by PuppyNet.</p>
 		</section>
+		<div class="card" id="peer-grant-card">
+			<h2>Grant access command</h2>
+			<p id="peer-grant-status" class="muted">Loading local peer id...</p>
+			<div id="peer-grant-command"></div>
+		</div>
 		<div class="card" id="peers-card">
 			<h2>Peer list</h2>
 			<p id="peers-status" class="muted">Loading peers...</p>
 			<div id="peers-table"></div>
 		</div>
 	`
+	const grantStatusEl = document.getElementById("peer-grant-status")
+	const grantCommandEl = document.getElementById("peer-grant-command")
 	const statusEl = document.getElementById("peers-status")
 	const tableEl = document.getElementById("peers-table")
 		let localPeerId: string | null = null
@@ -140,6 +161,34 @@ const renderCpuRows = (cpus: CpuInfo[]): string =>
 			localPeerId = await fetchLocalPeerId()
 		} catch {
 			localPeerId = null
+		}
+		if (grantCommandEl) {
+			if (localPeerId) {
+				const command = grantCommand(localPeerId)
+				grantCommandEl.innerHTML = `
+					<div class="copy-command">
+						<code>${escapeHtml(command)}</code>
+						<button type="button" class="link-btn copy-command__button" id="peer-grant-copy">Copy</button>
+					</div>
+				`
+				if (grantStatusEl) {
+					grantStatusEl.textContent = "Give this command to a peer owner."
+				}
+				const copyButton = document.getElementById("peer-grant-copy") as HTMLButtonElement | null
+				copyButton?.addEventListener("click", async () => {
+					try {
+						await navigator.clipboard.writeText(command)
+						if (grantStatusEl) grantStatusEl.textContent = "Copied grant command."
+					} catch {
+						if (grantStatusEl) grantStatusEl.textContent = "Copy failed; select the command text."
+					}
+				})
+			} else {
+				grantCommandEl.innerHTML = ""
+				if (grantStatusEl) {
+					grantStatusEl.textContent = "Local peer id unavailable."
+				}
+			}
 		}
 		let peers: Peer[] = []
 		let peerError: string | null = null
@@ -181,22 +230,30 @@ const renderCpuRows = (cpus: CpuInfo[]): string =>
 		}
 
 		const rows = combined
-			.map(
-				(peer) => `
-			<tr data-peer-id="${peer.id}">
-				<td><div class="pill"><strong>${peer.name ?? "Unnamed"}</strong><span class="muted">${peer.id}</span></div></td>
-				<td><button class="link-btn" data-peer-id="${peer.id}">Open</button></td>
-			</tr>
-		`,
-			)
+			.map((peer, index) => {
+				const isLocal = localPeerId === peer.id
+				const name = escapeHtml(peer.name ?? "Unnamed peer")
+				const id = escapeHtml(peer.id)
+				return `
+					<div class="peer-row${isLocal ? " peer-row--local" : ""}">
+						<div class="peer-row__marker">
+							<span>${index + 1}</span>
+						</div>
+						<div class="peer-row__body">
+							<div class="peer-row__heading">
+								<strong>${name}</strong>
+								${isLocal ? '<span class="badge small">Local</span>' : ""}
+							</div>
+							<div class="peer-row__short-id">${escapeHtml(shortPeerId(peer.id))}</div>
+							<div class="peer-row__id muted">${id}</div>
+						</div>
+						<button class="link-btn peer-row__action" data-peer-id="${escapeAttribute(peer.id)}">Open</button>
+					</div>
+				`
+			})
 			.join("")
 		tableEl.innerHTML = `
-			<table class="table">
-				<thead>
-					<tr><th>Peer</th><th></th></tr>
-				</thead>
-				<tbody>${rows}</tbody>
-			</table>
+			<div class="peer-list">${rows}</div>
 		`
 		const buttons = tableEl.querySelectorAll<HTMLButtonElement>("[data-peer-id]")
 		buttons.forEach((btn) => {

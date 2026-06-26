@@ -12,6 +12,7 @@ pub mod ui;
 pub mod updater;
 mod version;
 mod webcam;
+pub use libp2p::PeerId;
 pub use state::{FLAG_READ, FLAG_SEARCH, FLAG_WRITE, FolderRule, Permission, Rule, State};
 pub use types::FileChunk;
 pub mod wait_group;

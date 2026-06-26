@@ -1,15 +1,26 @@
 use args::Command;
 use clap::Parser;
-use puppynet_core::{PuppyNet, http_api, ui};
-use std::net::SocketAddr;
-use std::sync::Arc;
 
 mod args;
-#[cfg(feature = "iced")]
-mod gui;
 mod installer;
 mod updater;
 mod utility;
+
+fn daemon_config(args: &args::Args) -> puppynet_daemon::Config {
+	puppynet_daemon::Config {
+		read: args.read.clone(),
+		write: args.write.clone(),
+		ui_bind: args.ui_bind.clone(),
+		http: args.http.clone(),
+	}
+}
+
+async fn run_daemon(args: &args::Args) {
+	if let Err(err) = puppynet_daemon::run(daemon_config(args)).await {
+		log::error!("daemon error: {err:?}");
+		std::process::exit(1);
+	}
+}
 
 #[tokio::main]
 async fn main() {
@@ -37,6 +48,37 @@ async fn main() {
 			}
 			return;
 		}
+		Some(Command::Start { system }) => {
+			if let Err(err) = installer::start(*system) {
+				log::error!("failed to start service: {err:?}");
+				std::process::exit(1);
+			}
+			return;
+		}
+		Some(Command::Stop { system }) => {
+			if let Err(err) = installer::stop(*system) {
+				log::error!("failed to stop service: {err:?}");
+				std::process::exit(1);
+			}
+			return;
+		}
+		Some(Command::Restart { system }) => {
+			if let Err(err) = installer::restart(*system) {
+				log::error!("failed to restart service: {err:?}");
+				std::process::exit(1);
+			}
+			return;
+		}
+		Some(Command::Status { system }) => {
+			match installer::status(*system) {
+				Ok(status) => log::info!("service status: {status}"),
+				Err(err) => {
+					log::error!("failed to get service status: {err:?}");
+					std::process::exit(1);
+				}
+			}
+			return;
+		}
 		Some(Command::Uninstall { system }) => {
 			if let Err(err) = installer::uninstall(*system) {
 				log::error!("failed to uninstall service: {err:?}");
@@ -53,94 +95,40 @@ async fn main() {
 			return;
 		}
 		Some(Command::CreateUser { username, password }) => {
-			let peer = Arc::new(PuppyNet::new());
-			if let Err(err) = peer.create_user(username.clone(), password.clone()) {
-				log::error!("failed to create user {}: {err:?}", username);
-				std::process::exit(1);
-			}
-			log::info!("user {} created", username);
-			return;
-		}
-		#[cfg(feature = "iced")]
-		Some(Command::Gui) => {
-			let app_title = format!("PuppyNet v{}", version_label);
-			if let Err(err) = gui::run(app_title) {
-				log::error!("gui error: {err:?}");
-				std::process::exit(1);
-			}
-			return;
-		}
-		Some(Command::Daemon) => {
-			log::warn!("Daemon mode: disabled modules");
-			return;
-		}
-		None => {
-			let peer = Arc::new(PuppyNet::new());
-			for path in &args.read {
-				if let Err(err) = peer.share_read_only_folder(path) {
-					log::error!("failed to share {} for read: {err:?}", path);
-					std::process::exit(1);
+			match puppynet_daemon::control::create_user(username, password).await {
+				Ok(message) => {
+					log::info!("{message}");
 				}
-			}
-			for path in &args.write {
-				if let Err(err) = peer.share_read_write_folder(path) {
-					log::error!("failed to share {} for read/write: {err:?}", path);
-					std::process::exit(1);
-				}
-			}
-			let ui_addr = match args.ui_bind.parse::<SocketAddr>() {
-				Ok(addr) => addr,
 				Err(err) => {
-					log::error!("invalid --ui-bind address {}: {err}", args.ui_bind);
+					log::error!("failed to create user {}: {err:?}", username);
 					std::process::exit(1);
 				}
 			};
-			let ui_puppy = Arc::clone(&peer);
-			let mut ui_task = Some(tokio::spawn(async move {
-				if let Err(err) = ui::run_ui(ui_puppy, ui_addr).await {
-					log::error!("ui server error: {err:?}");
+			return;
+		}
+		Some(Command::Grant {
+			peer_id,
+			all,
+			read,
+			write,
+		}) => {
+			match puppynet_daemon::control::grant(peer_id, *all, read, write).await {
+				Ok(message) => {
+					log::info!("{message}");
 				}
-			}));
-
-			let mut http_task = None;
-			if let Some(addr_str) = &args.http {
-				match addr_str.parse::<SocketAddr>() {
-					Ok(addr) => {
-						let puppy = Arc::clone(&peer);
-						let handle = tokio::spawn(async move {
-							if let Err(err) = http_api::serve(puppy, addr).await {
-								log::error!("http server error: {err:?}");
-							}
-						});
-						http_task = Some(handle);
-					}
-					Err(err) => {
-						log::error!("invalid --http address {}: {err}", addr_str);
-						std::process::exit(1);
-					}
+				Err(err) => {
+					log::error!("failed to grant peer {}: {err:?}", peer_id);
+					std::process::exit(1);
 				}
-			}
-
-			if ui_task.is_some() || http_task.is_some() {
-				if let Err(err) = tokio::signal::ctrl_c().await {
-					log::error!("failed to listen for ctrl_c: {err}");
-				}
-				if let Some(task) = ui_task.take() {
-					task.abort();
-					let _ = task.await;
-				}
-				if let Some(task) = http_task {
-					task.abort();
-					let _ = task.await;
-				}
-			}
-
-			match Arc::try_unwrap(peer) {
-				Ok(p) => p.wait().await,
-				Err(_) => {
-					log::warn!("PuppyNet still in use; skipping graceful shutdown");
-				}
-			}
+			};
+			return;
+		}
+		Some(Command::Daemon) => {
+			run_daemon(&args).await;
+			return;
+		}
+		None => {
+			run_daemon(&args).await;
 			return;
 		}
 	}

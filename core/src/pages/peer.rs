@@ -1,7 +1,6 @@
 use super::{UiContext, UiControllerCore, UiViewState};
 use async_trait::async_trait;
 use std::sync::Arc;
-use wgui::wgui_controller;
 use wgui::wui::runtime::{Component, Ctx, MountResult, RouteContext};
 
 pub(in super::super) struct PeerController {
@@ -18,7 +17,7 @@ impl PeerController {
 	}
 }
 
-#[wgui_controller]
+#[wgui::wgui_controller]
 impl PeerController {
 	pub fn state(&self) -> UiViewState {
 		self.core().peer_state(self.peer_id())
@@ -67,7 +66,9 @@ impl PeerController {
 	pub fn start_peer_update(&mut self) {
 		self.core().start_peer_update();
 	}
+}
 
+impl PeerController {
 	pub fn poll_peer_update(&mut self) {
 		self.core().poll_peer_update();
 	}

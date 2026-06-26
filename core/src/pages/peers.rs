@@ -1,7 +1,6 @@
 use super::{UiAction, UiContext, UiControllerCore, UiViewState};
 use async_trait::async_trait;
 use std::sync::Arc;
-use wgui::wgui_controller;
 use wgui::wui::runtime::{Component, Ctx, MountResult, RouteContext};
 
 pub(in super::super) struct PeersController {
@@ -14,7 +13,7 @@ impl PeersController {
 	}
 }
 
-#[wgui_controller]
+#[wgui::wgui_controller]
 impl PeersController {
 	pub fn state(&self) -> UiViewState {
 		self.core().peers_state()
@@ -35,7 +34,9 @@ impl PeersController {
 	pub fn peer_row(&mut self, idx: u32) {
 		self.core().peer_row(idx);
 	}
+}
 
+impl PeersController {
 	pub fn peer_back(&mut self) {
 		self.core().peer_back();
 	}

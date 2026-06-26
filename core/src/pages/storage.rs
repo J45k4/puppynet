@@ -1,7 +1,6 @@
 use super::{UiAction, UiContext, UiControllerCore, UiViewState};
 use async_trait::async_trait;
 use std::sync::Arc;
-use wgui::wgui_controller;
 use wgui::wui::runtime::{Component, Ctx, MountResult, RouteContext};
 
 pub(in super::super) struct StorageController {
@@ -14,7 +13,7 @@ impl StorageController {
 	}
 }
 
-#[wgui_controller]
+#[wgui::wgui_controller]
 impl StorageController {
 	pub fn state(&self) -> UiViewState {
 		self.core().storage_state()

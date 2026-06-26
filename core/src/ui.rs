@@ -6,7 +6,7 @@ use crate::p2p::{
 };
 use crate::updater::UpdateProgress;
 use crate::{PuppyNet, StorageUsageFile};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use base64::Engine;
 use libp2p::PeerId;
 use rand::RngCore;
@@ -279,6 +279,7 @@ pub(super) struct UiViewState {
 	home_storage: String,
 	home_users: String,
 	current_peer: String,
+	grant_command: String,
 	has_peers: bool,
 	has_cpus: bool,
 	has_interfaces: bool,
@@ -751,6 +752,10 @@ impl UiControllerCore<'_> {
 			current_peer: match state.local_peer_id.clone() {
 				Some(peer_id) => format!("Current peer: {peer_id}"),
 				None => String::from("Current peer: unavailable"),
+			},
+			grant_command: match state.local_peer_id.clone() {
+				Some(peer_id) => format!("puppynet grant {peer_id} --all"),
+				None => String::from("Grant command unavailable"),
 			},
 			has_peers: !peers.is_empty(),
 			has_cpus: !cpus.is_empty(),
@@ -2530,7 +2535,16 @@ async fn handle_ui_http(
 	}
 }
 
+async fn verify_ui_addr_available(bind: SocketAddr) -> Result<()> {
+	let listener = tokio::net::TcpListener::bind(bind)
+		.await
+		.with_context(|| format!("failed to bind PuppyNet UI on {bind}"))?;
+	drop(listener);
+	Ok(())
+}
+
 pub async fn run_ui(puppy: Arc<PuppyNet>, bind: SocketAddr) -> Result<()> {
+	verify_ui_addr_available(bind).await?;
 	log::info!("starting PuppyNet UI on {}", bind);
 	let mut wgui = Wgui::new(bind);
 	let server_state = Arc::new(UiServer::new(puppy));

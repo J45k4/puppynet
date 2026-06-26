@@ -31,6 +31,22 @@ pub enum Command {
 		#[clap(long)]
 		system: bool,
 	},
+	Start {
+		#[clap(long)]
+		system: bool,
+	},
+	Stop {
+		#[clap(long)]
+		system: bool,
+	},
+	Restart {
+		#[clap(long)]
+		system: bool,
+	},
+	Status {
+		#[clap(long)]
+		system: bool,
+	},
 	Uninstall {
 		#[clap(long)]
 		system: bool,
@@ -44,7 +60,14 @@ pub enum Command {
 		#[clap(long)]
 		password: String,
 	},
-	#[cfg(feature = "iced")]
-	Gui,
+	Grant {
+		peer_id: String,
+		#[clap(long)]
+		all: bool,
+		#[clap(long = "read", value_name = "PATH")]
+		read: Vec<String>,
+		#[clap(long = "write", value_name = "PATH")]
+		write: Vec<String>,
+	},
 	Daemon,
 }

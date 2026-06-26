@@ -93,6 +93,20 @@ fn service_manager(level: ServiceLevel) -> anyhow::Result<Box<dyn ServiceManager
 	Ok(manager)
 }
 
+fn service_status_label(status: ServiceStatus) -> String {
+	match status {
+		ServiceStatus::NotInstalled => String::from("not installed"),
+		ServiceStatus::Running => String::from("running"),
+		ServiceStatus::Stopped(Some(reason)) => format!("stopped ({reason})"),
+		ServiceStatus::Stopped(None) => String::from("stopped"),
+	}
+}
+
+fn stop_service(manager: &dyn ServiceManager, label: ServiceLabel) -> anyhow::Result<()> {
+	manager.stop(ServiceStopCtx { label })?;
+	Ok(())
+}
+
 pub fn install(system: bool) -> anyhow::Result<()> {
 	let level = install_level(system);
 	let label: ServiceLabel = SERVICE_LABEL.parse()?;
@@ -101,7 +115,7 @@ pub fn install(system: bool) -> anyhow::Result<()> {
 	manager.install(ServiceInstallCtx {
 		label: label.clone(),
 		program,
-		args: vec![],
+		args: vec![String::from("daemon").into()],
 		contents: None,
 		username: None,
 		working_directory: None,
@@ -114,10 +128,51 @@ pub fn install(system: bool) -> anyhow::Result<()> {
 	Ok(())
 }
 
+pub fn start(system: bool) -> anyhow::Result<()> {
+	let level = install_level(system);
+	let label: ServiceLabel = SERVICE_LABEL.parse()?;
+	let manager = service_manager(level)?;
+	manager.start(ServiceStartCtx { label })?;
+	log::info!("Service started: {}", SERVICE_LABEL);
+	Ok(())
+}
+
+pub fn stop(system: bool) -> anyhow::Result<()> {
+	let level = install_level(system);
+	let label: ServiceLabel = SERVICE_LABEL.parse()?;
+	let manager = service_manager(level)?;
+	stop_service(manager.as_ref(), label)?;
+	log::info!("Service stopped: {}", SERVICE_LABEL);
+	Ok(())
+}
+
+pub fn restart(system: bool) -> anyhow::Result<()> {
+	let level = install_level(system);
+	let label: ServiceLabel = SERVICE_LABEL.parse()?;
+	let manager = service_manager(level)?;
+	if let Err(err) = stop_service(manager.as_ref(), label.clone()) {
+		log::warn!("failed to stop service before restart: {err}");
+	}
+	manager.start(ServiceStartCtx { label })?;
+	log::info!("Service restarted: {}", SERVICE_LABEL);
+	Ok(())
+}
+
+pub fn status(system: bool) -> anyhow::Result<String> {
+	let level = install_level(system);
+	let label: ServiceLabel = SERVICE_LABEL.parse()?;
+	let manager = service_manager(level)?;
+	let status = manager.status(ServiceStatusCtx { label })?;
+	Ok(service_status_label(status))
+}
+
 pub fn uninstall(system: bool) -> anyhow::Result<()> {
 	let level = install_level(system);
 	let label: ServiceLabel = SERVICE_LABEL.parse()?;
 	let manager = service_manager(level)?;
+	if let Err(err) = stop_service(manager.as_ref(), label.clone()) {
+		log::warn!("failed to stop service before uninstall: {err}");
+	}
 	manager.uninstall(ServiceUninstallCtx { label })?;
 	log::info!("Service uninstalled: {}", SERVICE_LABEL);
 	Ok(())
