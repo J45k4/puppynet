@@ -162,6 +162,10 @@ install_puppynet_service() {
 		printf '%s\n' "Installing puppynet system service"
 		if as_root "$install_dir/puppynet" install --system; then
 			printf '%s\n' "PuppyNet system service installed and started"
+			printf '%s\n' "Check status with: $install_dir/puppynet status --system"
+			if [ "$platform" = "linux" ]; then
+				printf '%s\n' "Or: systemctl status puppynet"
+			fi
 			return
 		fi
 
@@ -173,6 +177,10 @@ install_puppynet_service() {
 	printf '%s\n' "Installing puppynet user service"
 	if "$install_dir/puppynet" install; then
 		printf '%s\n' "PuppyNet service installed and started"
+		printf '%s\n' "Check status with: $install_dir/puppynet status"
+		if [ "$platform" = "linux" ]; then
+			printf '%s\n' "Or: systemctl --user status puppynet"
+		fi
 		return
 	fi
 
