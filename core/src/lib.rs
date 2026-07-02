@@ -2,6 +2,7 @@ mod app;
 mod audio;
 pub mod auth;
 mod db;
+mod desktop_input;
 pub mod http_api;
 pub mod p2p;
 mod puppynet;

@@ -10,7 +10,7 @@ pub struct Args {
 	pub read: Vec<String>,
 	#[clap(long = "write", value_name = "PATH")]
 	pub write: Vec<String>,
-	#[clap(long, default_value = "127.0.0.1:8832")]
+	#[clap(long, default_value = "0.0.0.0:8832")]
 	pub ui_bind: String,
 	#[clap(long, value_name = "ADDR")]
 	pub http: Option<String>,

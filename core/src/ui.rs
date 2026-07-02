@@ -1,8 +1,8 @@
 use crate::auth;
 use crate::db::FileEntry;
 use crate::p2p::{
-	AudioCapability, AudioDevice, AudioDeviceKind, CpuInfo, DirEntry, InterfaceInfo,
-	MediaCapability, MediaSource, MediaSourceKind,
+	AudioCapability, AudioDevice, AudioDeviceKind, CpuInfo, DesktopInput, DirEntry, InterfaceInfo,
+	MediaCapability, MediaSource, MediaSourceKind, MouseButton,
 };
 use crate::updater::UpdateProgress;
 use crate::{PuppyNet, StorageUsageFile};
@@ -26,13 +26,14 @@ use wgui::{HttpRequest, HttpResponse, Wgui, WguiModel};
 const SESSION_COOKIE: &str = "sid";
 const SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 7;
 const FAVICON_ICO: &[u8] = include_bytes!("../http_assets/favicon.ico");
+const TRACKPAD_JS: &[u8] = include_bytes!("../http_assets/trackpad.js");
 
 #[path = "pages/mod.rs"]
 mod pages;
 
 use pages::{
-	FilesController, HomeController, LoginController, NotFoundController, PeerController,
-	PeerFilesController, PeerWebcamsController, PeersController, SearchController,
+	FilesController, HomeController, LoginController, NotFoundController, PeerControlController,
+	PeerController, PeerFilesController, PeerWebcamsController, PeersController, SearchController,
 	SettingsController, StorageController, UpdatesController, UsersController,
 };
 
@@ -41,6 +42,7 @@ enum Page {
 	Home,
 	Peers,
 	PeerDetail(String),
+	PeerControl { peer_id: String },
 	PeerFiles { peer_id: String, path: String },
 	PeerWebcams { peer_id: String },
 	Files,
@@ -190,6 +192,11 @@ struct UiSearchRow {
 	peer_id: String,
 }
 
+#[derive(Clone, WguiModel)]
+struct UiTrackpadProps {
+	sensitivity: f64,
+}
+
 #[derive(Clone, Default)]
 struct UiClientSession {
 	authenticated: bool,
@@ -215,6 +222,8 @@ struct UiClientSession {
 	shell_output: String,
 	shell_status: String,
 	shell_session_id: Option<u64>,
+	control_text: String,
+	control_status: String,
 	audio_status: String,
 	webcam_status: String,
 	webcam_selected_device: String,
@@ -256,6 +265,9 @@ pub(super) struct UiViewState {
 	shell_output: String,
 	shell_status: String,
 	shell_has_session: bool,
+	control_text: String,
+	control_status: String,
+	trackpad_props: UiTrackpadProps,
 	audio_status: String,
 	audio_capability_status: String,
 	audio_supported: bool,
@@ -288,6 +300,7 @@ pub(super) struct UiViewState {
 	has_peer_files: bool,
 	peer_files_path: String,
 	selected_peer_details_href: String,
+	selected_peer_control_href: String,
 	selected_peer_files_href: String,
 	selected_peer_webcams_href: String,
 	peer_files_parent_href: String,
@@ -485,6 +498,14 @@ fn peer_details_href(peer_id: &str) -> String {
 	}
 }
 
+fn peer_control_href(peer_id: &str) -> String {
+	if peer_id.is_empty() {
+		String::from("/peers")
+	} else {
+		format!("/peers/{peer_id}/control")
+	}
+}
+
 fn peer_webcams_href(peer_id: &str) -> String {
 	if peer_id.is_empty() {
 		String::from("/peers")
@@ -498,6 +519,39 @@ fn webcam_stream_href(peer_id: &str, device_id: &str) -> String {
 		.append_pair("device", device_id)
 		.finish();
 	format!("/api/peers/{peer_id}/webcam.mjpeg?{query}")
+}
+
+fn control_key(idx: u32) -> Option<&'static str> {
+	match idx {
+		0 => Some("Return"),
+		1 => Some("Tab"),
+		2 => Some("BackSpace"),
+		3 => Some("Escape"),
+		4 => Some("Up"),
+		5 => Some("Down"),
+		6 => Some("Left"),
+		7 => Some("Right"),
+		_ => None,
+	}
+}
+
+fn json_i32(payload: &wgui::serde_json::Value, key: &str) -> Option<i32> {
+	payload
+		.get(key)
+		.and_then(|value| value.as_i64())
+		.and_then(|value| i32::try_from(value).ok())
+}
+
+fn json_mouse_button(payload: &wgui::serde_json::Value) -> MouseButton {
+	match payload
+		.get("button")
+		.and_then(|value| value.as_str())
+		.unwrap_or("left")
+	{
+		"middle" => MouseButton::Middle,
+		"right" => MouseButton::Right,
+		_ => MouseButton::Left,
+	}
 }
 
 fn cookie_value(headers: &HashMap<String, String>, name: &str) -> Option<String> {
@@ -653,6 +707,8 @@ impl UiControllerCore<'_> {
 			.unwrap_or_default();
 		let selected_peer_details_href =
 			peer_details_href(state.selected_peer.as_deref().unwrap_or_default());
+		let selected_peer_control_href =
+			peer_control_href(state.selected_peer.as_deref().unwrap_or_default());
 		let selected_peer_files_href =
 			peer_files_href(state.selected_peer.as_deref().unwrap_or_default(), "/");
 		let selected_peer_webcams_href =
@@ -723,6 +779,9 @@ impl UiControllerCore<'_> {
 			shell_output: session.shell_output,
 			shell_status: session.shell_status,
 			shell_has_session: session.shell_session_id.is_some(),
+			control_text: session.control_text,
+			control_status: session.control_status,
+			trackpad_props: UiTrackpadProps { sensitivity: 1.0 },
 			audio_status: session.audio_status,
 			audio_capability_status,
 			audio_supported: is_audio_supported,
@@ -765,6 +824,7 @@ impl UiControllerCore<'_> {
 			has_peer_files: !peer_files.is_empty(),
 			peer_files_path: state.peer_files_path,
 			selected_peer_details_href,
+			selected_peer_control_href,
 			selected_peer_files_href,
 			selected_peer_webcams_href,
 			peer_files_has_parent: !peer_files_parent_href.is_empty(),
@@ -811,6 +871,16 @@ impl UiControllerCore<'_> {
 		if should_refresh {
 			self.block_on(self.ctx.state.server.refresh_peer_detail(&peer_id));
 		}
+		self.state()
+	}
+
+	pub(super) fn peer_control_state(&self, peer_id: String) -> UiViewState {
+		self.block_on(
+			self.ctx
+				.state
+				.server
+				.set_page(Page::PeerControl { peer_id }),
+		);
 		self.state()
 	}
 
@@ -1550,6 +1620,52 @@ impl UiControllerCore<'_> {
 		})
 	}
 
+	fn selected_desktop_peer(&self) -> Option<PeerId> {
+		let selected_peer = self
+			.block_on(self.ctx.state.server.snapshot())
+			.selected_peer;
+		let Some(selected_peer) = selected_peer else {
+			self.update_session(|session| {
+				session.control_status = String::from("Select a peer first");
+			});
+			return None;
+		};
+		match PeerId::from_str(&selected_peer) {
+			Ok(peer) => Some(peer),
+			Err(_) => {
+				self.update_session(|session| {
+					session.control_status = String::from("Invalid selected peer");
+				});
+				None
+			}
+		}
+	}
+
+	fn send_desktop_input(&self, input: DesktopInput, success: impl Into<String>) -> bool {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return false;
+		}
+		let Some(peer) = self.selected_desktop_peer() else {
+			return false;
+		};
+		match self.block_on(self.ctx.state.server.puppy.desktop_input(peer, input)) {
+			Ok(()) => {
+				let success = success.into();
+				self.update_session(|session| {
+					session.control_status = success;
+				});
+				true
+			}
+			Err(err) => {
+				self.update_session(|session| {
+					session.control_status = format!("Control input failed: {err}");
+				});
+				false
+			}
+		}
+	}
+
 	pub fn edit_shell_input(&self, value: String) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
@@ -1649,6 +1765,84 @@ impl UiControllerCore<'_> {
 				});
 			}
 		}
+	}
+
+	pub fn move_peer_mouse(&self, payload: wgui::serde_json::Value) {
+		let dx = json_i32(&payload, "dx").unwrap_or(0).clamp(-500, 500);
+		let dy = json_i32(&payload, "dy").unwrap_or(0).clamp(-500, 500);
+		if dx == 0 && dy == 0 {
+			return;
+		}
+		self.send_desktop_input(
+			DesktopInput::MouseMove { dx, dy },
+			format!("Moved mouse by {dx}, {dy}"),
+		);
+	}
+
+	pub fn scroll_peer_mouse(&self, payload: wgui::serde_json::Value) {
+		let amount = json_i32(&payload, "amount").unwrap_or(0).clamp(-20, 20);
+		if amount == 0 {
+			return;
+		}
+		self.send_desktop_input(
+			DesktopInput::MouseScroll { amount },
+			format!("Scrolled mouse by {amount}"),
+		);
+	}
+
+	pub fn click_peer_mouse(&self, payload: wgui::serde_json::Value) {
+		let button = json_mouse_button(&payload);
+		self.send_desktop_input(DesktopInput::MouseClick { button }, "Mouse click sent");
+	}
+
+	pub fn press_peer_mouse(&self, payload: wgui::serde_json::Value) {
+		let button = json_mouse_button(&payload);
+		self.send_desktop_input(DesktopInput::MousePress { button }, "Mouse button pressed");
+	}
+
+	pub fn release_peer_mouse(&self, payload: wgui::serde_json::Value) {
+		let button = json_mouse_button(&payload);
+		self.send_desktop_input(
+			DesktopInput::MouseRelease { button },
+			"Mouse button released",
+		);
+	}
+
+	pub fn edit_control_text(&self, value: String) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		self.update_session(|session| {
+			session.control_text = value;
+		});
+	}
+
+	pub fn send_control_text(&self) {
+		let text = self.current_session().control_text;
+		if text.is_empty() {
+			return;
+		}
+		if self.send_desktop_input(DesktopInput::KeyboardText { text }, "Text sent") {
+			self.update_session(|session| {
+				session.control_text.clear();
+			});
+		}
+	}
+
+	pub fn send_control_key(&self, idx: u32) {
+		let Some(key) = control_key(idx) else {
+			self.update_session(|session| {
+				session.control_status = String::from("Unknown key");
+			});
+			return;
+		};
+		self.send_desktop_input(
+			DesktopInput::KeyboardKey {
+				key: key.to_string(),
+			},
+			format!("{key} sent"),
+		);
 	}
 
 	pub fn edit_update_version(&self, value: String) {
@@ -2293,6 +2487,7 @@ impl UiServer {
 		state.page = page.clone();
 		state.selected_peer = match page {
 			Page::PeerDetail(peer_id) => Some(peer_id),
+			Page::PeerControl { peer_id } => Some(peer_id),
 			Page::PeerFiles { peer_id, path } => {
 				state.peer_files_path = path;
 				Some(peer_id)
@@ -2318,6 +2513,7 @@ fn page_label(page: &Page) -> &'static str {
 		Page::Home => "home",
 		Page::Peers => "peers",
 		Page::PeerDetail(_) => "peer_detail",
+		Page::PeerControl { .. } => "peer_control",
 		Page::PeerFiles { .. } => "peer_files",
 		Page::PeerWebcams { .. } => "peer_webcams",
 		Page::Files => "files",
@@ -2491,6 +2687,11 @@ async fn handle_ui_http(
 		("GET", path) if peer_webcam_stream_peer(path).is_some() => {
 			Some(handle_peer_webcam_stream(request, ctx).await)
 		}
+		("GET", "/assets/trackpad.js") => Some(
+			HttpResponse::new(200, TRACKPAD_JS.to_vec())
+				.header("content-type", "text/javascript")
+				.header("cache-control", "no-store"),
+		),
 		("GET", "/favicon.ico") => Some(favicon_response()),
 		("GET", "/auth/finish") => {
 			let token = request
@@ -2564,6 +2765,7 @@ pub async fn run_ui(puppy: Arc<PuppyNet>, bind: SocketAddr) -> Result<()> {
 	wgui.add_page::<HomeController>("/");
 	wgui.add_page::<LoginController>("/login");
 	wgui.add_page::<PeersController>("/peers");
+	wgui.add_page::<PeerControlController>("/peers/:peer_id/control");
 	wgui.add_page::<PeerFilesController>("/peers/:peer_id/files");
 	wgui.add_page::<PeerWebcamsController>("/peers/:peer_id/webcams");
 	wgui.add_page::<PeerController>("/peers/:peer_id");

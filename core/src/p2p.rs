@@ -144,6 +144,10 @@ pub enum PeerReq {
 		id: u64,
 		data: Vec<u8>,
 	},
+	/// Send desktop mouse or keyboard input to this peer.
+	DesktopInput {
+		input: DesktopInput,
+	},
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,6 +216,8 @@ pub enum PeerRes {
 	ShellExited {
 		id: u64,
 	},
+	/// Acknowledgment for desktop mouse or keyboard input.
+	DesktopInputAck(Result<(), String>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,6 +231,24 @@ pub struct Thumbnail {
 	pub width: u32,
 	pub height: u32,
 	pub mime_type: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum MouseButton {
+	Left,
+	Middle,
+	Right,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DesktopInput {
+	MouseMove { dx: i32, dy: i32 },
+	MouseScroll { amount: i32 },
+	MouseClick { button: MouseButton },
+	MousePress { button: MouseButton },
+	MouseRelease { button: MouseButton },
+	KeyboardText { text: String },
+	KeyboardKey { key: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

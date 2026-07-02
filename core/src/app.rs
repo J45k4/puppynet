@@ -1,9 +1,10 @@
 use crate::audio;
 use crate::auth;
+use crate::desktop_input;
 use crate::p2p::{
-	AudioCapability, AudioDevice, AuthMethod, CpuInfo, DirEntry, DiskInfo, FileWriteAck,
-	InterfaceInfo, MediaCapability, MediaFrame, MediaSource, PeerInfo, PeerReq, PeerRes,
-	PermissionGrant, Thumbnail, permission_from_grant,
+	AudioCapability, AudioDevice, AuthMethod, CpuInfo, DesktopInput, DirEntry, DiskInfo,
+	FileWriteAck, InterfaceInfo, MediaCapability, MediaFrame, MediaSource, PeerInfo, PeerReq,
+	PeerRes, PermissionGrant, Thumbnail, permission_from_grant,
 };
 use crate::types::FileChunk;
 use crate::updater::{self, UpdateProgress, UpdateResult};
@@ -202,6 +203,11 @@ pub enum Command {
 		session_id: u64,
 		data: Vec<u8>,
 		tx: oneshot::Sender<Result<Vec<u8>>>,
+	},
+	DesktopInput {
+		peer: PeerId,
+		input: DesktopInput,
+		tx: oneshot::Sender<Result<()>>,
 	},
 }
 
@@ -525,6 +531,16 @@ impl ResponseDecoder for Vec<u8> {
 		match response {
 			PeerRes::ShellOutput { data, .. } => Ok(data),
 			PeerRes::ShellExited { .. } => Ok(Vec::new()),
+			other => Err(anyhow!("unexpected response: {:?}", other)),
+		}
+	}
+}
+
+impl ResponseDecoder for () {
+	fn decode(response: PeerRes) -> anyhow::Result<Self> {
+		match response {
+			PeerRes::DesktopInputAck(Ok(())) => Ok(()),
+			PeerRes::DesktopInputAck(Err(err)) => Err(anyhow!(err)),
 			other => Err(anyhow!("unexpected response: {:?}", other)),
 		}
 	}
@@ -1414,6 +1430,11 @@ impl App {
 					Err(err) => PeerRes::Error(err.to_string()),
 				}
 			}
+			PeerReq::DesktopInput { input } => PeerRes::DesktopInputAck(
+				desktop_input::apply(input)
+					.await
+					.map_err(|err| err.to_string()),
+			),
 		};
 		Ok(res)
 	}
@@ -2418,6 +2439,21 @@ impl App {
 					);
 				self.pending_requests
 					.insert(request_id, Pending::<Vec<u8>>::new(tx));
+			}
+			Command::DesktopInput { peer, input, tx } => {
+				if self.state.me == peer {
+					let result = desktop_input::apply(input).await;
+					let _ = tx.send(result);
+					return;
+				}
+				let addresses = self.known_peer_addresses(&peer);
+				let request_id = self
+					.swarm
+					.behaviour_mut()
+					.puppynet
+					.send_request_with_addresses(&peer, PeerReq::DesktopInput { input }, addresses);
+				self.pending_requests
+					.insert(request_id, Pending::<()>::new(tx));
 			}
 		}
 	}

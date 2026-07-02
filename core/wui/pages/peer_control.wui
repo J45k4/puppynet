@@ -1,0 +1,33 @@
+<Import name="AppLayout" from="../layouts/app" />
+<Import name="Trackpad" from="../partials/trackpad" />
+
+<AppLayout>
+  <VStack spacing=8 fill=true>
+    <HStack spacing=6 wrap=true fill=true>
+      <VStack spacing=2 grow=1 minWidth=0>
+        <Text value="Mouse and keyboard" />
+        <Text value={state.selected_peer} breakWords=true />
+      </VStack>
+      <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
+        <Link text="Peer details" href={state.selected_peer_details_href} />
+      </VStack>
+    </HStack>
+    <Trackpad props={state.trackpad_props} onMouseMoved="MovePeerMouse" onMouseClicked="ClickPeerMouse" onMousePressed="PressPeerMouse" onMouseReleased="ReleasePeerMouse" onScrolled="ScrollPeerMouse" />
+    <HStack spacing=6 wrap=true fill=true>
+      <TextInput value={state.control_text} placeholder="Text to type on peer" onTextChanged="EditControlText" grow=1 minWidth=0 />
+      <Button text="Type" onClick="SendControlText" />
+    </HStack>
+    <HStack spacing=6 wrap=true fill=true>
+      <Button text="Enter" onClick="SendControlKey" arg=0 />
+      <Button text="Tab" onClick="SendControlKey" arg=1 />
+      <Button text="Backspace" onClick="SendControlKey" arg=2 />
+      <Button text="Escape" onClick="SendControlKey" arg=3 />
+      <Button text="Up" onClick="SendControlKey" arg=4 />
+      <Button text="Down" onClick="SendControlKey" arg=5 />
+      <Button text="Left" onClick="SendControlKey" arg=6 />
+      <Button text="Right" onClick="SendControlKey" arg=7 />
+    </HStack>
+    <Text value={state.control_status} breakWords=true />
+  </VStack>
+  <Text value={state.status} breakWords=true />
+</AppLayout>

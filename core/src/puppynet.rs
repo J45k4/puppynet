@@ -7,9 +7,9 @@ use crate::db::{
 	run_migrations, save_session,
 };
 use crate::p2p::{
-	AudioCapability, AudioDevice, CpuInfo, DirEntry, DiskInfo, InterfaceInfo, MediaCapability,
-	MediaFrame, MediaSource, PeerInfo, PermissionGrant, Thumbnail, grant_from_permission,
-	permission_from_grant,
+	AudioCapability, AudioDevice, CpuInfo, DesktopInput, DirEntry, DiskInfo, InterfaceInfo,
+	MediaCapability, MediaFrame, MediaSource, PeerInfo, PermissionGrant, Thumbnail,
+	grant_from_permission, permission_from_grant,
 };
 use crate::scan::ScanEvent;
 use crate::state::{FLAG_READ, FLAG_SEARCH, FLAG_WRITE, Peer, Permission, State};
@@ -704,6 +704,15 @@ impl PuppyNet {
 			.map_err(|e| anyhow!("failed to send ShellInput command: {e}"))?;
 		rx.await
 			.map_err(|e| anyhow!("ShellInput response channel closed: {e}"))?
+	}
+
+	pub async fn desktop_input(&self, peer: PeerId, input: DesktopInput) -> Result<()> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::DesktopInput { peer, input, tx })
+			.map_err(|e| anyhow!("failed to send DesktopInput command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("DesktopInput response channel closed: {e}"))?
 	}
 
 	/// Request a remote peer to update itself.
