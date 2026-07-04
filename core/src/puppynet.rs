@@ -392,6 +392,23 @@ impl PuppyNet {
 			.map_err(|e| anyhow!("SetAudioVolume response channel closed: {e}"))?
 	}
 
+	pub async fn set_default_audio_device(
+		&self,
+		peer_id: PeerId,
+		device_id: String,
+	) -> Result<Vec<AudioDevice>> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::SetDefaultAudioDevice {
+				tx,
+				peer_id,
+				device_id,
+			})
+			.map_err(|e| anyhow!("failed to send SetDefaultAudioDevice command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("SetDefaultAudioDevice response channel closed: {e}"))?
+	}
+
 	pub async fn media_capability(&self, peer_id: PeerId) -> Result<MediaCapability> {
 		let (tx, rx) = oneshot::channel();
 		self.cmd_tx

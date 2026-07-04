@@ -72,6 +72,9 @@ pub enum PeerReq {
 		device_id: Option<String>,
 		volume: u8,
 	},
+	SetDefaultAudioDevice {
+		device_id: String,
+	},
 	MediaCapability,
 	ListMediaSources,
 	GetMediaFrame {
@@ -369,7 +372,39 @@ pub struct MediaSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaFrame {
 	pub mime: String,
+	#[serde(with = "base64_bytes")]
 	pub data: Vec<u8>,
+}
+
+mod base64_bytes {
+	use base64::Engine;
+	use serde::Deserialize;
+
+	pub fn serialize<S>(data: &Vec<u8>, serializer: S) -> std::result::Result<S::Ok, S::Error>
+	where
+		S: serde::Serializer,
+	{
+		serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(data))
+	}
+
+	pub fn deserialize<'de, D>(deserializer: D) -> std::result::Result<Vec<u8>, D::Error>
+	where
+		D: serde::Deserializer<'de>,
+	{
+		#[derive(Deserialize)]
+		#[serde(untagged)]
+		enum EncodedBytes {
+			Base64(String),
+			Bytes(Vec<u8>),
+		}
+
+		match EncodedBytes::deserialize(deserializer)? {
+			EncodedBytes::Base64(data) => base64::engine::general_purpose::STANDARD
+				.decode(data)
+				.map_err(serde::de::Error::custom),
+			EncodedBytes::Bytes(data) => Ok(data),
+		}
+	}
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -742,4 +777,37 @@ pub fn build_swarm(id_keys: identity::Keypair, peer_id: PeerId) -> Result<Swarm<
 		.with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(u64::MAX)))
 		.build();
 	Ok(swarm)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn media_frame_data_serializes_as_base64_string() {
+		let frame = MediaFrame {
+			mime: String::from("image/jpeg"),
+			data: vec![1, 2, 3, 255],
+		};
+
+		let json = serde_json::to_value(&frame).unwrap();
+		let decoded: MediaFrame = serde_json::from_value(json.clone()).unwrap();
+
+		assert_eq!(json["data"], "AQID/w==");
+		assert_eq!(decoded.mime, "image/jpeg");
+		assert_eq!(decoded.data, vec![1, 2, 3, 255]);
+	}
+
+	#[test]
+	fn media_frame_data_deserializes_legacy_byte_array() {
+		let json = serde_json::json!({
+			"mime": "image/jpeg",
+			"data": [1, 2, 3, 255],
+		});
+
+		let decoded: MediaFrame = serde_json::from_value(json).unwrap();
+
+		assert_eq!(decoded.mime, "image/jpeg");
+		assert_eq!(decoded.data, vec![1, 2, 3, 255]);
+	}
 }

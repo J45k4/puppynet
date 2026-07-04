@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["cli", "core", "daemon"]
+exclude = ["vendor/cosmic-protocols"]
 
 [profile.release]
 strip = true

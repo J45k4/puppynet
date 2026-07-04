@@ -1,0 +1,1 @@
+<CustomComponent name="MonitorStream" entry="/assets/monitor_stream.js?v=2" props={props} fill=true minHeight=280 />

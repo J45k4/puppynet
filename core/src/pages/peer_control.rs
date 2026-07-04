@@ -51,6 +51,10 @@ impl PeerControlController {
 		self.core().release_peer_mouse(payload);
 	}
 
+	pub fn toggle_monitor_stream(&mut self) {
+		self.core().toggle_monitor_stream();
+	}
+
 	pub fn edit_control_text(&mut self, value: String) {
 		self.core().edit_control_text(value);
 	}

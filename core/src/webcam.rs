@@ -4,7 +4,7 @@ use crate::p2p::{
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::Duration as StdDuration;
@@ -23,6 +23,19 @@ use v4l::video::Capture;
 #[cfg(target_os = "linux")]
 use v4l::{FourCC, context};
 
+const DEFAULT_SCREEN_SOURCE_ID: &str = "screen:default";
+const SCREEN_STREAM_MAX_HEIGHT: u32 = 540;
+const SCREEN_STREAM_MAX_WIDTH: u32 = 960;
+const SCREEN_STREAM_QUALITY: u8 = 60;
+static SCREEN_CAPTURE_COMMAND: OnceLock<ScreenCaptureCommand> = OnceLock::new();
+
+#[derive(Clone, Copy)]
+enum ScreenCaptureCommand {
+	Cosmic,
+	Grim,
+	Import,
+}
+
 #[async_trait]
 trait WebcamBackend: Send + Sync {
 	fn name(&self) -> &'static str;
@@ -32,14 +45,6 @@ trait WebcamBackend: Send + Sync {
 	async fn list_sources(&self) -> Result<Vec<MediaSource>>;
 
 	async fn capture_frame(&self, source_id: String) -> Result<MediaFrame>;
-
-	fn capability(&self) -> MediaCapability {
-		MediaCapability {
-			supported: true,
-			backend: Some(self.name().to_string()),
-			message: format!("Live media sources are available through {}.", self.name()),
-		}
-	}
 }
 
 struct WebcamDevice {
@@ -98,6 +103,270 @@ fn webcam_sources(devices: Vec<WebcamDevice>) -> Vec<MediaSource> {
 	devices.into_iter().map(webcam_source).collect()
 }
 
+fn screen_source() -> MediaSource {
+	MediaSource {
+		id: DEFAULT_SCREEN_SOURCE_ID.to_string(),
+		name: String::from("Default monitor"),
+		kind: MediaSourceKind::Screen,
+		live: true,
+		outputs: vec![MediaOutput {
+			transport: MediaTransport::Stream,
+			mime: String::from("image/jpeg"),
+			codec: Some(String::from("mjpeg")),
+		}],
+	}
+}
+
+fn validate_screen_id(source_id: &str) -> Result<()> {
+	if source_id == DEFAULT_SCREEN_SOURCE_ID {
+		Ok(())
+	} else {
+		bail!("invalid screen source");
+	}
+}
+
+#[cfg(target_os = "linux")]
+fn wayland_runtime_dir() -> PathBuf {
+	std::env::var_os("XDG_RUNTIME_DIR")
+		.map(PathBuf::from)
+		.filter(|path| path.is_absolute())
+		.unwrap_or_else(|| {
+			let uid = unsafe { libc::geteuid() };
+			PathBuf::from(format!("/run/user/{uid}"))
+		})
+}
+
+#[cfg(target_os = "linux")]
+fn detected_wayland_display(runtime_dir: &Path) -> Option<String> {
+	use std::os::unix::fs::FileTypeExt;
+
+	let mut displays = std::fs::read_dir(runtime_dir)
+		.ok()?
+		.filter_map(Result::ok)
+		.filter_map(|entry| {
+			let name = entry.file_name().to_string_lossy().to_string();
+			if !name.starts_with("wayland-") || name.ends_with(".lock") {
+				return None;
+			}
+			let file_type = entry.file_type().ok()?;
+			file_type.is_socket().then_some(name)
+		})
+		.collect::<Vec<_>>();
+	displays.sort();
+	displays.into_iter().next()
+}
+
+#[cfg(target_os = "linux")]
+fn configure_wayland_env(process: &mut Command) {
+	let runtime_dir = wayland_runtime_dir();
+	if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
+		process.env("XDG_RUNTIME_DIR", &runtime_dir);
+	}
+	if std::env::var_os("WAYLAND_DISPLAY").is_none()
+		&& let Some(display) = detected_wayland_display(&runtime_dir)
+	{
+		process.env("WAYLAND_DISPLAY", display);
+	}
+}
+
+#[cfg(target_os = "linux")]
+async fn cosmic_screen_available() -> bool {
+	match timeout(
+		Duration::from_secs(2),
+		task::spawn_blocking(crate::cosmic_capture::available),
+	)
+	.await
+	{
+		Ok(Ok(available)) => available,
+		Ok(Err(err)) => {
+			log::warn!("COSMIC screen capture availability task failed: {err}");
+			false
+		}
+		Err(_) => {
+			log::warn!("timed out checking COSMIC screen capture availability");
+			false
+		}
+	}
+}
+
+#[cfg(target_os = "linux")]
+async fn capture_cosmic_screen_png() -> Result<Vec<u8>> {
+	timeout(
+		Duration::from_secs(8),
+		task::spawn_blocking(crate::cosmic_capture::capture_png),
+	)
+	.await
+	.map_err(|_| anyhow!("timed out capturing COSMIC screen frame"))?
+	.map_err(|err| anyhow!("COSMIC screen capture task failed: {err}"))?
+}
+
+async fn capture_external_screen_png(command: ScreenCaptureCommand) -> Result<Vec<u8>> {
+	let mut process = match command {
+		ScreenCaptureCommand::Cosmic => unreachable!("COSMIC capture is handled above"),
+		ScreenCaptureCommand::Grim => {
+			let mut process = Command::new("grim");
+			#[cfg(target_os = "linux")]
+			configure_wayland_env(&mut process);
+			process.arg("-");
+			process
+		}
+		ScreenCaptureCommand::Import => {
+			let mut process = Command::new("import");
+			process.args(["-window", "root", "png:-"]);
+			process
+		}
+	};
+	let output = timeout(Duration::from_secs(8), process.output())
+		.await
+		.map_err(|_| anyhow!("timed out capturing screen frame"))??;
+	if !output.status.success() {
+		let stderr = String::from_utf8_lossy(&output.stderr);
+		bail!("failed to capture screen frame: {}", stderr.trim());
+	}
+	if output.stdout.is_empty() {
+		bail!("screen capture returned no image data");
+	}
+	Ok(output.stdout)
+}
+
+async fn probe_external_screen_capture_command(
+	command: ScreenCaptureCommand,
+) -> Result<ScreenCaptureCommand> {
+	let probe = capture_external_screen_png(command).await?;
+	screen_stream_frame_blocking(probe).await?;
+	Ok(command)
+}
+
+async fn detect_screen_capture_command() -> Result<ScreenCaptureCommand> {
+	if !cfg!(target_os = "linux") {
+		bail!(
+			"Screen viewing is not supported on {} yet.",
+			std::env::consts::OS
+		);
+	}
+	let mut errors = Vec::new();
+	#[cfg(target_os = "linux")]
+	if cosmic_screen_available().await {
+		match capture_cosmic_screen_png().await {
+			Ok(probe) => {
+				screen_stream_frame_blocking(probe).await?;
+				return Ok(ScreenCaptureCommand::Cosmic);
+			}
+			Err(err) => errors.push(format!("COSMIC: {err}")),
+		}
+	}
+	if command_available("grim", "-h").await {
+		match probe_external_screen_capture_command(ScreenCaptureCommand::Grim).await {
+			Ok(command) => return Ok(command),
+			Err(err) => errors.push(format!("grim: {err}")),
+		}
+	}
+	if command_available("import", "-version").await {
+		match probe_external_screen_capture_command(ScreenCaptureCommand::Import).await {
+			Ok(command) => return Ok(command),
+			Err(err) => errors.push(format!("ImageMagick import: {err}")),
+		}
+	}
+	if errors.is_empty() {
+		bail!(
+			"Screen viewing needs a working COSMIC, grim, or ImageMagick import capture backend."
+		);
+	}
+	bail!(
+		"No screen capture backend produced a frame: {}",
+		errors.join("; ")
+	);
+}
+
+async fn screen_capture_command() -> Result<ScreenCaptureCommand> {
+	if let Some(command) = SCREEN_CAPTURE_COMMAND.get() {
+		return Ok(*command);
+	}
+	let command = detect_screen_capture_command().await?;
+	let _ = SCREEN_CAPTURE_COMMAND.set(command);
+	Ok(command)
+}
+
+async fn screen_available() -> Result<()> {
+	screen_capture_command().await.map(|_| ())
+}
+
+async fn list_screen_sources() -> Result<Vec<MediaSource>> {
+	screen_available().await?;
+	Ok(vec![screen_source()])
+}
+
+fn screen_stream_frame(data: Vec<u8>) -> Result<MediaFrame> {
+	let image = image::load_from_memory(&data)?;
+	let image =
+		if image.width() > SCREEN_STREAM_MAX_WIDTH || image.height() > SCREEN_STREAM_MAX_HEIGHT {
+			image.resize(
+				SCREEN_STREAM_MAX_WIDTH,
+				SCREEN_STREAM_MAX_HEIGHT,
+				image::imageops::FilterType::Triangle,
+			)
+		} else {
+			image
+		};
+	let mut data = Vec::new();
+	let mut encoder =
+		image::codecs::jpeg::JpegEncoder::new_with_quality(&mut data, SCREEN_STREAM_QUALITY);
+	encoder.encode_image(&image)?;
+	if data.is_empty() {
+		bail!("screen stream encoding returned no image data");
+	}
+	Ok(MediaFrame {
+		mime: String::from("image/jpeg"),
+		data,
+	})
+}
+
+async fn screen_stream_frame_blocking(data: Vec<u8>) -> Result<MediaFrame> {
+	timeout(
+		Duration::from_secs(8),
+		task::spawn_blocking(move || screen_stream_frame(data)),
+	)
+	.await
+	.map_err(|_| anyhow!("timed out encoding screen frame"))?
+	.map_err(|err| anyhow!("screen frame encoding task failed: {err}"))?
+}
+
+#[cfg(target_os = "linux")]
+async fn capture_cosmic_screen_frame() -> Result<MediaFrame> {
+	let data = capture_cosmic_screen_png().await?;
+	screen_stream_frame_blocking(data).await
+}
+
+async fn capture_external_screen_frame(command: ScreenCaptureCommand) -> Result<MediaFrame> {
+	let data = capture_external_screen_png(command).await?;
+	screen_stream_frame_blocking(data).await
+}
+
+async fn capture_screen_frame(source_id: String) -> Result<MediaFrame> {
+	validate_screen_id(&source_id)?;
+	let command = screen_capture_command().await?;
+	#[cfg(target_os = "linux")]
+	if matches!(command, ScreenCaptureCommand::Cosmic) {
+		return match capture_cosmic_screen_frame().await {
+			Ok(frame) => Ok(frame),
+			Err(cosmic_err) => {
+				if command_available("grim", "-h").await {
+					log::warn!("COSMIC screen capture failed, falling back to grim: {cosmic_err}");
+					return capture_external_screen_frame(ScreenCaptureCommand::Grim).await;
+				}
+				if command_available("import", "-version").await {
+					log::warn!(
+						"COSMIC screen capture failed, falling back to ImageMagick import: {cosmic_err}"
+					);
+					return capture_external_screen_frame(ScreenCaptureCommand::Import).await;
+				}
+				Err(cosmic_err)
+			}
+		};
+	}
+	capture_external_screen_frame(command).await
+}
+
 #[cfg(target_os = "linux")]
 fn v4l2_devices() -> Vec<WebcamDevice> {
 	let mut devices = context::enum_devices()
@@ -134,6 +403,9 @@ fn device_supports_mjpeg(device_id: &str) -> bool {
 #[cfg(target_os = "linux")]
 static V4L2_CAPTURE_WORKERS: OnceLock<Mutex<HashMap<String, Arc<V4l2CaptureWorker>>>> =
 	OnceLock::new();
+
+#[cfg(target_os = "linux")]
+const V4L2_CAPTURE_IDLE_TIMEOUT: StdDuration = StdDuration::from_secs(2);
 
 #[cfg(target_os = "linux")]
 struct V4l2FrameRequest {
@@ -187,7 +459,11 @@ fn run_v4l2_capture_worker(
 	};
 	let _ = capture_v4l2_stream_frame(&mut stream);
 	let _ = ready.send(Ok(()));
-	for request in requests {
+	loop {
+		let request = match requests.recv_timeout(V4L2_CAPTURE_IDLE_TIMEOUT) {
+			Ok(request) => request,
+			Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => break,
+		};
 		let result = capture_v4l2_stream_frame(&mut stream).map_err(|err| err.to_string());
 		let should_stop = result.is_err();
 		let _ = request.tx.send(result);
@@ -226,6 +502,15 @@ fn v4l2_capture_worker(device_id: &str) -> Result<Arc<V4l2CaptureWorker>> {
 }
 
 #[cfg(target_os = "linux")]
+fn remove_v4l2_capture_worker(device_id: &str) {
+	if let Some(workers) = V4L2_CAPTURE_WORKERS.get()
+		&& let Ok(mut workers) = workers.lock()
+	{
+		workers.remove(device_id);
+	}
+}
+
+#[cfg(target_os = "linux")]
 fn request_v4l2_frame(worker: &V4l2CaptureWorker) -> Result<Vec<u8>> {
 	let (tx, rx) = mpsc::channel();
 	worker
@@ -245,12 +530,11 @@ fn capture_v4l2_mjpeg(device_id: &str) -> Result<Vec<u8>> {
 	match request_v4l2_frame(&worker) {
 		Ok(data) => Ok(data),
 		Err(err) => {
-			if let Some(workers) = V4L2_CAPTURE_WORKERS.get()
-				&& let Ok(mut workers) = workers.lock()
-			{
-				workers.remove(device_id);
-			}
-			Err(err)
+			remove_v4l2_capture_worker(device_id);
+			let retry_worker = v4l2_capture_worker(device_id)
+				.map_err(|retry_err| anyhow!("{err}; retry failed: {retry_err}"))?;
+			request_v4l2_frame(&retry_worker)
+				.map_err(|retry_err| anyhow!("{err}; retry failed: {retry_err}"))
 		}
 	}
 }
@@ -318,23 +602,63 @@ async fn select_webcam_backend() -> Arc<dyn WebcamBackend> {
 
 pub(crate) async fn media_capability() -> MediaCapability {
 	let backend = select_webcam_backend().await;
-	match backend.available().await {
-		Ok(()) => backend.capability(),
-		Err(err) => MediaCapability {
-			supported: false,
-			backend: Some(backend.name().to_string()),
-			message: err.to_string(),
-		},
+	let webcam_available = backend.available().await;
+	let screen_available = screen_available().await;
+	if webcam_available.is_ok() || screen_available.is_ok() {
+		let mut backends = Vec::new();
+		let mut details = Vec::new();
+		if webcam_available.is_ok() {
+			backends.push(backend.name().to_string());
+			details.push(String::from("Webcam capture is available."));
+		} else if let Err(err) = &webcam_available {
+			details.push(format!("Webcam capture unavailable: {err}"));
+		}
+		if screen_available.is_ok() {
+			backends.push(String::from("screen-capture"));
+			details.push(String::from("Screen capture is available."));
+		} else if let Err(err) = &screen_available {
+			details.push(format!("Screen capture unavailable: {err}"));
+		}
+		return MediaCapability {
+			supported: true,
+			backend: Some(backends.join(", ")),
+			message: details.join(" "),
+		};
+	}
+	let webcam_error = webcam_available
+		.err()
+		.map(|err| err.to_string())
+		.unwrap_or_else(|| String::from("webcam unavailable"));
+	let screen_error = screen_available
+		.err()
+		.map(|err| err.to_string())
+		.unwrap_or_else(|| String::from("screen unavailable"));
+	MediaCapability {
+		supported: false,
+		backend: Some(backend.name().to_string()),
+		message: format!("{webcam_error} {screen_error}"),
 	}
 }
 
 pub(crate) async fn list_media_sources() -> Result<Vec<MediaSource>> {
 	let backend = select_webcam_backend().await;
-	backend.available().await?;
-	backend.list_sources().await
+	let mut sources = Vec::new();
+	if backend.available().await.is_ok() {
+		sources.extend(backend.list_sources().await?);
+	}
+	if screen_available().await.is_ok() {
+		sources.extend(list_screen_sources().await?);
+	}
+	if sources.is_empty() {
+		bail!("No live media sources are available.");
+	}
+	Ok(sources)
 }
 
 pub(crate) async fn capture_media_frame(source_id: String) -> Result<MediaFrame> {
+	if source_id == DEFAULT_SCREEN_SOURCE_ID {
+		return capture_screen_frame(source_id).await;
+	}
 	let backend = select_webcam_backend().await;
 	backend.available().await?;
 	backend.capture_frame(source_id).await
@@ -475,12 +799,27 @@ impl WebcamBackend for UnsupportedWebcamBackend {
 	async fn capture_frame(&self, _source_id: String) -> Result<MediaFrame> {
 		bail!("{}", self.message)
 	}
+}
 
-	fn capability(&self) -> MediaCapability {
-		MediaCapability {
-			supported: false,
-			backend: None,
-			message: self.message.clone(),
-		}
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use image::{ImageBuffer, ImageEncoder, Rgba};
+
+	#[test]
+	fn screen_stream_frame_encodes_resized_jpeg() {
+		let image =
+			ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(2000, 1000, Rgba([0, 128, 255, 255]));
+		let mut png = Vec::new();
+		image::codecs::png::PngEncoder::new(&mut png)
+			.write_image(image.as_raw(), 2000, 1000, image::ColorType::Rgba8.into())
+			.unwrap();
+
+		let frame = screen_stream_frame(png).unwrap();
+		let decoded = image::load_from_memory(&frame.data).unwrap();
+
+		assert_eq!(frame.mime, "image/jpeg");
+		assert!(decoded.width() <= SCREEN_STREAM_MAX_WIDTH);
+		assert!(decoded.height() <= SCREEN_STREAM_MAX_HEIGHT);
 	}
 }

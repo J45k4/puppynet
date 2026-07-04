@@ -11,7 +11,7 @@
         <Link text="View webcams" href={state.selected_peer_webcams_href} />
       </VStack>
       <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
-        <Link text="Mouse and keyboard" href={state.selected_peer_control_href} />
+        <Link text="Monitor and control" href={state.selected_peer_control_href} />
       </VStack>
     </HStack>
     <Text value="CPUs:" />
@@ -46,6 +46,12 @@
         <Text value="No audio devices available." />
       </If>
       <Else>
+        <If test={state.has_audio_output_options}>
+          <HStack spacing=6 wrap=true fill=true>
+            <Text value="Output" />
+            <Select value={state.selected_audio_device} options={state.audio_output_options} onSelect="SelectAudioDevice" grow=1 minWidth=0 />
+          </HStack>
+        </If>
         <HStack spacing=6 wrap=true fill=true>
           <Text value="Volume" />
           <Slider min=0 max=100 value={state.audio_volume} step=1 onSliderChange="SetAudioVolume" />

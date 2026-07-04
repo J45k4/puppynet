@@ -1,4 +1,5 @@
 <Import name="AppLayout" from="../layouts/app" />
+<Import name="MonitorStream" from="../partials/monitor_stream" />
 <Import name="Trackpad" from="../partials/trackpad" />
 
 <AppLayout>
@@ -12,6 +13,20 @@
         <Link text="Peer details" href={state.selected_peer_details_href} />
       </VStack>
     </HStack>
+    <HStack spacing=6 wrap=true fill=true>
+      <Checkbox checked={state.monitor_stream_enabled} onClick="ToggleMonitorStream" />
+      <Text value="View screen" />
+    </HStack>
+    <Text value={state.monitor_status} breakWords=true />
+    <If test={!state.monitor_stream_enabled}>
+      <Text value="Screen stream is disabled." />
+    </If>
+    <If test={state.monitor_stream_enabled && !state.monitor_has_stream}>
+      <Text value="Monitor stream is not available on this peer." />
+    </If>
+    <If test={state.monitor_stream_enabled && state.monitor_has_stream}>
+      <MonitorStream props={state.monitor_stream_props} />
+    </If>
     <Trackpad props={state.trackpad_props} onMouseMoved="MovePeerMouse" onMouseClicked="ClickPeerMouse" onMousePressed="PressPeerMouse" onMouseReleased="ReleasePeerMouse" onScrolled="ScrollPeerMouse" />
     <HStack spacing=6 wrap=true fill=true>
       <TextInput value={state.control_text} placeholder="Text to type on peer" onTextChanged="EditControlText" grow=1 minWidth=0 />

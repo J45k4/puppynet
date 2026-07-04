@@ -2,7 +2,7 @@ use crate::auth;
 use crate::db::FileEntry;
 use crate::p2p::{
 	AudioCapability, AudioDevice, AudioDeviceKind, CpuInfo, DesktopInput, DirEntry, InterfaceInfo,
-	MediaCapability, MediaSource, MediaSourceKind, MouseButton,
+	MediaCapability, MediaFrame, MediaSource, MediaSourceKind, MouseButton,
 };
 use crate::updater::UpdateProgress;
 use crate::{PuppyNet, StorageUsageFile};
@@ -26,6 +26,7 @@ use wgui::{HttpRequest, HttpResponse, Wgui, WguiModel};
 const SESSION_COOKIE: &str = "sid";
 const SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 7;
 const FAVICON_ICO: &[u8] = include_bytes!("../http_assets/favicon.ico");
+const MONITOR_STREAM_JS: &[u8] = include_bytes!("../http_assets/monitor_stream.js");
 const TRACKPAD_JS: &[u8] = include_bytes!("../http_assets/trackpad.js");
 
 #[path = "pages/mod.rs"]
@@ -74,6 +75,8 @@ struct UiState {
 	peer_audio_devices: Vec<AudioDevice>,
 	peer_webcam_capability: Option<MediaCapability>,
 	peer_webcams: Vec<MediaSource>,
+	peer_screens: Vec<MediaSource>,
+	peer_screen_status: String,
 	peer_files_path: String,
 	peer_files: Vec<DirEntry>,
 	files: Vec<FileEntry>,
@@ -96,6 +99,8 @@ impl UiState {
 			peer_audio_devices: Vec::new(),
 			peer_webcam_capability: None,
 			peer_webcams: Vec::new(),
+			peer_screens: Vec::new(),
+			peer_screen_status: String::from("Monitor capability not checked yet."),
 			peer_files_path: String::from("/"),
 			peer_files: Vec::new(),
 			files: Vec::new(),
@@ -144,6 +149,12 @@ struct UiCpu {
 #[derive(Clone, WguiModel)]
 struct UiInterface {
 	line: String,
+}
+
+#[derive(Clone, WguiModel)]
+struct UiSelectOption {
+	value: String,
+	name: String,
 }
 
 #[derive(Clone, WguiModel)]
@@ -197,6 +208,11 @@ struct UiTrackpadProps {
 	sensitivity: f64,
 }
 
+#[derive(Clone, WguiModel)]
+struct UiMonitorStreamProps {
+	src: String,
+}
+
 #[derive(Clone, Default)]
 struct UiClientSession {
 	authenticated: bool,
@@ -224,6 +240,7 @@ struct UiClientSession {
 	shell_session_id: Option<u64>,
 	control_text: String,
 	control_status: String,
+	monitor_stream_enabled: bool,
 	audio_status: String,
 	webcam_status: String,
 	webcam_selected_device: String,
@@ -268,6 +285,8 @@ pub(super) struct UiViewState {
 	control_text: String,
 	control_status: String,
 	trackpad_props: UiTrackpadProps,
+	monitor_stream_props: UiMonitorStreamProps,
+	monitor_stream_enabled: bool,
 	audio_status: String,
 	audio_capability_status: String,
 	audio_supported: bool,
@@ -275,12 +294,18 @@ pub(super) struct UiViewState {
 	audio_volume_text: String,
 	audio_muted: bool,
 	audio_mute_label: String,
+	selected_audio_device: String,
+	audio_output_options: Vec<UiSelectOption>,
+	has_audio_output_options: bool,
 	webcam_status: String,
 	webcam_capability_status: String,
 	webcam_supported: bool,
 	has_webcam_devices: bool,
 	webcam_stream_src: String,
 	webcam_has_stream: bool,
+	monitor_stream_src: String,
+	monitor_has_stream: bool,
+	monitor_status: String,
 	update_version: String,
 	update_status: String,
 	update_events: Vec<String>,
@@ -521,6 +546,13 @@ fn webcam_stream_href(peer_id: &str, device_id: &str) -> String {
 	format!("/api/peers/{peer_id}/webcam.mjpeg?{query}")
 }
 
+fn monitor_stream_href(peer_id: &str, source_id: &str) -> String {
+	let query = url::form_urlencoded::Serializer::new(String::new())
+		.append_pair("device", source_id)
+		.finish();
+	format!("/api/peers/{peer_id}/monitor.mjpeg?{query}")
+}
+
 fn control_key(idx: u32) -> Option<&'static str> {
 	match idx {
 		0 => Some("Return"),
@@ -638,6 +670,18 @@ impl UiControllerCore<'_> {
 		let audio_muted = default_audio_output(&state.peer_audio_devices)
 			.map(|device| device.muted)
 			.unwrap_or(false);
+		let selected_audio_device = default_audio_output(&state.peer_audio_devices)
+			.map(|device| device.id.clone())
+			.unwrap_or_default();
+		let audio_output_options = state
+			.peer_audio_devices
+			.iter()
+			.filter(|device| matches!(device.kind, AudioDeviceKind::Sink))
+			.map(|device| UiSelectOption {
+				value: device.id.clone(),
+				name: device.name.clone(),
+			})
+			.collect::<Vec<_>>();
 		let is_audio_supported = audio_supported(state.peer_audio_capability.as_ref());
 		let audio_capability_status = audio_capability_status(state.peer_audio_capability.as_ref());
 		let audio_devices = state
@@ -668,6 +712,21 @@ impl UiControllerCore<'_> {
 				selected: device.id == selected_webcam_device,
 			})
 			.collect::<Vec<_>>();
+		let selected_screen = state
+			.peer_screens
+			.first()
+			.map(|source| source.id.clone())
+			.unwrap_or_default();
+		let monitor_stream_enabled = session.monitor_stream_enabled;
+		let monitor_status = if selected_screen.is_empty() {
+			state.peer_screen_status.clone()
+		} else if !monitor_stream_enabled {
+			String::from("Monitor stream is available but disabled.")
+		} else if let Some(source) = state.peer_screens.first() {
+			format!("Viewing {}", source.name)
+		} else {
+			state.peer_screen_status.clone()
+		};
 		let files = state
 			.files
 			.into_iter()
@@ -719,6 +778,13 @@ impl UiControllerCore<'_> {
 			.filter(|_| is_webcam_supported)
 			.filter(|_| !selected_webcam_device.is_empty())
 			.map(|peer_id| webcam_stream_href(peer_id, &selected_webcam_device))
+			.unwrap_or_default();
+		let monitor_stream_src = state
+			.selected_peer
+			.as_deref()
+			.filter(|_| monitor_stream_enabled)
+			.filter(|_| !selected_screen.is_empty())
+			.map(|peer_id| monitor_stream_href(peer_id, &selected_screen))
 			.unwrap_or_default();
 		let storage_rows = state
 			.storage
@@ -782,6 +848,10 @@ impl UiControllerCore<'_> {
 			control_text: session.control_text,
 			control_status: session.control_status,
 			trackpad_props: UiTrackpadProps { sensitivity: 1.0 },
+			monitor_stream_props: UiMonitorStreamProps {
+				src: monitor_stream_src.clone(),
+			},
+			monitor_stream_enabled,
 			audio_status: session.audio_status,
 			audio_capability_status,
 			audio_supported: is_audio_supported,
@@ -793,12 +863,18 @@ impl UiControllerCore<'_> {
 			} else {
 				String::from("Mute")
 			},
+			selected_audio_device,
+			has_audio_output_options: !audio_output_options.is_empty(),
+			audio_output_options,
 			webcam_status: session.webcam_status,
 			webcam_capability_status,
 			webcam_supported: is_webcam_supported,
 			has_webcam_devices: !webcam_devices.is_empty(),
 			webcam_stream_src: webcam_stream_src.clone(),
 			webcam_has_stream: !webcam_stream_src.is_empty(),
+			monitor_stream_src: monitor_stream_src.clone(),
+			monitor_has_stream: !monitor_stream_src.is_empty(),
+			monitor_status,
 			update_version: session.update_version,
 			update_status: session.update_status,
 			update_events: session.update_events.clone(),
@@ -875,12 +951,15 @@ impl UiControllerCore<'_> {
 	}
 
 	pub(super) fn peer_control_state(&self, peer_id: String) -> UiViewState {
-		self.block_on(
-			self.ctx
-				.state
-				.server
-				.set_page(Page::PeerControl { peer_id }),
-		);
+		let snapshot = self.block_on(self.ctx.state.server.snapshot());
+		let page = Page::PeerControl {
+			peer_id: peer_id.clone(),
+		};
+		let should_refresh = snapshot.page != page;
+		self.block_on(self.ctx.state.server.set_page(page));
+		if should_refresh {
+			self.block_on(self.ctx.state.server.refresh_peer_screens(&peer_id));
+		}
 		self.state()
 	}
 
@@ -1216,6 +1295,69 @@ impl UiControllerCore<'_> {
 			Err(err) => {
 				self.update_session(|session| {
 					session.audio_status = format!("Failed to change mute: {err}");
+				});
+			}
+		}
+	}
+
+	pub fn select_audio_device(&self, device_id: String) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		let snapshot = self.block_on(self.ctx.state.server.snapshot());
+		let Some(peer_id) = snapshot.selected_peer else {
+			self.update_session(|session| {
+				session.audio_status = String::from("Select a peer first");
+			});
+			return;
+		};
+		if !audio_supported(snapshot.peer_audio_capability.as_ref()) {
+			self.update_session(|session| {
+				session.audio_status =
+					audio_capability_status(snapshot.peer_audio_capability.as_ref());
+			});
+			return;
+		}
+		let Some(device) = snapshot
+			.peer_audio_devices
+			.iter()
+			.find(|device| device.id == device_id)
+		else {
+			self.update_session(|session| {
+				session.audio_status = String::from("Unknown audio device");
+			});
+			return;
+		};
+		if !matches!(device.kind, AudioDeviceKind::Sink) {
+			self.update_session(|session| {
+				session.audio_status = String::from("Only output devices can be selected");
+			});
+			return;
+		}
+		let Ok(peer) = PeerId::from_str(&peer_id) else {
+			self.update_session(|session| {
+				session.audio_status = String::from("Invalid selected peer");
+			});
+			return;
+		};
+		let device_name = device.name.clone();
+		match self.block_on(
+			self.ctx
+				.state
+				.server
+				.puppy
+				.set_default_audio_device(peer, device_id),
+		) {
+			Ok(devices) => {
+				self.block_on(self.ctx.state.server.set_peer_audio_devices(devices));
+				self.update_session(|session| {
+					session.audio_status = format!("Selected {device_name}");
+				});
+			}
+			Err(err) => {
+				self.update_session(|session| {
+					session.audio_status = format!("Failed to select audio output: {err}");
 				});
 			}
 		}
@@ -1641,6 +1783,12 @@ impl UiControllerCore<'_> {
 		}
 	}
 
+	fn selected_desktop_peer_quiet(&self) -> Option<PeerId> {
+		self.block_on(self.ctx.state.server.snapshot())
+			.selected_peer
+			.and_then(|peer| PeerId::from_str(&peer).ok())
+	}
+
 	fn send_desktop_input(&self, input: DesktopInput, success: impl Into<String>) -> bool {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
@@ -1664,6 +1812,21 @@ impl UiControllerCore<'_> {
 				false
 			}
 		}
+	}
+
+	fn send_mouse_move_input(&self, dx: i32, dy: i32) {
+		let Some(peer) = self.selected_desktop_peer_quiet() else {
+			return;
+		};
+		let puppy = Arc::clone(&self.ctx.state.server.puppy);
+		tokio::spawn(async move {
+			if let Err(err) = puppy
+				.desktop_input(peer, DesktopInput::MouseMove { dx, dy })
+				.await
+			{
+				log::warn!("mouse move input failed: {err}");
+			}
+		});
 	}
 
 	pub fn edit_shell_input(&self, value: String) {
@@ -1773,10 +1936,13 @@ impl UiControllerCore<'_> {
 		if dx == 0 && dy == 0 {
 			return;
 		}
-		self.send_desktop_input(
-			DesktopInput::MouseMove { dx, dy },
-			format!("Moved mouse by {dx}, {dy}"),
-		);
+		self.send_mouse_move_input(dx, dy);
+	}
+
+	pub fn toggle_monitor_stream(&self) {
+		self.update_session(|session| {
+			session.monitor_stream_enabled = !session.monitor_stream_enabled;
+		});
 	}
 
 	pub fn scroll_peer_mouse(&self, payload: wgui::serde_json::Value) {
@@ -2334,6 +2500,70 @@ impl UiServer {
 		state.peer_audio_devices = devices;
 	}
 
+	async fn refresh_peer_screens(&self, peer_id: &str) {
+		match PeerId::from_str(peer_id) {
+			Ok(peer) => {
+				let capability = match self.puppy.media_capability(peer).await {
+					Ok(capability) => capability,
+					Err(err) => {
+						let mut state = self.state.lock().await;
+						state.peer_webcam_capability = Some(MediaCapability {
+							supported: false,
+							backend: None,
+							message: format!("Failed to query media capability: {err}"),
+						});
+						state.peer_screens.clear();
+						state.peer_screen_status =
+							format!("Failed to query media capability: {err}");
+						return;
+					}
+				};
+				if !capability.supported {
+					let mut state = self.state.lock().await;
+					state.peer_screen_status = capability.message.clone();
+					state.peer_webcam_capability = Some(capability);
+					state.peer_screens.clear();
+					return;
+				}
+
+				match self.puppy.list_media_sources(peer).await {
+					Ok(sources) => {
+						let screens = sources
+							.into_iter()
+							.filter(|source| source.kind == MediaSourceKind::Screen)
+							.collect::<Vec<_>>();
+						let mut state = self.state.lock().await;
+						state.peer_screen_status = if screens.is_empty() {
+							capability.message.clone()
+						} else {
+							format!("Loaded {} monitor stream source(s).", screens.len())
+						};
+						state.peer_webcam_capability = Some(capability);
+						state.peer_screens = screens;
+					}
+					Err(err) => {
+						let mut state = self.state.lock().await;
+						state.peer_webcam_capability = Some(capability);
+						state.peer_screens.clear();
+						state.peer_screen_status = format!("Failed to load monitors: {err}");
+						state.status = format!("Failed to load monitors for {peer_id}: {err}");
+					}
+				}
+			}
+			Err(err) => {
+				let mut state = self.state.lock().await;
+				state.peer_webcam_capability = Some(MediaCapability {
+					supported: false,
+					backend: None,
+					message: format!("Invalid peer id: {err}"),
+				});
+				state.peer_screens.clear();
+				state.peer_screen_status = format!("Invalid peer id: {err}");
+				state.status = format!("Invalid peer id: {err}");
+			}
+		}
+	}
+
 	async fn refresh_peer_webcams(&self, peer_id: &str) {
 		match PeerId::from_str(peer_id) {
 			Ok(peer) => {
@@ -2500,6 +2730,8 @@ impl UiServer {
 			state.peer_audio_devices.clear();
 			state.peer_webcam_capability = None;
 			state.peer_webcams.clear();
+			state.peer_screens.clear();
+			state.peer_screen_status = String::from("Monitor capability not checked yet.");
 		}
 	}
 
@@ -2608,6 +2840,7 @@ fn decode_query_value(value: &str) -> String {
 fn peer_webcam_stream_peer(path: &str) -> Option<&str> {
 	let rest = path.strip_prefix("/api/peers/")?;
 	rest.strip_suffix("/webcam.mjpeg")
+		.or_else(|| rest.strip_suffix("/monitor.mjpeg"))
 }
 
 fn mjpeg_frame_chunk(mime: &str, data: &[u8]) -> Vec<u8> {
@@ -2620,18 +2853,64 @@ fn mjpeg_frame_chunk(mime: &str, data: &[u8]) -> Vec<u8> {
 	chunk
 }
 
+fn media_stream_label(path: &str) -> &'static str {
+	if path.ends_with("/monitor.mjpeg") {
+		"monitor"
+	} else {
+		"webcam"
+	}
+}
+
+fn media_stream_frame_delay(stream_label: &str) -> std::time::Duration {
+	if stream_label == "monitor" {
+		std::time::Duration::from_millis(500)
+	} else {
+		std::time::Duration::from_millis(150)
+	}
+}
+
+fn monitor_stream_enabled_for_session(
+	ctx: &Arc<Ctx<UiContext, ()>>,
+	session_id: Option<&str>,
+) -> bool {
+	let Some(session_id) = session_id else {
+		return false;
+	};
+	ctx.state
+		.sessions
+		.lock()
+		.map(|sessions| {
+			sessions
+				.get(session_id)
+				.map(|session| session.monitor_stream_enabled)
+				.unwrap_or(false)
+		})
+		.unwrap_or(false)
+}
+
 async fn handle_peer_webcam_stream(
 	request: HttpRequest,
 	ctx: Arc<Ctx<UiContext, ()>>,
 ) -> HttpResponse {
-	let authenticated = cookie_value(&request.headers, SESSION_COOKIE)
+	let stream_label = media_stream_label(&request.path);
+	let session_id = cookie_value(&request.headers, SESSION_COOKIE);
+	let authenticated = session_id
+		.as_deref()
 		.and_then(|sid| {
-			let hash = auth::token_hash(&sid);
+			let hash = auth::token_hash(sid);
 			ctx.state.server.puppy.http_me(&hash).ok().flatten()
 		})
 		.is_some();
 	if !authenticated {
+		log::warn!("{stream_label} stream rejected: not authenticated");
 		return HttpResponse::new(401, "not authenticated")
+			.header("content-type", "text/plain")
+			.header("cache-control", "no-store");
+	}
+	if stream_label == "monitor" && !monitor_stream_enabled_for_session(&ctx, session_id.as_deref())
+	{
+		log::info!("monitor stream rejected: disabled for session");
+		return HttpResponse::new(409, "monitor stream disabled")
 			.header("content-type", "text/plain")
 			.header("cache-control", "no-store");
 	}
@@ -2656,20 +2935,84 @@ async fn handle_peer_webcam_stream(
 			.header("cache-control", "no-store");
 	}
 
+	log::info!("{stream_label} stream started for peer {peer_id} source {device_id}");
 	let puppy = Arc::clone(&ctx.state.server.puppy);
-	let stream = futures::stream::unfold((puppy, peer, device_id), |state| async move {
-		let (puppy, peer, device_id) = state;
-		match puppy.get_media_frame(peer, device_id.clone()).await {
-			Ok(frame) => {
-				let chunk = mjpeg_frame_chunk(&frame.mime, &frame.data);
-				Some((Ok::<_, Infallible>(chunk), (puppy, peer, device_id)))
-			}
-			Err(err) => {
-				log::warn!("webcam stream stopped: {err}");
-				None
-			}
+	let first_frame = match puppy.get_media_frame(peer, device_id.clone()).await {
+		Ok(frame) => frame,
+		Err(err) => {
+			log::warn!("{stream_label} stream failed to start: {err}");
+			return HttpResponse::new(503, format!("failed to start {stream_label} stream: {err}"))
+				.header("content-type", "text/plain")
+				.header("cache-control", "no-store");
 		}
-	});
+	};
+	let stream = futures::stream::unfold(
+		(
+			puppy,
+			peer,
+			device_id,
+			stream_label,
+			ctx,
+			session_id,
+			Some(first_frame),
+			false,
+		),
+		|state| async move {
+			let (
+				puppy,
+				peer,
+				device_id,
+				stream_label,
+				ctx,
+				session_id,
+				pending_frame,
+				logged_first_frame,
+			) = state;
+			if stream_label == "monitor"
+				&& !monitor_stream_enabled_for_session(&ctx, session_id.as_deref())
+			{
+				log::info!("monitor stream stopped: disabled for session");
+				return None;
+			}
+			let frame = match pending_frame {
+				Some(frame) => Ok::<MediaFrame, anyhow::Error>(frame),
+				None => puppy.get_media_frame(peer, device_id.clone()).await,
+			};
+			match frame {
+				Ok(frame) => {
+					let next_logged_first_frame = if logged_first_frame {
+						true
+					} else {
+						log::info!(
+							"{stream_label} stream produced first frame: {} bytes ({})",
+							frame.data.len(),
+							frame.mime
+						);
+						true
+					};
+					let chunk = mjpeg_frame_chunk(&frame.mime, &frame.data);
+					tokio::time::sleep(media_stream_frame_delay(stream_label)).await;
+					Some((
+						Ok::<_, Infallible>(chunk),
+						(
+							puppy,
+							peer,
+							device_id,
+							stream_label,
+							ctx,
+							session_id,
+							None,
+							next_logged_first_frame,
+						),
+					))
+				}
+				Err(err) => {
+					log::warn!("{stream_label} stream stopped: {err}");
+					None
+				}
+			}
+		},
+	);
 	HttpResponse::stream(200, stream)
 		.header(
 			"content-type",
@@ -2689,6 +3032,11 @@ async fn handle_ui_http(
 		}
 		("GET", "/assets/trackpad.js") => Some(
 			HttpResponse::new(200, TRACKPAD_JS.to_vec())
+				.header("content-type", "text/javascript")
+				.header("cache-control", "no-store"),
+		),
+		("GET", "/assets/monitor_stream.js") => Some(
+			HttpResponse::new(200, MONITOR_STREAM_JS.to_vec())
 				.header("content-type", "text/javascript")
 				.header("cache-control", "no-store"),
 		),

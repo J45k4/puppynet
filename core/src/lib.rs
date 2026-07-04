@@ -1,6 +1,8 @@
 mod app;
 mod audio;
 pub mod auth;
+#[cfg(target_os = "linux")]
+mod cosmic_capture;
 mod db;
 mod desktop_input;
 pub mod http_api;

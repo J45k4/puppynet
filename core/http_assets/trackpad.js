@@ -65,6 +65,7 @@ export default class Trackpad {
 		this.pendingDx = 0;
 		this.pendingDy = 0;
 		this.frame = 0;
+		this.moveTimer = 0;
 	}
 
 	mount(props) {
@@ -112,6 +113,7 @@ export default class Trackpad {
 		this.tapMoveThreshold = Number(this.props.tapMoveThreshold ?? 18);
 		this.doubleTapDelay = Number(this.props.doubleTapDelay ?? 700);
 		this.longPressDelay = Number(this.props.longPressDelay ?? 600);
+		this.moveInterval = Number(this.props.moveInterval ?? 50);
 	}
 
 	dispose() {
@@ -119,6 +121,9 @@ export default class Trackpad {
 		this.releaseDragSelection();
 		if (this.frame) {
 			cancelAnimationFrame(this.frame);
+		}
+		if (this.moveTimer) {
+			clearTimeout(this.moveTimer);
 		}
 	}
 
@@ -321,8 +326,8 @@ export default class Trackpad {
 	}
 
 	scheduleMove() {
-		if (!this.frame) {
-			this.frame = requestAnimationFrame(() => this.flushMove());
+		if (!this.moveTimer) {
+			this.moveTimer = setTimeout(() => this.flushMove(), this.moveInterval);
 		}
 	}
 
@@ -330,6 +335,10 @@ export default class Trackpad {
 		if (this.frame) {
 			cancelAnimationFrame(this.frame);
 			this.frame = 0;
+		}
+		if (this.moveTimer) {
+			clearTimeout(this.moveTimer);
+			this.moveTimer = 0;
 		}
 		const dx = Math.round(this.pendingDx);
 		const dy = Math.round(this.pendingDy);

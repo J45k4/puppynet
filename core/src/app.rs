@@ -50,7 +50,7 @@ use tokio::{
 	task::JoinHandle,
 };
 
-use libp2p::request_response::OutboundRequestId;
+use libp2p::request_response::{OutboundRequestId, ResponseChannel};
 
 pub struct ReadFileCmd {
 	pub(crate) peer_id: libp2p::PeerId,
@@ -105,6 +105,11 @@ pub enum Command {
 		peer_id: PeerId,
 		device_id: Option<String>,
 		volume: u8,
+	},
+	SetDefaultAudioDevice {
+		tx: oneshot::Sender<Result<Vec<AudioDevice>>>,
+		peer_id: PeerId,
+		device_id: String,
 	},
 	MediaCapability {
 		tx: oneshot::Sender<Result<MediaCapability>>,
@@ -685,6 +690,10 @@ impl<T: ResponseDecoder> PendingResponseHandler for Pending<T> {
 }
 
 enum InternalCommand {
+	SendPeerResponse {
+		channel: ResponseChannel<PeerRes>,
+		response: PeerRes,
+	},
 	SendScanEvent {
 		target: PeerId,
 		scan_id: u64,
@@ -1114,16 +1123,19 @@ impl App {
 					Err(err) => PeerRes::Error(err.to_string()),
 				}
 			}
+			PeerReq::SetDefaultAudioDevice { device_id } => {
+				match audio::set_default_audio_device(device_id).await {
+					Ok(devices) => PeerRes::AudioDevices(devices),
+					Err(err) => PeerRes::Error(err.to_string()),
+				}
+			}
 			PeerReq::MediaCapability => PeerRes::MediaCapability(webcam::media_capability().await),
 			PeerReq::ListMediaSources => match webcam::list_media_sources().await {
 				Ok(sources) => PeerRes::MediaSources(sources),
 				Err(err) => PeerRes::Error(err.to_string()),
 			},
-			PeerReq::GetMediaFrame { source_id } => {
-				match webcam::capture_media_frame(source_id).await {
-					Ok(frame) => PeerRes::MediaFrame(frame),
-					Err(err) => PeerRes::Error(err.to_string()),
-				}
+			PeerReq::GetMediaFrame { .. } => {
+				PeerRes::Error(String::from("GetMediaFrame must be handled asynchronously"))
 			}
 			PeerReq::FileEntries { offset, limit } => {
 				match self.fetch_file_entries(offset, limit) {
@@ -1778,6 +1790,18 @@ impl App {
 						request,
 						channel,
 					} => {
+						if let PeerReq::GetMediaFrame { source_id } = request {
+							let internal_tx = self.internal_tx.clone();
+							tokio::spawn(async move {
+								let response = match webcam::capture_media_frame(source_id).await {
+									Ok(frame) => PeerRes::MediaFrame(frame),
+									Err(err) => PeerRes::Error(err.to_string()),
+								};
+								let _ = internal_tx
+									.send(InternalCommand::SendPeerResponse { channel, response });
+							});
+							return;
+						}
 						if let Ok(res) = self.handle_puppy_peer_req(peer, request).await {
 							let _ = self
 								.swarm
@@ -2099,6 +2123,24 @@ impl App {
 				self.pending_requests
 					.insert(request_id, Pending::<Vec<AudioDevice>>::new(tx));
 			}
+			Command::SetDefaultAudioDevice {
+				tx,
+				peer_id,
+				device_id,
+			} => {
+				if self.state.me == peer_id {
+					let result = audio::set_default_audio_device(device_id).await;
+					let _ = tx.send(result);
+					return;
+				}
+				let request_id = self
+					.swarm
+					.behaviour_mut()
+					.puppynet
+					.send_request(&peer_id, PeerReq::SetDefaultAudioDevice { device_id });
+				self.pending_requests
+					.insert(request_id, Pending::<Vec<AudioDevice>>::new(tx));
+			}
 			Command::MediaCapability { tx, peer_id } => {
 				if self.state.me == peer_id {
 					let _ = tx.send(Ok(webcam::media_capability().await));
@@ -2132,8 +2174,10 @@ impl App {
 				source_id,
 			} => {
 				if self.state.me == peer_id {
-					let result = webcam::capture_media_frame(source_id).await;
-					let _ = tx.send(result);
+					tokio::spawn(async move {
+						let result = webcam::capture_media_frame(source_id).await;
+						let _ = tx.send(result);
+					});
 					return;
 				}
 				let request_id = self
@@ -2478,6 +2522,13 @@ impl App {
 
 	fn handle_internal_cmd(&mut self, cmd: InternalCommand) {
 		match cmd {
+			InternalCommand::SendPeerResponse { channel, response } => {
+				let _ = self
+					.swarm
+					.behaviour_mut()
+					.puppynet
+					.send_response(channel, response);
+			}
 			InternalCommand::SendScanEvent {
 				target,
 				scan_id,

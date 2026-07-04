@@ -1,1 +1,1 @@
-<CustomComponent name="Trackpad" entry="/assets/trackpad.js?v=5" props={props} fill=true minHeight=260 />
+<CustomComponent name="Trackpad" entry="/assets/trackpad.js?v=6" props={props} fill=true minHeight=260 />

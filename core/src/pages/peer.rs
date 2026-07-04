@@ -59,6 +59,10 @@ impl PeerController {
 		self.core().toggle_audio_mute();
 	}
 
+	pub fn select_audio_device(&mut self, value: String) {
+		self.core().select_audio_device(value);
+	}
+
 	pub fn edit_update_version(&mut self, value: String) {
 		self.core().edit_update_version(value);
 	}
