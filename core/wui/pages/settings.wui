@@ -7,9 +7,9 @@
     <HStack spacing=0 fill=true>
       <VStack spacing=6 padding=10 width=480 maxWidth=480 border="1px solid #cbd5e1" backgroundColor="#ffffff">
         <Text value="Change password" />
-        <TextInput value={state.current_password} placeholder="Current password" onTextChanged="EditCurrentPassword" fill=true />
-        <TextInput value={state.new_password} placeholder="New password" onTextChanged="EditNewPassword" fill=true />
-        <TextInput value={state.confirm_password} placeholder="Confirm new password" onTextChanged="EditConfirmPassword" fill=true />
+        <TextInput value={state.current_password} placeholder="Current password" type="password" onTextChanged="EditCurrentPassword" fill=true />
+        <TextInput value={state.new_password} placeholder="New password" type="password" onTextChanged="EditNewPassword" fill=true />
+        <TextInput value={state.confirm_password} placeholder="Confirm new password" type="password" onTextChanged="EditConfirmPassword" fill=true />
         <HStack spacing=6 wrap=true fill=true>
           <Button text="Change password" onClick="ChangePassword" />
           <Text value={state.password_change_status} grow=1 minWidth=0 breakWords=true />
