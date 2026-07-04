@@ -26,6 +26,22 @@ impl SettingsController {
 	pub fn logout(&mut self) {
 		self.core().logout();
 	}
+
+	pub fn edit_current_password(&mut self, value: String) {
+		self.core().edit_current_password(value);
+	}
+
+	pub fn edit_new_password(&mut self, value: String) {
+		self.core().edit_new_password(value);
+	}
+
+	pub fn edit_confirm_password(&mut self, value: String) {
+		self.core().edit_confirm_password(value);
+	}
+
+	pub fn change_password(&mut self) {
+		self.core().change_password();
+	}
 }
 
 #[async_trait]

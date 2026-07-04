@@ -220,6 +220,10 @@ struct UiClientSession {
 	login_username: String,
 	login_password: String,
 	login_error: String,
+	current_password: String,
+	new_password: String,
+	confirm_password: String,
+	password_change_status: String,
 	search_name_query: String,
 	search_selected_mimes: Vec<String>,
 	search_results: Vec<UiSearchRow>,
@@ -260,6 +264,10 @@ pub(super) struct UiViewState {
 	login_username: String,
 	login_password: String,
 	login_error: String,
+	current_password: String,
+	new_password: String,
+	confirm_password: String,
+	password_change_status: String,
 	search_name_query: String,
 	search_selected_mimes_text: String,
 	search_mime_options: Vec<UiMimeOption>,
@@ -819,6 +827,10 @@ impl UiControllerCore<'_> {
 			login_username: session.login_username,
 			login_password: session.login_password,
 			login_error: session.login_error,
+			current_password: session.current_password,
+			new_password: session.new_password,
+			confirm_password: session.confirm_password,
+			password_change_status: session.password_change_status,
 			search_name_query: session.search_name_query,
 			search_selected_mimes_text: if session.search_selected_mimes.is_empty() {
 				String::from("All mime types")
@@ -1039,6 +1051,91 @@ impl UiControllerCore<'_> {
 			session.login_password = value;
 			session.login_error.clear();
 		});
+	}
+
+	pub fn edit_current_password(&self, value: String) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		self.update_session(|session| {
+			session.current_password = value;
+			session.password_change_status.clear();
+		});
+	}
+
+	pub fn edit_new_password(&self, value: String) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		self.update_session(|session| {
+			session.new_password = value;
+			session.password_change_status.clear();
+		});
+	}
+
+	pub fn edit_confirm_password(&self, value: String) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		self.update_session(|session| {
+			session.confirm_password = value;
+			session.password_change_status.clear();
+		});
+	}
+
+	pub fn change_password(&self) {
+		let Some(username) = self.authenticated_username() else {
+			self.ctx.push_state("/login");
+			return;
+		};
+		let (current_password, new_password, confirm_password) = {
+			let session = self.current_session();
+			(
+				session.current_password,
+				session.new_password,
+				session.confirm_password,
+			)
+		};
+		if current_password.trim().is_empty()
+			|| new_password.trim().is_empty()
+			|| confirm_password.trim().is_empty()
+		{
+			self.update_session(|session| {
+				session.password_change_status = String::from("All password fields are required");
+			});
+			return;
+		}
+		if new_password != confirm_password {
+			self.update_session(|session| {
+				session.password_change_status =
+					String::from("New password and confirmation do not match");
+			});
+			return;
+		}
+		match self
+			.ctx
+			.state
+			.server
+			.puppy
+			.change_password(username, current_password, new_password)
+		{
+			Ok(()) => {
+				self.update_session(|session| {
+					session.current_password.clear();
+					session.new_password.clear();
+					session.confirm_password.clear();
+					session.password_change_status = String::from("Password changed");
+				});
+			}
+			Err(err) => {
+				self.update_session(|session| {
+					session.password_change_status = format!("Password change failed: {err}");
+				});
+			}
+		}
 	}
 
 	pub fn login(&self) {

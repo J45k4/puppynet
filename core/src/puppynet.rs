@@ -159,6 +159,24 @@ impl PuppyNet {
 		block_on(rx).map_err(|e| anyhow!("CreateUser response channel closed: {e}"))?
 	}
 
+	pub fn change_password(
+		&self,
+		username: String,
+		current_password: String,
+		new_password: String,
+	) -> anyhow::Result<()> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::ChangePassword {
+				username,
+				current_password,
+				new_password,
+				tx,
+			})
+			.map_err(|e| anyhow!("failed to send ChangePassword command: {e}"))?;
+		block_on(rx).map_err(|e| anyhow!("ChangePassword response channel closed: {e}"))?
+	}
+
 	pub fn set_peer_permissions(
 		&self,
 		peer: PeerId,
