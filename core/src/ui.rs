@@ -3284,6 +3284,34 @@ mod tests {
 	}
 
 	#[test]
+	fn login_password_field_renders_as_password_input() {
+		let base_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("wui");
+		let module_name = "pages/login";
+		let path = base_dir.join(format!("{module_name}.wui"));
+		let source = std::fs::read_to_string(&path).unwrap();
+		let template = Template::parse_with_dir(&source, module_name, path.parent()).unwrap();
+		let state = WuiValue::object(vec![
+			(
+				"login_username".to_string(),
+				WuiValue::String(String::new()),
+			),
+			(
+				"login_password".to_string(),
+				WuiValue::String(String::new()),
+			),
+			("login_error".to_string(), WuiValue::String(String::new())),
+		]);
+		let rendered = template.render(&state);
+		let mut input_types = Vec::new();
+		collect_text_input_types(&rendered, &mut input_types);
+
+		assert_eq!(
+			input_types,
+			vec!["text".to_string(), "password".to_string()]
+		);
+	}
+
+	#[test]
 	fn settings_password_fields_render_as_password_inputs() {
 		let base_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("wui");
 		let module_name = "pages/settings";
