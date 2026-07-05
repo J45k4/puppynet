@@ -186,12 +186,6 @@ pub enum Command {
 		password: String,
 		tx: oneshot::Sender<anyhow::Result<()>>,
 	},
-	ChangePassword {
-		username: String,
-		current_password: String,
-		new_password: String,
-		tx: oneshot::Sender<anyhow::Result<()>>,
-	},
 	SetPeerPermissions {
 		peer: PeerId,
 		permissions: Vec<Permission>,
@@ -2407,32 +2401,6 @@ impl App {
 						save_user(&mut *conn, &user)?;
 					}
 					self.state.users.push(user);
-					Ok(())
-				})();
-				let _ = tx.send(result);
-			}
-			Command::ChangePassword {
-				username,
-				current_password,
-				new_password,
-				tx,
-			} => {
-				let result = (|| -> anyhow::Result<()> {
-					let Some(existing) = self.state.users.iter_mut().find(|u| u.name == username)
-					else {
-						bail!("User not found");
-					};
-					if !auth::verify_password(&current_password, &existing.passw)? {
-						bail!("Current password is incorrect");
-					}
-					let passw = auth::hash_password(&new_password)?;
-					existing.passw = passw.clone();
-					let user = User {
-						name: username,
-						passw,
-					};
-					let mut conn = self.db.lock().map_err(|_| anyhow!("db lock poisoned"))?;
-					save_user(&mut *conn, &user)?;
 					Ok(())
 				})();
 				let _ = tx.send(result);

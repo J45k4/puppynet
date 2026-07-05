@@ -4,7 +4,7 @@ use crate::auth;
 use crate::db::{
 	FileEntry, StorageUsageFile, delete_session, get_file_entry, get_file_location, get_your_node,
 	load_discovered_peers, load_peers, load_user, load_users, lookup_session_username, open_db,
-	run_migrations, save_session,
+	run_migrations, save_session, save_user,
 };
 use crate::p2p::{
 	AudioCapability, AudioDevice, CpuInfo, DesktopInput, DirEntry, DiskInfo, InterfaceInfo,
@@ -165,16 +165,19 @@ impl PuppyNet {
 		current_password: String,
 		new_password: String,
 	) -> anyhow::Result<()> {
-		let (tx, rx) = oneshot::channel();
-		self.cmd_tx
-			.send(Command::ChangePassword {
-				username,
-				current_password,
-				new_password,
-				tx,
-			})
-			.map_err(|e| anyhow!("failed to send ChangePassword command: {e}"))?;
-		block_on(rx).map_err(|e| anyhow!("ChangePassword response channel closed: {e}"))?
+		let conn = self
+			.db
+			.lock()
+			.map_err(|err| anyhow!("db lock poisoned: {err}"))?;
+		let Some(mut user) = load_user(&conn, &username)? else {
+			bail!("User not found");
+		};
+		if !auth::verify_password(&current_password, &user.passw)? {
+			bail!("Current password is incorrect");
+		}
+		user.passw = auth::hash_password(&new_password)?;
+		save_user(&conn, &user)?;
+		Ok(())
 	}
 
 	pub fn set_peer_permissions(
