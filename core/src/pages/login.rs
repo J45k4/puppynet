@@ -1,7 +1,9 @@
+use super::super::{redirect_response, session_cookie};
 use super::{UiContext, UiControllerCore, UiViewState};
 use async_trait::async_trait;
 use std::sync::Arc;
 use wgui::wui::runtime::{Component, Ctx, MountResult, RouteContext};
+use wgui::{FormData, HttpResponse};
 
 pub(in super::super) struct LoginController {
 	ctx: Arc<Ctx<UiContext, ()>>,
@@ -33,6 +35,18 @@ impl LoginController {
 
 	pub fn login(&mut self) {
 		self.core().login();
+	}
+
+	#[wgui_post("/auth/login")]
+	pub fn login_post(&mut self, form: FormData) -> HttpResponse {
+		let username = form.get("username").unwrap_or_default().to_string();
+		let password = form.get("password").unwrap_or_default().to_string();
+		match self.core().login_with_credentials(username, password) {
+			Some(token) => redirect_response("/")
+				.header("cache-control", "no-store")
+				.header("set-cookie", session_cookie(&token)),
+			None => redirect_response("/login").header("cache-control", "no-store"),
+		}
 	}
 }
 

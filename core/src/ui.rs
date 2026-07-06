@@ -1099,6 +1099,28 @@ impl UiControllerCore<'_> {
 				session.confirm_password,
 			)
 		};
+		self.change_password_for_user(username, current_password, new_password, confirm_password);
+	}
+
+	pub fn change_password_values(
+		&self,
+		current_password: String,
+		new_password: String,
+		confirm_password: String,
+	) -> bool {
+		let Some(username) = self.authenticated_username() else {
+			return false;
+		};
+		self.change_password_for_user(username, current_password, new_password, confirm_password)
+	}
+
+	fn change_password_for_user(
+		&self,
+		username: String,
+		current_password: String,
+		new_password: String,
+		confirm_password: String,
+	) -> bool {
 		if current_password.trim().is_empty()
 			|| new_password.trim().is_empty()
 			|| confirm_password.trim().is_empty()
@@ -1106,14 +1128,14 @@ impl UiControllerCore<'_> {
 			self.update_session(|session| {
 				session.password_change_status = String::from("All password fields are required");
 			});
-			return;
+			return false;
 		}
 		if new_password != confirm_password {
 			self.update_session(|session| {
 				session.password_change_status =
 					String::from("New password and confirmation do not match");
 			});
-			return;
+			return false;
 		}
 		match self
 			.ctx
@@ -1129,11 +1151,13 @@ impl UiControllerCore<'_> {
 					session.confirm_password.clear();
 					session.password_change_status = String::from("Password changed");
 				});
+				true
 			}
 			Err(err) => {
 				self.update_session(|session| {
 					session.password_change_status = format!("Password change failed: {err}");
 				});
+				false
 			}
 		}
 	}
@@ -1146,11 +1170,26 @@ impl UiControllerCore<'_> {
 				session.login_password.clone(),
 			)
 		};
+		if let Some(token) = self.login_with_credentials(username, password) {
+			let nonce = generate_login_nonce();
+			self.ctx
+				.state
+				.pending_login_tokens
+				.lock()
+				.unwrap()
+				.insert(nonce.clone(), token);
+			self.ctx.navigate(format!("/auth/finish?nonce={nonce}"));
+		}
+	}
+
+	pub fn login_with_credentials(&self, username: String, password: String) -> Option<String> {
+		let username = username.trim().to_string();
 		if username.is_empty() || password.trim().is_empty() {
 			self.update_session(|session| {
+				session.login_username = username;
 				session.login_error = String::from("Username and password are required");
 			});
-			return;
+			return None;
 		}
 		match self
 			.ctx
@@ -1171,32 +1210,30 @@ impl UiControllerCore<'_> {
 					self.update_session(|session| {
 						session.login_error = format!("Login failed: {err}");
 					});
-					return;
+					return None;
 				}
-				let nonce = generate_login_nonce();
-				self.ctx
-					.state
-					.pending_login_tokens
-					.lock()
-					.unwrap()
-					.insert(nonce.clone(), token);
 				self.update_session(|session| {
 					session.authenticated = true;
 					session.username = username.clone();
+					session.login_username = username;
 					session.login_password.clear();
 					session.login_error.clear();
 				});
-				self.ctx.navigate(format!("/auth/finish?nonce={nonce}"));
+				Some(token)
 			}
 			Ok(false) => {
 				self.update_session(|session| {
+					session.login_username = username;
 					session.login_error = String::from("Invalid credentials");
 				});
+				None
 			}
 			Err(err) => {
 				self.update_session(|session| {
+					session.login_username = username;
 					session.login_error = format!("Login failed: {err}");
 				});
+				None
 			}
 		}
 	}
@@ -3249,6 +3286,11 @@ mod tests {
 	fn collect_text_input_types(item: &wgui::Item, out: &mut Vec<String>) {
 		match &item.payload {
 			ItemPayload::TextInput { input_type, .. } => out.push(input_type.clone()),
+			ItemPayload::Form { body, .. } => {
+				for child in body {
+					collect_text_input_types(child, out);
+				}
+			}
 			ItemPayload::Layout(layout) => {
 				for child in &layout.body {
 					collect_text_input_types(child, out);
@@ -3319,7 +3361,10 @@ mod tests {
 		let source = std::fs::read_to_string(&path).unwrap();
 		let template = Template::parse_with_dir(&source, module_name, path.parent()).unwrap();
 		let state = WuiValue::object(vec![
-			("username".to_string(), WuiValue::String("puppy".to_string())),
+			(
+				"username".to_string(),
+				WuiValue::String("puppy".to_string()),
+			),
 			(
 				"current_password".to_string(),
 				WuiValue::String(String::new()),

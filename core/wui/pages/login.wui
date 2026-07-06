@@ -1,9 +1,9 @@
-<VStack spacing=8 fill=true maxWidth=360>
+<Form action="/auth/login" method="post" spacing=8 fill=true maxWidth=360>
   <Text value="Login" />
-  <TextInput value={state.login_username} placeholder="Username" onTextChanged="EditLoginUsername" fill=true />
-  <TextInput value={state.login_password} placeholder="Password" type="password" onTextChanged="EditLoginPassword" fill=true />
+  <TextInput name="username" value={state.login_username} placeholder="Username" fill=true />
+  <TextInput name="password" value={state.login_password} placeholder="Password" type="password" fill=true />
   <If test={state.login_error != ""}>
     <Text value={state.login_error} color="#b30000" />
   </If>
-  <Button text="Login" onClick="Login" />
-</VStack>
+  <Button text="Login" />
+</Form>
