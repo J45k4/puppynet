@@ -1,24 +1,24 @@
 <Import name="AppLayout" from="../layouts/app" />
 
 <AppLayout>
-  <VStack spacing=10 padding=12 fill=true backgroundColor="#061211" border="1px solid #1f4b44">
+  <VStack spacing=10 padding=14 fill=true backgroundColor="#061211" border="1px solid #1f4b44">
     <Text value="// OVERVIEW" color="#7bdcff" />
     <HStack spacing=8 wrap=true fill=true>
-      <VStack padding=8 border="1px solid #2d6258" backgroundColor="#081716">
+      <VStack padding=10 minWidth=170 border="1px solid #2d6258" backgroundColor="#081716">
         <Text value={state.home_peers} />
       </VStack>
-      <VStack padding=8 border="1px solid #2d6258" backgroundColor="#081716">
+      <VStack padding=10 minWidth=170 border="1px solid #2d6258" backgroundColor="#081716">
         <Text value={state.home_files} />
       </VStack>
-      <VStack padding=8 border="1px solid #2d6258" backgroundColor="#081716">
+      <VStack padding=10 minWidth=170 border="1px solid #2d6258" backgroundColor="#081716">
         <Text value={state.home_storage} />
       </VStack>
-      <VStack padding=8 border="1px solid #2d6258" backgroundColor="#081716">
+      <VStack padding=10 minWidth=170 border="1px solid #2d6258" backgroundColor="#081716">
         <Text value={state.home_users} />
       </VStack>
     </HStack>
   </VStack>
-  <VStack padding=8 backgroundColor="#061211" border="1px solid #1f4b44">
+  <VStack padding=10 backgroundColor="#061211" border="1px solid #1f4b44">
     <Text value={state.status} breakWords=true />
   </VStack>
 </AppLayout>

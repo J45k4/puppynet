@@ -1,35 +1,50 @@
 <Import name="AppLayout" from="../layouts/app" />
 
 <AppLayout>
-  <VStack spacing=6 fill=true>
+  <VStack spacing=10 padding=14 fill=true backgroundColor="#061211" border="1px solid #1f4b44">
     <HStack spacing=6 wrap=true fill=true>
-      <Text value="Discovered peers" grow=1 minWidth=0 />
+      <Text value="// DEVICES" grow=1 minWidth=0 color="#7bdcff" />
       <Button text="Refresh" onClick="RefreshPeers" />
     </HStack>
-    <Text value={state.current_peer} breakWords=true />
-    <VStack spacing=2 padding=8 fill=true backgroundColor="#061211" border="1px solid #1f4b44">
-      <Text value="Grant command" />
-      <Text value={state.grant_command} breakWords=true />
-    </VStack>
     <If test={!state.has_peers}>
       <Text value="No peers discovered yet." />
     </If>
     <Else>
-      <VStack spacing=4 fill=true>
+      <VStack spacing=0 fill=true border="1px solid #2d6258" overflow="auto">
+        <HStack spacing=0 padding=8 fill=true backgroundColor="#020807">
+          <Text value="NODE" minWidth=240 />
+          <Text value="PEER ID" grow=1 minWidth=220 />
+          <Text value="STATUS" minWidth=120 />
+          <Text value="VERSION" minWidth=140 />
+          <Text value="ROLE" minWidth=120 />
+          <Text value="LAST SEEN" minWidth=110 />
+          <Text value="ACTION" minWidth=96 textAlign="right" />
+        </HStack>
         <For each={state.peers} itemAs="peer" indexAs="i">
-          <VStack spacing=4 padding=8 fill=true backgroundColor="#061211" border="1px solid #1f4b44">
-            <HStack spacing=6 wrap=true fill=true>
-              <VStack spacing=2 grow=1 minWidth=0>
-                <Text value={peer.label} breakWords=true />
-                <Text value={peer.short_id} breakWords=true />
-                <Text value={peer.version} breakWords=true />
-              </VStack>
+          <HStack spacing=0 padding=10 fill=true backgroundColor={peer.local ? "#07381f" : "#061211"} border="1px solid #12332d">
+            <VStack spacing=2 minWidth=240>
+              <Text value={peer.label} breakWords=true color="#eafff6" />
+              <Text value={peer.node_kind} breakWords=true />
+            </VStack>
+            <Text value={peer.short_id} grow=1 minWidth=220 breakWords=true />
+            <Text value={peer.status} minWidth=120 color={peer.status_color} />
+            <Text value={peer.version} minWidth=140 breakWords=true />
+            <Text value={peer.role} minWidth=120 />
+            <Text value={peer.last_seen} minWidth=110 />
+            <HStack spacing=0 minWidth=96>
               <Button text="Details" onClick="PeerRow" arg={i} />
             </HStack>
-          </VStack>
+          </HStack>
         </For>
       </VStack>
     </Else>
+    <VStack spacing=2 padding=10 fill=true backgroundColor="#081716" border="1px solid #2d6258">
+      <Text value="Grant command" color="#7bdcff" />
+      <Text value={state.grant_command} breakWords=true />
+    </VStack>
+    <Text value={state.current_peer} breakWords=true />
   </VStack>
-  <Text value={state.status} />
+  <VStack padding=10 backgroundColor="#061211" border="1px solid #1f4b44">
+    <Text value={state.status} breakWords=true />
+  </VStack>
 </AppLayout>

@@ -138,7 +138,13 @@ struct UiPeer {
 	id: String,
 	short_id: String,
 	label: String,
+	node_kind: String,
+	local: bool,
+	status: String,
+	status_color: String,
+	role: String,
 	version: String,
+	last_seen: String,
 }
 
 #[derive(Clone, WguiModel)]
@@ -655,7 +661,33 @@ impl UiControllerCore<'_> {
 				} else {
 					peer.name
 				},
-				version: format!("Version: {}", peer.version),
+				node_kind: if peer.local {
+					String::from("Control node")
+				} else {
+					String::from("Mesh peer")
+				},
+				local: peer.local,
+				status: if peer.local {
+					String::from("LOCAL")
+				} else {
+					String::from("ONLINE")
+				},
+				status_color: if peer.local {
+					String::from("#7bdcff")
+				} else {
+					String::from("#4cff91")
+				},
+				role: if peer.local {
+					String::from("Gateway")
+				} else {
+					String::from("Peer")
+				},
+				version: peer.version,
+				last_seen: if peer.local {
+					String::from("now")
+				} else {
+					String::from("active")
+				},
 			})
 			.collect::<Vec<_>>();
 		let cpus = state

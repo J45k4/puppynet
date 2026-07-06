@@ -9,19 +9,41 @@ body {
 	font-family: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 	font-size: 14px;
 	letter-spacing: 0;
+	line-height: 1.35;
 }
 
 body {
 	background:
-		linear-gradient(rgba(76, 255, 145, 0.025) 1px, transparent 1px),
-		linear-gradient(90deg, rgba(76, 255, 145, 0.018) 1px, transparent 1px),
+		linear-gradient(rgba(76, 255, 145, 0.035) 1px, transparent 1px),
+		linear-gradient(90deg, rgba(76, 255, 145, 0.025) 1px, transparent 1px),
 		#020807;
 	background-size: 24px 24px;
+}
+
+body::before {
+	content: "";
+	inset: 0;
+	pointer-events: none;
+	position: fixed;
+	background: linear-gradient(rgba(255, 255, 255, 0.025) 50%, rgba(0, 0, 0, 0.06) 50%);
+	background-size: 100% 4px;
+	mix-blend-mode: screen;
+	opacity: 0.24;
+	z-index: 1;
+}
+
+body > div {
+	position: relative;
+	z-index: 2;
 }
 
 a {
 	color: #79f2c0;
 	text-decoration: none;
+}
+
+a[style] {
+	color: #79f2c0 !important;
 }
 
 a:hover {
@@ -35,7 +57,7 @@ input,
 select,
 textarea {
 	border: 1px solid #2d6258;
-	background: #020807;
+	background: rgba(2, 8, 7, 0.9);
 	color: #d6eee9;
 	font: inherit;
 	min-height: 30px;
@@ -46,12 +68,18 @@ button {
 	cursor: pointer;
 	padding: 4px 10px;
 	text-transform: uppercase;
+	transition:
+		background-color 120ms ease,
+		border-color 120ms ease,
+		color 120ms ease,
+		box-shadow 120ms ease;
 }
 
 button:hover {
 	background: #0d2f22;
 	border-color: #4cff91;
 	color: #eafff6;
+	box-shadow: 0 0 18px rgba(76, 255, 145, 0.12);
 }
 
 button:disabled,
@@ -94,7 +122,131 @@ table {
 	border-collapse: collapse;
 }
 
+* {
+	scrollbar-color: #2d6258 #020807;
+	scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+	width: 10px;
+	height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+	background: #020807;
+}
+
+*::-webkit-scrollbar-thumb {
+	background: #1f4b44;
+	border: 1px solid #2d6258;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+	background: #2d6258;
+}
+
+div[style*="border:1px solid #1f4b44"],
+div[style*="border: 1px solid #1f4b44"],
+form[style*="border:1px solid #1f4b44"],
+form[style*="border: 1px solid #1f4b44"] {
+	box-shadow:
+		inset 0 0 0 1px rgba(123, 220, 255, 0.035),
+		0 10px 32px rgba(0, 0, 0, 0.24);
+}
+
+div[style*="border:1px solid #2d6258"],
+div[style*="border: 1px solid #2d6258"],
+form[style*="border:1px solid #2d6258"],
+form[style*="border: 1px solid #2d6258"] {
+	background-image: linear-gradient(180deg, rgba(123, 220, 255, 0.035), transparent 46px);
+	box-shadow:
+		inset 0 0 0 1px rgba(76, 255, 145, 0.035),
+		0 6px 22px rgba(0, 0, 0, 0.18);
+}
+
+div[style*="border:1px solid #12332d"],
+div[style*="border: 1px solid #12332d"] {
+	border-left-color: rgba(76, 255, 145, 0.28) !important;
+	transition:
+		background-color 120ms ease,
+		border-color 120ms ease;
+}
+
+div[style*="border:1px solid #12332d"]:hover,
+div[style*="border: 1px solid #12332d"]:hover {
+	background-color: #092019 !important;
+	border-color: #2d6258 !important;
+}
+
+div[style*="background-color:#020807"] > span,
+div[style*="background-color: #020807"] > span {
+	color: #9fbdb6;
+	font-size: 12px;
+	text-transform: uppercase;
+}
+
+div[style*="background-color:#030b0a"],
+div[style*="background-color: #030b0a"] {
+	align-items: stretch;
+	background-image: linear-gradient(90deg, rgba(76, 255, 145, 0.08), transparent 26rem);
+}
+
+div[style*="background-color:#07381f"],
+div[style*="background-color: #07381f"] {
+	box-shadow:
+		inset 3px 0 0 #4cff91,
+		0 0 18px rgba(76, 255, 145, 0.12);
+}
+
+div[style*="background-color:#04100f"],
+div[style*="background-color: #04100f"] {
+	transition:
+		background-color 120ms ease,
+		border-color 120ms ease;
+}
+
+div[style*="background-color:#04100f"]:hover,
+div[style*="background-color: #04100f"]:hover {
+	background-color: #082019 !important;
+	border-color: #2d6258 !important;
+}
+
+div[style*="background-color:#081716"],
+div[style*="background-color: #081716"] {
+	min-height: 44px;
+}
+
+form[action="/auth/login"] {
+	margin: clamp(48px, 10vh, 96px) auto 0;
+	max-width: min(420px, 100%) !important;
+	width: 100% !important;
+	box-shadow:
+		0 0 0 1px rgba(76, 255, 145, 0.12),
+		0 20px 56px rgba(0, 0, 0, 0.36) !important;
+}
+
+span {
+	max-width: 100%;
+}
+
 ::selection {
 	background: rgba(76, 255, 145, 0.28);
 	color: #f2fff8;
+}
+
+@media (max-width: 720px) {
+	body {
+		font-size: 13px;
+	}
+
+	body > div {
+		padding: 8px !important;
+	}
+
+	button,
+	input,
+	select,
+	textarea {
+		min-height: 34px;
+	}
 }
