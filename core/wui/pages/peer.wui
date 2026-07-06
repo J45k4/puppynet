@@ -1,7 +1,7 @@
 <Import name="AppLayout" from="../layouts/app" />
 
 <AppLayout>
-  <VStack spacing=6 fill=true>
+  <VStack spacing=6 fill=true color="#d6eee9">
     <Text value={state.selected_peer} breakWords=true />
     <HStack spacing=6 wrap=true fill=true>
       <VStack padding=6 backgroundColor="#061211" border="1px solid #1f4b44">
@@ -34,12 +34,12 @@
     </Else>
     <Text value="Audio mixer" />
     <HStack spacing=6 wrap=true fill=true>
-      <Button text="Refresh audio" onClick="RefreshAudio" />
+      <Button text="Refresh audio" onClick="RefreshAudio" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
       <Text value={state.audio_status} grow=1 minWidth=0 breakWords=true />
     </HStack>
     <Text value={state.audio_capability_status} breakWords=true />
     <If test={!state.audio_supported}>
-      <Text value="Audio control is not supported on this peer." />
+      <Text value="Audio control is not supported on this device." />
     </If>
     <Else>
       <If test={!state.has_audio_devices}>
@@ -49,14 +49,14 @@
         <If test={state.has_audio_output_options}>
           <HStack spacing=6 wrap=true fill=true>
             <Text value="Output" />
-            <Select value={state.selected_audio_device} options={state.audio_output_options} onSelect="SelectAudioDevice" grow=1 minWidth=0 />
+            <Select value={state.selected_audio_device} options={state.audio_output_options} onSelect="SelectAudioDevice" grow=1 minWidth=0 color="#d6eee9" backgroundColor="#020807" border="1px solid #2d6258" />
           </HStack>
         </If>
         <HStack spacing=6 wrap=true fill=true>
           <Text value="Volume" />
           <Slider min=0 max=100 value={state.audio_volume} step=1 onSliderChange="SetAudioVolume" />
           <Text value={state.audio_volume_text} />
-          <Button text={state.audio_mute_label} onClick="ToggleAudioMute" />
+          <Button text={state.audio_mute_label} onClick="ToggleAudioMute" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
         </HStack>
         <For each={state.audio_devices} itemAs="device">
           <Text value={device.line} breakWords=true />
@@ -65,12 +65,12 @@
     </Else>
     <Text value="Remote shell" />
     <HStack spacing=6 wrap=true fill=true>
-      <Button text="Start shell" onClick="StartShell" />
+      <Button text="Start shell" onClick="StartShell" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
       <Text value={state.shell_status} grow=1 minWidth=0 breakWords=true />
     </HStack>
     <HStack spacing=6 wrap=true fill=true>
-      <TextInput value={state.shell_input} placeholder="Shell command (include newline)" onTextChanged="EditShellInput" grow=1 minWidth=0 />
-      <Button text="Send" onClick="SendShellInput" />
+      <TextInput value={state.shell_input} placeholder="Shell command (include newline)" onTextChanged="EditShellInput" grow=1 minWidth=0 color="#d6eee9" backgroundColor="#020807" border="1px solid #2d6258" />
+      <Button text="Send" onClick="SendShellInput" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
     </HStack>
     <If test={!state.shell_has_session}>
       <Text value="No shell session started yet." />
@@ -78,10 +78,10 @@
     <Else>
       <Text value={state.shell_output} breakWords=true />
     </Else>
-    <Text value="Peer updates" />
+    <Text value="Device updates" />
     <HStack spacing=6 wrap=true fill=true>
-      <TextInput value={state.update_version} placeholder="Optional version tag" onTextChanged="EditUpdateVersion" grow=1 minWidth=0 />
-      <Button text="Start update" onClick="StartPeerUpdate" />
+      <TextInput value={state.update_version} placeholder="Optional version tag" onTextChanged="EditUpdateVersion" grow=1 minWidth=0 color="#d6eee9" backgroundColor="#020807" border="1px solid #2d6258" />
+      <Button text="Start update" onClick="StartPeerUpdate" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
     </HStack>
     <Text value={state.update_status} breakWords=true />
     <If test={!state.has_update_events}>
@@ -92,7 +92,7 @@
         <Text value={event} breakWords=true />
       </For>
     </Else>
-    <Button text="Back" onClick="PeerBack" />
+    <Button text="Back" onClick="PeerBack" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
   </VStack>
   <Text value={state.status} breakWords=true />
 </AppLayout>

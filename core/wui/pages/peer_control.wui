@@ -3,14 +3,14 @@
 <Import name="Trackpad" from="../partials/trackpad" />
 
 <AppLayout>
-  <VStack spacing=8 fill=true>
+  <VStack spacing=8 fill=true color="#d6eee9">
     <HStack spacing=6 wrap=true fill=true>
       <VStack spacing=2 grow=1 minWidth=0>
         <Text value="Mouse and keyboard" />
         <Text value={state.selected_peer} breakWords=true />
       </VStack>
       <VStack padding=6 backgroundColor="#061211" border="1px solid #1f4b44">
-        <Link text="Peer details" href={state.selected_peer_details_href} />
+        <Link text="Device details" href={state.selected_peer_details_href} />
       </VStack>
     </HStack>
     <HStack spacing=6 wrap=true fill=true>
@@ -22,25 +22,25 @@
       <Text value="Screen stream is disabled." />
     </If>
     <If test={state.monitor_stream_enabled && !state.monitor_has_stream}>
-      <Text value="Monitor stream is not available on this peer." />
+      <Text value="Monitor stream is not available on this device." />
     </If>
     <If test={state.monitor_stream_enabled && state.monitor_has_stream}>
       <MonitorStream props={state.monitor_stream_props} />
     </If>
     <Trackpad props={state.trackpad_props} onMouseMoved="MovePeerMouse" onMouseClicked="ClickPeerMouse" onMousePressed="PressPeerMouse" onMouseReleased="ReleasePeerMouse" onScrolled="ScrollPeerMouse" />
     <HStack spacing=6 wrap=true fill=true>
-      <TextInput value={state.control_text} placeholder="Text to type on peer" onTextChanged="EditControlText" grow=1 minWidth=0 />
-      <Button text="Type" onClick="SendControlText" />
+      <TextInput value={state.control_text} placeholder="Text to type on device" onTextChanged="EditControlText" grow=1 minWidth=0 color="#d6eee9" backgroundColor="#020807" border="1px solid #2d6258" />
+      <Button text="Type" onClick="SendControlText" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
     </HStack>
     <HStack spacing=6 wrap=true fill=true>
-      <Button text="Enter" onClick="SendControlKey" arg=0 />
-      <Button text="Tab" onClick="SendControlKey" arg=1 />
-      <Button text="Backspace" onClick="SendControlKey" arg=2 />
-      <Button text="Escape" onClick="SendControlKey" arg=3 />
-      <Button text="Up" onClick="SendControlKey" arg=4 />
-      <Button text="Down" onClick="SendControlKey" arg=5 />
-      <Button text="Left" onClick="SendControlKey" arg=6 />
-      <Button text="Right" onClick="SendControlKey" arg=7 />
+      <Button text="Enter" onClick="SendControlKey" arg=0 color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
+      <Button text="Tab" onClick="SendControlKey" arg=1 color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
+      <Button text="Backspace" onClick="SendControlKey" arg=2 color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
+      <Button text="Escape" onClick="SendControlKey" arg=3 color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
+      <Button text="Up" onClick="SendControlKey" arg=4 color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
+      <Button text="Down" onClick="SendControlKey" arg=5 color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
+      <Button text="Left" onClick="SendControlKey" arg=6 color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
+      <Button text="Right" onClick="SendControlKey" arg=7 color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
     </HStack>
     <Text value={state.control_status} breakWords=true />
   </VStack>

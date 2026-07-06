@@ -440,7 +440,7 @@ fn audio_device_line(device: &AudioDevice) -> String {
 	let muted = if device.muted { "muted" } else { "unmuted" };
 	let default = if device.is_default { "default " } else { "" };
 	format!(
-		"{} — {}{} | {}% | {}",
+		"{} - {}{} | {}% | {}",
 		device.name,
 		default,
 		audio_device_kind_label(&device.kind),
@@ -521,35 +521,35 @@ fn child_peer_file_path(path: &str, name: &str) -> String {
 
 fn peer_files_href(peer_id: &str, path: &str) -> String {
 	if peer_id.is_empty() {
-		return String::from("/peers");
+		return String::from("/devices");
 	}
 	let query = url::form_urlencoded::Serializer::new(String::new())
 		.append_pair("path", path)
 		.finish();
-	format!("/peers/{peer_id}/files?{query}")
+	format!("/devices/{peer_id}/files?{query}")
 }
 
 fn peer_details_href(peer_id: &str) -> String {
 	if peer_id.is_empty() {
-		String::from("/peers")
+		String::from("/devices")
 	} else {
-		format!("/peers/{peer_id}")
+		format!("/devices/{peer_id}")
 	}
 }
 
 fn peer_control_href(peer_id: &str) -> String {
 	if peer_id.is_empty() {
-		String::from("/peers")
+		String::from("/devices")
 	} else {
-		format!("/peers/{peer_id}/control")
+		format!("/devices/{peer_id}/control")
 	}
 }
 
 fn peer_webcams_href(peer_id: &str) -> String {
 	if peer_id.is_empty() {
-		String::from("/peers")
+		String::from("/devices")
 	} else {
-		format!("/peers/{peer_id}/webcams")
+		format!("/devices/{peer_id}/webcams")
 	}
 }
 
@@ -664,7 +664,7 @@ impl UiControllerCore<'_> {
 				node_kind: if peer.local {
 					String::from("Control node")
 				} else {
-					String::from("Mesh peer")
+					String::from("Mesh device")
 				},
 				local: peer.local,
 				status: if peer.local {
@@ -680,7 +680,7 @@ impl UiControllerCore<'_> {
 				role: if peer.local {
 					String::from("Gateway")
 				} else {
-					String::from("Peer")
+					String::from("Device")
 				},
 				version: peer.version,
 				last_seen: if peer.local {
@@ -694,14 +694,14 @@ impl UiControllerCore<'_> {
 			.peer_cpus
 			.into_iter()
 			.map(|cpu| UiCpu {
-				line: format!("{} — {:.1}% | {} Hz", cpu.name, cpu.usage, cpu.frequency_hz),
+				line: format!("{} - {:.1}% | {} Hz", cpu.name, cpu.usage, cpu.frequency_hz),
 			})
 			.collect::<Vec<_>>();
 		let interfaces = state
 			.peer_interfaces
 			.into_iter()
 			.map(|iface| UiInterface {
-				line: format!("{} — {} | {}", iface.name, iface.mac, iface.ips.join(", ")),
+				line: format!("{} - {} | {}", iface.name, iface.mac, iface.ips.join(", ")),
 			})
 			.collect::<Vec<_>>();
 		let audio_volume = default_audio_output(&state.peer_audio_devices)
@@ -773,7 +773,7 @@ impl UiControllerCore<'_> {
 			.take(20)
 			.map(|entry| UiFileRow {
 				hash: format_hash(&entry.hash),
-				line: format!("{} — {} bytes", format_hash(&entry.hash), entry.size),
+				line: format!("{} - {} bytes", format_hash(&entry.hash), entry.size),
 			})
 			.collect::<Vec<_>>();
 		let peer_files = state
@@ -832,7 +832,7 @@ impl UiControllerCore<'_> {
 			.take(10)
 			.map(|entry| UiStorageRow {
 				line: format!(
-					"{} — {} | {}",
+					"{} - {} | {}",
 					entry.node_name,
 					entry.path,
 					format_size(entry.size),
@@ -924,13 +924,13 @@ impl UiControllerCore<'_> {
 			update_events: session.update_events.clone(),
 			has_update_events: !session.update_events.is_empty(),
 			update_in_progress: session.update_in_progress,
-			home_peers: format!("Peers: {}", peers.len()),
+			home_peers: format!("Devices: {}", peers.len()),
 			home_files: format!("Files captured: {}", files.len()),
 			home_storage: format!("Storage entries: {}", storage_rows.len()),
 			home_users: format!("Users: {}", users.len()),
 			current_peer: match state.local_peer_id.clone() {
-				Some(peer_id) => format!("Current peer: {peer_id}"),
-				None => String::from("Current peer: unavailable"),
+				Some(peer_id) => format!("Current device: {peer_id}"),
+				None => String::from("Current device: unavailable"),
 			},
 			grant_command: match state.local_peer_id.clone() {
 				Some(peer_id) => format!("puppynet grant {peer_id} --all"),
@@ -1286,7 +1286,7 @@ impl UiControllerCore<'_> {
 				.handle_action(UiAction::PeerRow(idx as usize)),
 		);
 		if let Some(peer_id) = peer_id {
-			self.ctx.push_state(format!("/peers/{peer_id}"));
+			self.ctx.push_state(format!("/devices/{peer_id}"));
 		}
 	}
 
@@ -1296,7 +1296,7 @@ impl UiControllerCore<'_> {
 			return;
 		}
 		self.block_on(self.ctx.state.server.handle_action(UiAction::PeerBack));
-		self.ctx.push_state("/peers");
+		self.ctx.push_state("/devices");
 	}
 
 	pub fn refresh_peer_files(&self) {
@@ -2196,7 +2196,7 @@ impl UiControllerCore<'_> {
 			.ctx
 			.route()
 			.map(|route| route.path)
-			.unwrap_or_else(|| String::from("/peers"));
+			.unwrap_or_else(|| String::from("/devices"));
 		let ctx = Arc::clone(self.ctx);
 		std::thread::spawn(move || {
 			loop {
@@ -2561,7 +2561,7 @@ impl UiServer {
 					let version = self.peer_version(&local_id).await;
 					peers.push(PeerRow {
 						id: local_id.clone(),
-						name: String::from("Current peer"),
+						name: String::from("Current device"),
 						local: true,
 						version,
 					});
@@ -2569,7 +2569,7 @@ impl UiServer {
 				let mut state = self.state.lock().await;
 				state.peers = peers;
 				state.local_peer_id = Some(local_id);
-				state.status = format!("Loaded {} peer(s)", state.peers.len());
+				state.status = format!("Loaded {} device(s)", state.peers.len());
 			}
 			None => {
 				let mut state = self.state.lock().await;
@@ -3279,6 +3279,11 @@ pub async fn run_ui(puppy: Arc<PuppyNet>, bind: SocketAddr) -> Result<()> {
 	wgui.set_ctx(ctx);
 	wgui.add_page::<HomeController>("/");
 	wgui.add_page::<LoginController>("/login");
+	wgui.add_page::<PeersController>("/devices");
+	wgui.add_page::<PeerControlController>("/devices/:peer_id/control");
+	wgui.add_page::<PeerFilesController>("/devices/:peer_id/files");
+	wgui.add_page::<PeerWebcamsController>("/devices/:peer_id/webcams");
+	wgui.add_page::<PeerController>("/devices/:peer_id");
 	wgui.add_page::<PeersController>("/peers");
 	wgui.add_page::<PeerControlController>("/peers/:peer_id/control");
 	wgui.add_page::<PeerFilesController>("/peers/:peer_id/files");

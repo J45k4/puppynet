@@ -20,7 +20,7 @@ impl PeersController {
 	}
 
 	pub fn title(&self) -> String {
-		String::from("Peers - PuppyNet UI")
+		String::from("Devices - PuppyNet UI")
 	}
 
 	pub fn logout(&mut self) {

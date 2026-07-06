@@ -43,7 +43,7 @@ impl PeerFilesController {
 	}
 
 	pub fn title(&self) -> String {
-		String::from("Peer Files - PuppyNet UI")
+		String::from("Device Files - PuppyNet UI")
 	}
 
 	pub fn logout(&mut self) {

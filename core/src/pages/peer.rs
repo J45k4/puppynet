@@ -24,7 +24,7 @@ impl PeerController {
 	}
 
 	pub fn title(&self) -> String {
-		String::from("Peer - PuppyNet UI")
+		String::from("Device - PuppyNet UI")
 	}
 
 	pub fn logout(&mut self) {

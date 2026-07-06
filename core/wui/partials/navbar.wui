@@ -5,7 +5,7 @@
     <Text value="PUPPYNET" color="#eafff6" />
     <HStack spacing=6 wrap=true grow=1 minWidth=0>
       <NavLink text="Home" href="/" />
-      <NavLink text="Peers" href="/peers" activeWhen="/peers/*" />
+      <NavLink text="Devices" href="/devices" activeWhen="/devices/*" />
       <NavLink text="Files" href="/files" />
       <NavLink text="Search" href="/search" />
       <NavLink text="Storage" href="/storage" />

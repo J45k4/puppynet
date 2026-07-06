@@ -7,13 +7,13 @@
       <Button text="Refresh" onClick="RefreshPeers" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
     </HStack>
     <If test={!state.has_peers}>
-      <Text value="No peers discovered yet." />
+      <Text value="No devices discovered yet." />
     </If>
     <Else>
       <VStack spacing=0 fill=true border="1px solid #2d6258" overflow="auto" color="#d6eee9">
         <HStack spacing=0 padding=8 fill=true backgroundColor="#020807" color="#9fbdb6">
           <Text value="NODE" minWidth=240 />
-          <Text value="PEER ID" grow=1 minWidth=220 />
+          <Text value="DEVICE ID" grow=1 minWidth=220 />
           <Text value="STATUS" minWidth=120 />
           <Text value="VERSION" minWidth=140 />
           <Text value="ROLE" minWidth=120 />

@@ -24,7 +24,7 @@ impl PeerWebcamsController {
 	}
 
 	pub fn title(&self) -> String {
-		String::from("Peer Webcams - PuppyNet UI")
+		String::from("Device Webcams - PuppyNet UI")
 	}
 
 	pub fn logout(&mut self) {

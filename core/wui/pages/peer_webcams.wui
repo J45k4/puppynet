@@ -1,27 +1,27 @@
 <Import name="AppLayout" from="../layouts/app" />
 
 <AppLayout>
-  <VStack spacing=8 fill=true>
+  <VStack spacing=8 fill=true color="#d6eee9">
     <HStack spacing=6 wrap=true fill=true>
       <VStack spacing=2 grow=1 minWidth=0>
-        <Text value="Peer webcams" />
+        <Text value="Device webcams" />
         <Text value={state.selected_peer} breakWords=true />
       </VStack>
-      <Button text="Refresh" onClick="RefreshWebcams" />
+      <Button text="Refresh" onClick="RefreshWebcams" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
     </HStack>
     <HStack spacing=6 wrap=true fill=true>
       <VStack padding=6 backgroundColor="#061211" border="1px solid #1f4b44">
-        <Link text="Peer details" href={state.selected_peer_details_href} />
+        <Link text="Device details" href={state.selected_peer_details_href} />
       </VStack>
     </HStack>
     <Text value={state.webcam_status} breakWords=true />
     <Text value={state.webcam_capability_status} breakWords=true />
     <If test={!state.webcam_supported}>
-      <Text value="Webcam viewing is not supported on this peer." />
+      <Text value="Webcam viewing is not supported on this device." />
     </If>
     <Else>
       <If test={!state.has_webcam_devices}>
-        <Text value="No webcams found on this peer." />
+        <Text value="No webcams found on this device." />
       </If>
       <Else>
         <VStack spacing=6 fill=true>
@@ -35,7 +35,7 @@
                 <Text value="Viewing" />
               </If>
               <Else>
-                <Button text="View" onClick="ViewWebcam" arg={i} />
+                <Button text="View" onClick="ViewWebcam" arg={i} color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
               </Else>
             </HStack>
           </For>
