@@ -1,7 +1,7 @@
 <Modal open={state.file_preview_modal_open} onClick="CloseFilePreviewModal">
-  <VStack spacing=6 padding=10 fill=true maxWidth=900 maxHeight=520 overflow="scroll" backgroundColor="#ffffff" border="1px solid #d9d9d9">
+  <VStack spacing=6 padding=10 fill=true maxWidth=900 maxHeight=520 overflow="scroll" backgroundColor="#061211" border="1px solid #1f4b44">
     <HStack spacing=6 wrap=true fill=true>
-      <Text value="File preview" grow=1 minWidth=0 />
+      <Text value="// FILE PREVIEW" grow=1 minWidth=0 color="#7bdcff" />
       <Button text="Close" onClick="CloseFilePreviewModal" />
     </HStack>
     <HStack spacing=6 wrap=true fill=true>

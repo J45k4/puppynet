@@ -1,6 +1,6 @@
 <Import name="Navbar" from="../partials/navbar" />
 
-<VStack spacing=12 fill=true backgroundColor="#f3f6f9">
+<VStack spacing=10 fill=true backgroundColor="#020807">
   <Navbar />
   <Children />
 </VStack>

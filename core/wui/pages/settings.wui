@@ -2,11 +2,11 @@
 
 <AppLayout>
   <VStack spacing=6 fill=true>
-    <Text value="Settings" />
-    <Text value={state.username} breakWords=true />
+    <Text value="// SETTINGS" color="#7bdcff" />
+    <Text value={state.username} breakWords=true color="#79f2c0" />
     <HStack spacing=0 fill=true>
-      <Form action="/settings/password" method="post" spacing=6 padding=10 width=480 maxWidth=480 border="1px solid #cbd5e1" backgroundColor="#ffffff">
-        <Text value="Change password" />
+      <Form action="/settings/password" method="post" spacing=6 padding=10 width=480 maxWidth=480 border="1px solid #1f4b44" backgroundColor="#061211">
+        <Text value="CHANGE PASSWORD" color="#eafff6" />
         <TextInput name="current_password" value={state.current_password} placeholder="Current password" type="password" fill=true />
         <TextInput name="new_password" value={state.new_password} placeholder="New password" type="password" fill=true />
         <TextInput name="confirm_password" value={state.confirm_password} placeholder="Confirm new password" type="password" fill=true />

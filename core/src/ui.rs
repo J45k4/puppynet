@@ -3230,6 +3230,7 @@ pub async fn run_ui(puppy: Arc<PuppyNet>, bind: SocketAddr) -> Result<()> {
 	verify_ui_addr_available(bind).await?;
 	log::info!("starting PuppyNet UI on {}", bind);
 	let mut wgui = Wgui::new(bind);
+	wgui.set_css(include_str!("ui_style.css"));
 	let server_state = Arc::new(UiServer::new(puppy));
 	server_state.refresh_all().await;
 

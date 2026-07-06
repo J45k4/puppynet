@@ -11,11 +11,11 @@
       <Button text="Refresh" onClick="RefreshPeerFiles" />
     </HStack>
     <HStack spacing=6 wrap=true fill=true>
-      <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
+      <VStack padding=6 backgroundColor="#061211" border="1px solid #1f4b44">
         <Link text="Peer details" href={state.selected_peer_details_href} />
       </VStack>
       <If test={state.peer_files_has_parent}>
-        <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
+        <VStack padding=6 backgroundColor="#061211" border="1px solid #1f4b44">
           <Link text="Up" href={state.peer_files_parent_href} />
         </VStack>
       </If>
@@ -24,13 +24,13 @@
       <Text value="No files found for this directory." />
     </If>
     <Else>
-      <VStack spacing=0 fill=true border="1px solid #cbd5e1">
-        <HStack spacing=8 padding=6 fill=true backgroundColor="#f1f5f9">
+      <VStack spacing=0 fill=true border="1px solid #1f4b44">
+        <HStack spacing=8 padding=6 fill=true backgroundColor="#0b201c">
           <Text value="Name" grow=1 minWidth=0 />
           <Text value="Action" minWidth=76 />
         </HStack>
         <For each={state.peer_files} itemAs="entry" indexAs="i">
-          <VStack spacing=4 padding=6 fill=true border="1px solid #e2e8f0">
+          <VStack spacing=4 padding=6 fill=true border="1px solid #2d6258">
             <HStack spacing=8 fill=true>
               <VStack grow=1 minWidth=0>
                 <If test={entry.is_dir}>

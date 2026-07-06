@@ -9,7 +9,7 @@
         <Text value="Mouse and keyboard" />
         <Text value={state.selected_peer} breakWords=true />
       </VStack>
-      <VStack padding=6 backgroundColor="#ffffff" border="1px solid #cbd5e1">
+      <VStack padding=6 backgroundColor="#061211" border="1px solid #1f4b44">
         <Link text="Peer details" href={state.selected_peer_details_href} />
       </VStack>
     </HStack>

@@ -1,9 +1,11 @@
-<Form action="/auth/login" method="post" spacing=8 fill=true maxWidth=360>
-  <Text value="Login" />
-  <TextInput name="username" value={state.login_username} placeholder="Username" fill=true />
-  <TextInput name="password" value={state.login_password} placeholder="Password" type="password" fill=true />
-  <If test={state.login_error != ""}>
-    <Text value={state.login_error} color="#b30000" />
-  </If>
-  <Button text="Login" />
-</Form>
+<VStack fill=true padding=24 backgroundColor="#020807">
+  <Form action="/auth/login" method="post" spacing=8 fill=true maxWidth=380 padding=18 backgroundColor="#061211" border="1px solid #1f4b44">
+    <Text value="PUPPYNET ACCESS" color="#7bdcff" />
+    <TextInput name="username" value={state.login_username} placeholder="Username" fill=true />
+    <TextInput name="password" value={state.login_password} placeholder="Password" type="password" fill=true />
+    <If test={state.login_error != ""}>
+      <Text value={state.login_error} color="#ff5f66" />
+    </If>
+    <Button text="Login" />
+  </Form>
+</VStack>

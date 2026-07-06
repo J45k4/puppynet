@@ -7,7 +7,7 @@
       <Button text="Refresh" onClick="RefreshPeers" />
     </HStack>
     <Text value={state.current_peer} breakWords=true />
-    <VStack spacing=2 padding=8 fill=true backgroundColor="#ffffff" border="1px solid #cbd5e1">
+    <VStack spacing=2 padding=8 fill=true backgroundColor="#061211" border="1px solid #1f4b44">
       <Text value="Grant command" />
       <Text value={state.grant_command} breakWords=true />
     </VStack>
@@ -17,7 +17,7 @@
     <Else>
       <VStack spacing=4 fill=true>
         <For each={state.peers} itemAs="peer" indexAs="i">
-          <VStack spacing=4 padding=8 fill=true backgroundColor="#ffffff" border="1px solid #cbd5e1">
+          <VStack spacing=4 padding=8 fill=true backgroundColor="#061211" border="1px solid #1f4b44">
             <HStack spacing=6 wrap=true fill=true>
               <VStack spacing=2 grow=1 minWidth=0>
                 <Text value={peer.label} breakWords=true />

@@ -1,8 +1,8 @@
 <Import name="NavLink" from="nav_link" />
 
-<VStack spacing=10 fill=true padding=12 backgroundColor="#f7f9fc" border="1px solid #d8e0ea">
+<VStack spacing=10 fill=true padding=10 backgroundColor="#030b0a" border="1px solid #1f4b44">
   <HStack spacing=10 wrap=true fill=true>
-    <Text value="PuppyNet" />
+    <Text value="PUPPYNET" color="#eafff6" />
     <HStack spacing=6 wrap=true grow=1 minWidth=0>
       <NavLink text="Home" href="/" />
       <NavLink text="Peers" href="/peers" activeWhen="/peers/*" />
@@ -13,7 +13,7 @@
       <NavLink text="Updates" href="/updates" />
       <NavLink text="Settings" href="/settings" />
     </HStack>
-    <Text value={state.username} breakWords=true />
+    <Text value={state.username} breakWords=true color="#79f2c0" />
     <Button text="Logout" onClick="Logout" />
   </HStack>
 </VStack>

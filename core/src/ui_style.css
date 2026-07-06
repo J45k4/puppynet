@@ -1,0 +1,100 @@
+* {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	background: #020807;
+	color: #d6eee9;
+	font-family: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+	font-size: 14px;
+	letter-spacing: 0;
+}
+
+body {
+	background:
+		linear-gradient(rgba(76, 255, 145, 0.025) 1px, transparent 1px),
+		linear-gradient(90deg, rgba(76, 255, 145, 0.018) 1px, transparent 1px),
+		#020807;
+	background-size: 24px 24px;
+}
+
+a {
+	color: #79f2c0;
+	text-decoration: none;
+}
+
+a:hover {
+	color: #b6ffe0;
+	text-decoration: underline;
+	text-underline-offset: 3px;
+}
+
+button,
+input,
+select,
+textarea {
+	border: 1px solid #2d6258;
+	background: #020807;
+	color: #d6eee9;
+	font: inherit;
+	min-height: 30px;
+}
+
+button {
+	color: #79f2c0;
+	cursor: pointer;
+	padding: 4px 10px;
+	text-transform: uppercase;
+}
+
+button:hover {
+	background: #0d2f22;
+	border-color: #4cff91;
+	color: #eafff6;
+}
+
+button:disabled,
+input:disabled,
+select:disabled,
+textarea:disabled {
+	cursor: not-allowed;
+	opacity: 0.45;
+}
+
+input,
+select,
+textarea {
+	padding: 4px 8px;
+}
+
+input::placeholder,
+textarea::placeholder {
+	color: #5f8179;
+}
+
+input:focus,
+select:focus,
+textarea:focus,
+button:focus {
+	border-color: #7bdcff;
+	box-shadow: 0 0 0 1px rgba(123, 220, 255, 0.35);
+	outline: none;
+}
+
+input[type="range"] {
+	accent-color: #4cff91;
+}
+
+input[type="checkbox"] {
+	accent-color: #4cff91;
+}
+
+table {
+	border-collapse: collapse;
+}
+
+::selection {
+	background: rgba(76, 255, 145, 0.28);
+	color: #f2fff8;
+}
