@@ -2,6 +2,7 @@
   padding=6
   backgroundColor={path_matches(activeWhen ?? href) ? "#07381f" : "#04100f"}
   border={path_matches(activeWhen ?? href) ? "1px solid #4cff91" : "1px solid #1f4b44"}
+  color={path_matches(activeWhen ?? href) ? "#eafff6" : "#79f2c0"}
 >
   <Link text={text} href={href} />
 </VStack>

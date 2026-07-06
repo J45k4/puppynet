@@ -1,23 +1,23 @@
 <Import name="AppLayout" from="../layouts/app" />
 
 <AppLayout>
-  <VStack spacing=10 padding=14 fill=true backgroundColor="#061211" border="1px solid #1f4b44">
+  <VStack spacing=10 padding=14 fill=true backgroundColor="#061211" border="1px solid #1f4b44" color="#d6eee9">
     <Text value="// SETTINGS" color="#7bdcff" />
     <Text value={state.username} breakWords=true color="#79f2c0" />
     <HStack spacing=0 fill=true>
-      <Form action="/settings/password" method="post" spacing=8 padding=14 width=480 maxWidth=480 border="1px solid #2d6258" backgroundColor="#081716">
+      <Form action="/settings/password" method="post" spacing=8 padding=14 width=480 maxWidth=480 border="1px solid #2d6258" backgroundColor="#081716" color="#d6eee9">
         <Text value="CHANGE PASSWORD" color="#eafff6" />
         <TextInput name="current_password" value={state.current_password} placeholder="Current password" type="password" fill=true />
         <TextInput name="new_password" value={state.new_password} placeholder="New password" type="password" fill=true />
         <TextInput name="confirm_password" value={state.confirm_password} placeholder="Confirm new password" type="password" fill=true />
         <HStack spacing=6 wrap=true fill=true>
-          <Button text="Change password" />
+          <Button text="Change password" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
           <Text value={state.password_change_status} grow=1 minWidth=0 breakWords=true />
         </HStack>
       </Form>
     </HStack>
   </VStack>
-  <VStack padding=10 backgroundColor="#061211" border="1px solid #1f4b44">
+  <VStack padding=10 backgroundColor="#061211" border="1px solid #1f4b44" color="#d6eee9">
     <Text value={state.status} breakWords=true />
   </VStack>
 </AppLayout>
