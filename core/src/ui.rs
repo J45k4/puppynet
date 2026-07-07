@@ -146,7 +146,6 @@ struct UiPeer {
 	status_color: String,
 	os: String,
 	uptime: String,
-	role: String,
 	version: String,
 	last_seen: String,
 }
@@ -701,11 +700,6 @@ impl UiControllerCore<'_> {
 				},
 				os: peer.os,
 				uptime: peer.uptime,
-				role: if peer.local {
-					String::from("Gateway")
-				} else {
-					String::from("Device")
-				},
 				version: peer.version,
 				last_seen: if peer.local {
 					String::from("now")

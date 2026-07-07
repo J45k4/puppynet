@@ -18,7 +18,6 @@
           <Text value="OS" minWidth=120 />
           <Text value="VERSION" minWidth=78 />
           <Text value="UPTIME" minWidth=84 />
-          <Text value="ROLE" minWidth=78 />
           <Text value="LAST SEEN" minWidth=82 />
           <Text value="ACTION" minWidth=76 textAlign="right" />
         </HStack>
@@ -33,7 +32,6 @@
             <Text value={peer.os} minWidth=120 breakWords=true />
             <Text value={peer.version} minWidth=78 breakWords=true />
             <Text value={peer.uptime} minWidth=84 breakWords=true />
-            <Text value={peer.role} minWidth=78 />
             <Text value={peer.last_seen} minWidth=82 />
             <HStack spacing=0 minWidth=76>
               <Button text="Details" onClick="PeerRow" arg={i} color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
