@@ -932,9 +932,18 @@ impl App {
 		(app, tx)
 	}
 
+	fn local_os_label() -> String {
+		let name = System::name().unwrap_or_else(|| std::env::consts::OS.to_string());
+		match System::os_version() {
+			Some(version) if !version.trim().is_empty() => format!("{name} {version}"),
+			_ => name,
+		}
+	}
+
 	fn local_peer_info() -> PeerInfo {
 		PeerInfo {
 			version: version::version_label(),
+			os: Self::local_os_label(),
 		}
 	}
 

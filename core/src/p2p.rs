@@ -226,6 +226,8 @@ pub enum PeerRes {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
 	pub version: String,
+	#[serde(default)]
+	pub os: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

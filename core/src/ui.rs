@@ -2,7 +2,7 @@ use crate::auth;
 use crate::db::FileEntry;
 use crate::p2p::{
 	AudioCapability, AudioDevice, AudioDeviceKind, CpuInfo, DesktopInput, DirEntry, InterfaceInfo,
-	MediaCapability, MediaFrame, MediaSource, MediaSourceKind, MouseButton,
+	MediaCapability, MediaFrame, MediaSource, MediaSourceKind, MouseButton, PeerInfo,
 };
 use crate::updater::UpdateProgress;
 use crate::{PuppyNet, StorageUsageFile};
@@ -60,6 +60,7 @@ struct PeerRow {
 	name: String,
 	local: bool,
 	version: String,
+	os: String,
 }
 
 #[derive(Clone)]
@@ -142,6 +143,7 @@ struct UiPeer {
 	local: bool,
 	status: String,
 	status_color: String,
+	os: String,
 	role: String,
 	version: String,
 	last_seen: String,
@@ -677,6 +679,7 @@ impl UiControllerCore<'_> {
 				} else {
 					String::from("#4cff91")
 				},
+				os: peer.os,
 				role: if peer.local {
 					String::from("Gateway")
 				} else {
@@ -2527,9 +2530,12 @@ impl UiServer {
 		}
 	}
 
-	async fn peer_version(&self, peer_id: &str) -> String {
+	async fn peer_info(&self, peer_id: &str) -> PeerInfo {
 		let Ok(peer) = PeerId::from_str(peer_id) else {
-			return String::from("unknown");
+			return PeerInfo {
+				version: String::from("unknown"),
+				os: String::from("unknown"),
+			};
 		};
 		tokio::time::timeout(
 			std::time::Duration::from_millis(1500),
@@ -2538,8 +2544,16 @@ impl UiServer {
 		.await
 		.ok()
 		.and_then(Result::ok)
-		.map(|info| info.version)
-		.unwrap_or_else(|| String::from("unknown"))
+		.map(|mut info| {
+			if info.os.trim().is_empty() {
+				info.os = String::from("unknown");
+			}
+			info
+		})
+		.unwrap_or_else(|| PeerInfo {
+			version: String::from("unknown"),
+			os: String::from("unknown"),
+		})
 	}
 
 	async fn refresh_peers(&self) {
@@ -2549,21 +2563,23 @@ impl UiServer {
 				let mut peers = Vec::new();
 				for peer in &snapshot.peers {
 					let id = peer.id.to_string();
-					let version = self.peer_version(&id).await;
+					let info = self.peer_info(&id).await;
 					peers.push(PeerRow {
 						id: peer.id.to_string(),
 						name: peer.name.clone().unwrap_or_else(|| "Unnamed".to_string()),
 						local: peer.id.to_string() == local_id,
-						version,
+						version: info.version,
+						os: info.os,
 					});
 				}
 				if !peers.iter().any(|peer| peer.id == local_id) {
-					let version = self.peer_version(&local_id).await;
+					let info = self.peer_info(&local_id).await;
 					peers.push(PeerRow {
 						id: local_id.clone(),
 						name: String::from("Current device"),
 						local: true,
-						version,
+						version: info.version,
+						os: info.os,
 					});
 				}
 				let mut state = self.state.lock().await;
