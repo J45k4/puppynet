@@ -16,6 +16,8 @@ use tar::Archive;
 use tokio::{fs::File, io::AsyncWriteExt};
 use zip::ZipArchive;
 
+use crate::version;
+
 /// Path resolution: this file is core/src/updater.rs; the key lives at repository root.
 pub const PUBLIC_KEY: &str = include_str!("../../public_key.pem");
 const SERVICE_LABEL: &str = "puppynet";
@@ -208,8 +210,8 @@ where
 	log::info!("release tag: {}", tag);
 
 	if version.is_none() {
-		if let Ok(tag_number) = tag.parse::<u32>() {
-			log::info!("latest numeric tag: {}", tag_number);
+		if let Some(tag_number) = version::version_number_from_label(&tag) {
+			log::info!("latest release version number: {}", tag_number);
 			if tag_number <= current_version {
 				log::info!("Already up to date");
 				progress_callback(UpdateProgress::AlreadyUpToDate { current_version });
@@ -221,7 +223,7 @@ where
 			}
 		} else {
 			log::info!(
-				"latest release tag {} is not numeric; skipping automatic version comparison",
+				"latest release tag {} is not numeric or semantic; skipping automatic version comparison",
 				tag
 			);
 		}

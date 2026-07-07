@@ -1390,8 +1390,7 @@ impl App {
 			PeerReq::UpdateSelf { id, version } => {
 				log::info!("[{}] UpdateSelf (id: {}, version: {:?})", peer, id, version);
 
-				// Get current version (0 if unknown)
-				let current_version = 0u32; // TODO: Get actual version from build info
+				let current_version = version::version_number();
 
 				let internal_tx = self.internal_tx.clone();
 				let target = peer;

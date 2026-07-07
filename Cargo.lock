@@ -3295,7 +3295,7 @@ dependencies = [
 
 [[package]]
 name = "puppynet"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3309,7 +3309,7 @@ dependencies = [
 
 [[package]]
 name = "puppynet_core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3351,7 +3351,7 @@ dependencies = [
 
 [[package]]
 name = "puppynet_daemon"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "log",

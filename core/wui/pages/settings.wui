@@ -16,7 +16,4 @@
       </Form>
     </HStack>
   </VStack>
-  <VStack padding=10 backgroundColor="#061211" border="1px solid #1f4b44" color="#d6eee9">
-    <Text value={state.status} breakWords=true />
-  </VStack>
 </AppLayout>

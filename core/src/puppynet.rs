@@ -14,6 +14,7 @@ use crate::p2p::{
 use crate::scan::ScanEvent;
 use crate::state::{FLAG_READ, FLAG_SEARCH, FLAG_WRITE, Peer, Permission, State};
 use crate::updater::{self, UpdateProgress};
+use crate::version;
 use anyhow::{Result, anyhow, bail};
 use chrono::Utc;
 use futures::executor::block_on;
@@ -805,8 +806,7 @@ impl PuppyNet {
 			// Perform local self-update
 			let tx_clone = tx.clone();
 			let version_clone = version.clone();
-			// Use current_version = 0 for core library (actual version comes from CLI build)
-			let current_version = 0u32;
+			let current_version = version::version_number();
 
 			std::thread::spawn(move || {
 				let rt = tokio::runtime::Runtime::new().unwrap();
