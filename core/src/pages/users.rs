@@ -1,7 +1,9 @@
+use super::super::redirect_response;
 use super::{UiAction, UiContext, UiControllerCore, UiViewState};
 use async_trait::async_trait;
 use std::sync::Arc;
 use wgui::wui::runtime::{Component, Ctx, MountResult, RouteContext};
+use wgui::{FormData, HttpResponse};
 
 pub(in super::super) struct UsersController {
 	ctx: Arc<Ctx<UiContext, ()>>,
@@ -31,6 +33,14 @@ impl UsersController {
 		self.core().refresh_users();
 	}
 
+	pub fn open_new_user_modal(&mut self) {
+		self.core().open_new_user_modal();
+	}
+
+	pub fn close_new_user_modal(&mut self) {
+		self.core().close_new_user_modal();
+	}
+
 	pub fn edit_new_user_username(&mut self, value: String) {
 		self.core().edit_new_user_username(value);
 	}
@@ -41,6 +51,22 @@ impl UsersController {
 
 	pub fn create_user(&mut self) {
 		self.core().create_user();
+	}
+
+	#[wgui_post("/users/create")]
+	pub async fn create_user_post(&mut self, form: FormData) -> HttpResponse {
+		let username = form.get("username").unwrap_or_default().to_string();
+		let password = form.get("password").unwrap_or_default().to_string();
+		let core = self.core();
+		let redirect = if core.is_authenticated() {
+			if core.create_user_values_async(username, password).await {
+				core.ctx.state.server.refresh_users().await;
+			}
+			"/users"
+		} else {
+			"/login"
+		};
+		redirect_response(redirect).header("cache-control", "no-store")
 	}
 }
 

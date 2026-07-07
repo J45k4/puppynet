@@ -1,25 +1,45 @@
 <Import name="AppLayout" from="../layouts/app" />
 
 <AppLayout>
-  <VStack spacing=6 fill=true>
+  <VStack spacing=10 padding=14 fill=true backgroundColor="#061211" border="1px solid #1f4b44" color="#d6eee9">
     <HStack spacing=6 wrap=true fill=true>
-      <Text value="Local users" grow=1 minWidth=0 />
-      <Button text="Refresh" onClick="RefreshUsers" />
+      <Text value="// USERS" grow=1 minWidth=0 color="#7bdcff" />
+      <Button text="New" onClick="OpenNewUserModal" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
+      <Button text="Refresh" onClick="RefreshUsers" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
     </HStack>
-    <HStack spacing=6 wrap=true fill=true>
-      <TextInput value={state.new_user_username} placeholder="New username" onTextChanged="EditNewUserUsername" grow=1 minWidth=0 />
-      <TextInput value={state.new_user_password} placeholder="New password" onTextChanged="EditNewUserPassword" grow=1 minWidth=0 />
-      <Button text="Create" onClick="CreateUser" />
-    </HStack>
-    <Text value={state.new_user_status} breakWords=true />
     <If test={!state.has_users}>
       <Text value="No local users recorded." />
     </If>
     <Else>
-      <For each={state.users} itemAs="user">
-        <Text value={user} breakWords=true />
-      </For>
+      <VStack spacing=0 fill=true border="1px solid #2d6258" color="#d6eee9">
+        <HStack spacing=0 padding=8 fill=true backgroundColor="#020807" color="#9fbdb6">
+          <Text value="USERNAME" grow=1 minWidth=0 />
+        </HStack>
+        <For each={state.users} itemAs="user">
+          <HStack spacing=0 padding=10 fill=true border="1px solid #12332d" backgroundColor="#061211">
+            <Text value={user} grow=1 minWidth=0 breakWords=true />
+          </HStack>
+        </For>
+      </VStack>
     </Else>
   </VStack>
-  <Text value={state.status} breakWords=true />
+  <Modal open={state.new_user_modal_open} onClick="CloseNewUserModal">
+    <VStack spacing=8 padding=16 width=380 maxWidth=380 backgroundColor="#061211" border="1px solid #1f4b44" color="#d6eee9">
+      <HStack spacing=6 wrap=true fill=true>
+        <Text value="CREATE USER" grow=1 minWidth=0 color="#7bdcff" />
+        <Button text="Close" onClick="CloseNewUserModal" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
+      </HStack>
+      <Form action="/users/create" method="post" spacing=8 fill=true>
+        <TextInput name="username" value={state.new_user_username} placeholder="Username" fill=true />
+        <TextInput name="password" value={state.new_user_password} placeholder="Password" type="password" fill=true />
+        <Button text="Create" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
+      </Form>
+      <If test={state.new_user_status != ""}>
+        <Text value={state.new_user_status} breakWords=true />
+      </If>
+    </VStack>
+  </Modal>
+  <VStack padding=10 backgroundColor="#061211" border="1px solid #1f4b44" color="#d6eee9">
+    <Text value={state.status} breakWords=true />
+  </VStack>
 </AppLayout>

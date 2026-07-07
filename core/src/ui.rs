@@ -241,6 +241,7 @@ struct UiClientSession {
 	new_user_username: String,
 	new_user_password: String,
 	new_user_status: String,
+	new_user_modal_open: bool,
 	file_preview_peer: String,
 	file_preview_path: String,
 	file_preview_status: String,
@@ -288,6 +289,7 @@ pub(super) struct UiViewState {
 	new_user_username: String,
 	new_user_password: String,
 	new_user_status: String,
+	new_user_modal_open: bool,
 	file_preview_peer: String,
 	file_preview_path: String,
 	file_preview_status: String,
@@ -899,6 +901,7 @@ impl UiControllerCore<'_> {
 			new_user_username: session.new_user_username,
 			new_user_password: session.new_user_password,
 			new_user_status: session.new_user_status,
+			new_user_modal_open: session.new_user_modal_open,
 			file_preview_peer: session.file_preview_peer,
 			file_preview_path: session.file_preview_path,
 			file_preview_status: session.file_preview_status,
@@ -2437,6 +2440,29 @@ impl UiControllerCore<'_> {
 		});
 	}
 
+	pub fn open_new_user_modal(&self) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		self.update_session(|session| {
+			session.new_user_modal_open = true;
+			session.new_user_status.clear();
+		});
+	}
+
+	pub fn close_new_user_modal(&self) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		self.update_session(|session| {
+			session.new_user_modal_open = false;
+			session.new_user_status.clear();
+			session.new_user_password.clear();
+		});
+	}
+
 	pub fn create_user(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
@@ -2449,24 +2475,74 @@ impl UiControllerCore<'_> {
 				session.new_user_password.clone(),
 			)
 		};
+		if self.create_user_values(username, password) {
+			self.block_on(self.ctx.state.server.refresh_users());
+		}
+	}
+
+	pub fn create_user_values(&self, username: String, password: String) -> bool {
+		let username = username.trim().to_string();
 		if username.is_empty() || password.trim().is_empty() {
 			self.update_session(|session| {
+				session.new_user_modal_open = true;
+				session.new_user_username = username;
 				session.new_user_status = String::from("Username and password are required");
 			});
-			return;
+			return false;
 		}
 		match self.ctx.state.server.puppy.create_user(username, password) {
 			Ok(()) => {
-				self.block_on(self.ctx.state.server.refresh_users());
 				self.update_session(|session| {
+					session.new_user_username.clear();
 					session.new_user_password.clear();
+					session.new_user_modal_open = false;
 					session.new_user_status = String::from("User created");
 				});
+				true
 			}
 			Err(err) => {
 				self.update_session(|session| {
+					session.new_user_modal_open = true;
 					session.new_user_status = format!("Create user failed: {err}");
 				});
+				false
+			}
+		}
+	}
+
+	pub async fn create_user_values_async(&self, username: String, password: String) -> bool {
+		let username = username.trim().to_string();
+		if username.is_empty() || password.trim().is_empty() {
+			self.update_session(|session| {
+				session.new_user_modal_open = true;
+				session.new_user_username = username;
+				session.new_user_status = String::from("Username and password are required");
+			});
+			return false;
+		}
+		match self
+			.ctx
+			.state
+			.server
+			.puppy
+			.create_user_async(username, password)
+			.await
+		{
+			Ok(()) => {
+				self.update_session(|session| {
+					session.new_user_username.clear();
+					session.new_user_password.clear();
+					session.new_user_modal_open = false;
+					session.new_user_status = String::from("User created");
+				});
+				true
+			}
+			Err(err) => {
+				self.update_session(|session| {
+					session.new_user_modal_open = true;
+					session.new_user_status = format!("Create user failed: {err}");
+				});
+				false
 			}
 		}
 	}

@@ -159,6 +159,23 @@ impl PuppyNet {
 		block_on(rx).map_err(|e| anyhow!("CreateUser response channel closed: {e}"))?
 	}
 
+	pub async fn create_user_async(
+		&self,
+		username: String,
+		password: String,
+	) -> anyhow::Result<()> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::CreateUser {
+				username,
+				password,
+				tx,
+			})
+			.map_err(|e| anyhow!("failed to send CreateUser command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("CreateUser response channel closed: {e}"))?
+	}
+
 	pub fn change_password(
 		&self,
 		username: String,

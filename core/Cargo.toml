@@ -40,7 +40,7 @@ homedir = "0.3"
 hyper = { version = "0.14", features = ["full"] }
 url = "2"
 axum = "0.7"
-wgui = { git = "https://github.com/J45k4/wgui.git", rev = "bdbcd132a0febb713879e3faa45fe7619e601f2f" }
+wgui = { git = "https://github.com/J45k4/wgui.git", rev = "3189780e5e0080092cb6c6d65d07e068359cce5a" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 cosmic-client-toolkit = { path = "../vendor/cosmic-protocols/client-toolkit" }
