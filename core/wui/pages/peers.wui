@@ -3,7 +3,7 @@
 <AppLayout>
   <VStack spacing=10 padding=14 fill=true backgroundColor="#061211" border="1px solid #1f4b44" color="#d6eee9">
     <HStack spacing=6 wrap=true fill=true>
-      <Text value="// DEVICES" grow=1 minWidth=0 color="#7bdcff" />
+      <Text value="" grow=1 minWidth=0 />
       <Button text="Refresh" onClick="RefreshPeers" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
     </HStack>
     <If test={!state.has_peers}>
@@ -12,28 +12,27 @@
     <Else>
       <VStack spacing=0 fill=true border="1px solid #2d6258" overflow="auto" color="#d6eee9">
         <HStack spacing=8 padding=8 fill=true backgroundColor="#020807" color="#9fbdb6">
-          <Text value="NODE" minWidth=190 />
-          <Text value="DEVICE ID" grow=1 minWidth=140 />
-          <Text value="STATUS" minWidth=82 />
-          <Text value="OS" minWidth=120 />
-          <Text value="VERSION" minWidth=78 />
-          <Text value="UPTIME" minWidth=84 />
-          <Text value="LAST SEEN" minWidth=82 />
-          <Text value="ACTION" minWidth=76 textAlign="right" />
+          <Text value="NODE" grow=1 minWidth=128 />
+          <Text value="STATUS" minWidth=60 />
+          <Text value="OS" minWidth=88 />
+          <Text value="VERSION" minWidth=58 />
+          <Text value="UPTIME" minWidth=66 />
+          <Text value="SEEN" minWidth=62 />
+          <Text value="ACTION" minWidth=72 textAlign="right" />
         </HStack>
         <For each={state.peers} itemAs="peer" indexAs="i">
           <HStack spacing=8 padding=10 fill=true backgroundColor={peer.local ? "#07381f" : "#061211"} border="1px solid #12332d" color="#d6eee9">
-            <VStack spacing=2 minWidth=190>
+            <VStack spacing=2 grow=1 minWidth=128>
               <Text value={peer.label} breakWords=true color="#eafff6" />
               <Text value={peer.node_kind} breakWords=true />
+              <Text value={peer.short_id} breakWords=true color="#9fbdb6" />
             </VStack>
-            <Text value={peer.short_id} grow=1 minWidth=140 breakWords=true />
-            <Text value={peer.status} minWidth=82 color={peer.status_color} />
-            <Text value={peer.os} minWidth=120 breakWords=true />
-            <Text value={peer.version} minWidth=78 breakWords=true />
-            <Text value={peer.uptime} minWidth=84 breakWords=true />
-            <Text value={peer.last_seen} minWidth=82 />
-            <HStack spacing=0 minWidth=76>
+            <Text value={peer.status} minWidth=60 color={peer.status_color} />
+            <Text value={peer.os} minWidth=88 breakWords=true />
+            <Text value={peer.version} minWidth=58 breakWords=true />
+            <Text value={peer.uptime} minWidth=66 breakWords=true />
+            <Text value={peer.last_seen} minWidth=62 />
+            <HStack spacing=0 minWidth=72>
               <Button text="Details" onClick="PeerRow" arg={i} color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
             </HStack>
           </HStack>

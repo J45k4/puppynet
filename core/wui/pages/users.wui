@@ -3,7 +3,7 @@
 <AppLayout>
   <VStack spacing=10 padding=14 fill=true backgroundColor="#061211" border="1px solid #1f4b44" color="#d6eee9">
     <HStack spacing=6 wrap=true fill=true>
-      <Text value="// USERS" grow=1 minWidth=0 color="#7bdcff" />
+      <Text value="" grow=1 minWidth=0 />
       <Button text="New" onClick="OpenNewUserModal" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
       <Button text="Refresh" onClick="RefreshUsers" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
     </HStack>

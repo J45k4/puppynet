@@ -3407,6 +3407,13 @@ async fn verify_ui_addr_available(bind: SocketAddr) -> Result<()> {
 pub async fn run_ui(puppy: Arc<PuppyNet>, bind: SocketAddr) -> Result<()> {
 	verify_ui_addr_available(bind).await?;
 	log::info!("starting PuppyNet UI on {}", bind);
+	let _template_rebuild_sentinel = [
+		include_str!("../wui/pages/home.wui"),
+		include_str!("../wui/pages/peers.wui"),
+		include_str!("../wui/pages/settings.wui"),
+		include_str!("../wui/pages/users.wui"),
+		include_str!("../wui/partials/file_preview_modal.wui"),
+	];
 	let mut wgui = Wgui::new(bind);
 	wgui.set_css(include_str!("ui_style.css"));
 	let server_state = Arc::new(UiServer::new(puppy));
@@ -3507,6 +3514,27 @@ mod tests {
 				|diagnostics| panic!("failed to parse {module_name}: {diagnostics:?}"),
 			);
 		}
+	}
+
+	#[test]
+	fn wui_templates_do_not_render_slash_section_labels() {
+		for source in [
+			include_str!("../wui/pages/home.wui"),
+			include_str!("../wui/pages/peers.wui"),
+			include_str!("../wui/pages/settings.wui"),
+			include_str!("../wui/pages/users.wui"),
+			include_str!("../wui/partials/file_preview_modal.wui"),
+		] {
+			assert!(!source.contains("value=\"//"));
+		}
+	}
+
+	#[test]
+	fn devices_template_omits_wide_table_columns() {
+		let source = include_str!("../wui/pages/peers.wui");
+
+		assert!(!source.contains("DEVICE ID"));
+		assert!(!source.contains("ROLE"));
 	}
 
 	#[test]

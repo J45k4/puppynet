@@ -2,7 +2,6 @@
 
 <AppLayout>
   <VStack spacing=10 padding=14 fill=true backgroundColor="#061211" border="1px solid #1f4b44">
-    <Text value="// OVERVIEW" color="#7bdcff" />
     <HStack spacing=8 wrap=true fill=true>
       <VStack padding=10 minWidth=170 border="1px solid #2d6258" backgroundColor="#081716">
         <Text value={state.home_peers} />
