@@ -228,6 +228,8 @@ pub struct PeerInfo {
 	pub version: String,
 	#[serde(default)]
 	pub os: String,
+	#[serde(default)]
+	pub uptime_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

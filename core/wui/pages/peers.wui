@@ -17,6 +17,7 @@
           <Text value="STATUS" minWidth=120 />
           <Text value="OS" minWidth=180 />
           <Text value="VERSION" minWidth=140 />
+          <Text value="UPTIME" minWidth=120 />
           <Text value="ROLE" minWidth=120 />
           <Text value="LAST SEEN" minWidth=110 />
           <Text value="ACTION" minWidth=96 textAlign="right" />
@@ -31,6 +32,7 @@
             <Text value={peer.status} minWidth=120 color={peer.status_color} />
             <Text value={peer.os} minWidth=180 breakWords=true />
             <Text value={peer.version} minWidth=140 breakWords=true />
+            <Text value={peer.uptime} minWidth=120 breakWords=true />
             <Text value={peer.role} minWidth=120 />
             <Text value={peer.last_seen} minWidth=110 />
             <HStack spacing=0 minWidth=96>

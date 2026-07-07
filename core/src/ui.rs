@@ -61,6 +61,7 @@ struct PeerRow {
 	local: bool,
 	version: String,
 	os: String,
+	uptime: String,
 }
 
 #[derive(Clone)]
@@ -144,6 +145,7 @@ struct UiPeer {
 	status: String,
 	status_color: String,
 	os: String,
+	uptime: String,
 	role: String,
 	version: String,
 	last_seen: String,
@@ -488,6 +490,22 @@ fn webcam_supported(capability: Option<&MediaCapability>) -> bool {
 		.unwrap_or(false)
 }
 
+fn format_uptime(seconds: u64) -> String {
+	if seconds == 0 {
+		return String::from("unknown");
+	}
+	let days = seconds / 86_400;
+	let hours = (seconds % 86_400) / 3_600;
+	let minutes = (seconds % 3_600) / 60;
+	if days > 0 {
+		format!("{days}d {hours}h {minutes}m")
+	} else if hours > 0 {
+		format!("{hours}h {minutes}m")
+	} else {
+		format!("{minutes}m")
+	}
+}
+
 fn normalize_peer_file_path(path: String) -> String {
 	let path = path.trim();
 	if path.is_empty() {
@@ -680,6 +698,7 @@ impl UiControllerCore<'_> {
 					String::from("#4cff91")
 				},
 				os: peer.os,
+				uptime: peer.uptime,
 				role: if peer.local {
 					String::from("Gateway")
 				} else {
@@ -2535,6 +2554,7 @@ impl UiServer {
 			return PeerInfo {
 				version: String::from("unknown"),
 				os: String::from("unknown"),
+				uptime_seconds: 0,
 			};
 		};
 		tokio::time::timeout(
@@ -2553,6 +2573,7 @@ impl UiServer {
 		.unwrap_or_else(|| PeerInfo {
 			version: String::from("unknown"),
 			os: String::from("unknown"),
+			uptime_seconds: 0,
 		})
 	}
 
@@ -2570,6 +2591,7 @@ impl UiServer {
 						local: peer.id.to_string() == local_id,
 						version: info.version,
 						os: info.os,
+						uptime: format_uptime(info.uptime_seconds),
 					});
 				}
 				if !peers.iter().any(|peer| peer.id == local_id) {
@@ -2580,6 +2602,7 @@ impl UiServer {
 						local: true,
 						version: info.version,
 						os: info.os,
+						uptime: format_uptime(info.uptime_seconds),
 					});
 				}
 				let mut state = self.state.lock().await;

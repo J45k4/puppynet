@@ -944,6 +944,7 @@ impl App {
 		PeerInfo {
 			version: version::version_label(),
 			os: Self::local_os_label(),
+			uptime_seconds: System::uptime(),
 		}
 	}
 
