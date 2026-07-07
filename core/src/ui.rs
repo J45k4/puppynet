@@ -2546,6 +2546,43 @@ impl UiControllerCore<'_> {
 			}
 		}
 	}
+
+	pub async fn delete_user_values_async(&self, username: String) -> bool {
+		let username = username.trim().to_string();
+		if username.is_empty() {
+			self.update_session(|session| {
+				session.new_user_status = String::from("User not found");
+			});
+			return false;
+		}
+		if self.authenticated_username().as_deref() == Some(username.as_str()) {
+			self.update_session(|session| {
+				session.new_user_status = String::from("Cannot delete the current user");
+			});
+			return false;
+		}
+		match self
+			.ctx
+			.state
+			.server
+			.puppy
+			.delete_user_async(username.clone())
+			.await
+		{
+			Ok(()) => {
+				self.update_session(|session| {
+					session.new_user_status = format!("Deleted user {username}");
+				});
+				true
+			}
+			Err(err) => {
+				self.update_session(|session| {
+					session.new_user_status = format!("Delete user failed: {err}");
+				});
+				false
+			}
+		}
+	}
 }
 
 struct UiControllers<'a> {

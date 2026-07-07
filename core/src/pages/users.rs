@@ -68,6 +68,21 @@ impl UsersController {
 		};
 		redirect_response(redirect).header("cache-control", "no-store")
 	}
+
+	#[wgui_post("/users/delete")]
+	pub async fn delete_user_post(&mut self, form: FormData) -> HttpResponse {
+		let username = form.get("username").unwrap_or_default().to_string();
+		let core = self.core();
+		let redirect = if core.is_authenticated() {
+			if core.delete_user_values_async(username).await {
+				core.ctx.state.server.refresh_users().await;
+			}
+			"/users"
+		} else {
+			"/login"
+		};
+		redirect_response(redirect).header("cache-control", "no-store")
+	}
 }
 
 #[async_trait]

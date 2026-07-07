@@ -13,9 +13,9 @@ use crate::webcam;
 use crate::{
 	db::{
 		Cpu as DbCpu, FileEntry, Interface as DbInterface, Node, NodeID, StorageUsageFile,
-		fetch_file_entries_paginated, load_discovered_peers, load_peer_permissions, load_peers,
-		load_users, remove_discovered_peer, remove_stale_cpus, remove_stale_interfaces, save_cpu,
-		save_discovered_peer, save_interface, save_node, save_peer, save_user,
+		delete_user, fetch_file_entries_paginated, load_discovered_peers, load_peer_permissions,
+		load_peers, load_users, remove_discovered_peer, remove_stale_cpus, remove_stale_interfaces,
+		save_cpu, save_discovered_peer, save_interface, save_node, save_peer, save_user,
 	},
 	p2p::{AgentBehaviour, AgentEvent, build_swarm, load_or_generate_keypair},
 	scan::{self, ScanEvent},
@@ -184,6 +184,10 @@ pub enum Command {
 	CreateUser {
 		username: String,
 		password: String,
+		tx: oneshot::Sender<anyhow::Result<()>>,
+	},
+	DeleteUser {
+		username: String,
 		tx: oneshot::Sender<anyhow::Result<()>>,
 	},
 	SetPeerPermissions {
@@ -2411,6 +2415,26 @@ impl App {
 						save_user(&mut *conn, &user)?;
 					}
 					self.state.users.push(user);
+					Ok(())
+				})();
+				let _ = tx.send(result);
+			}
+			Command::DeleteUser { username, tx } => {
+				let result = (|| -> anyhow::Result<()> {
+					if username.trim().is_empty() {
+						bail!("Username is required");
+					}
+					if self.state.users.len() <= 1 {
+						bail!("Cannot delete the last user");
+					}
+					if !self.state.users.iter().any(|u| u.name == username) {
+						bail!("User not found");
+					}
+					{
+						let conn = self.db.lock().map_err(|_| anyhow!("db lock poisoned"))?;
+						delete_user(&conn, &username)?;
+					}
+					self.state.users.retain(|u| u.name != username);
 					Ok(())
 				})();
 				let _ = tx.send(result);

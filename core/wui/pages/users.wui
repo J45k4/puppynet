@@ -12,12 +12,17 @@
     </If>
     <Else>
       <VStack spacing=0 fill=true border="1px solid #2d6258" color="#d6eee9">
-        <HStack spacing=0 padding=8 fill=true backgroundColor="#020807" color="#9fbdb6">
+        <HStack spacing=8 padding=8 fill=true backgroundColor="#020807" color="#9fbdb6">
           <Text value="USERNAME" grow=1 minWidth=0 />
+          <Text value="ACTION" minWidth=82 textAlign="right" />
         </HStack>
         <For each={state.users} itemAs="user">
-          <HStack spacing=0 padding=10 fill=true border="1px solid #12332d" backgroundColor="#061211">
+          <HStack spacing=8 padding=10 fill=true border="1px solid #12332d" backgroundColor="#061211">
             <Text value={user} grow=1 minWidth=0 breakWords=true />
+            <Form action="/users/delete" method="post" spacing=0>
+              <TextInput name="username" value={user} type="hidden" />
+              <Button text="Delete" color="#ff8f8f" backgroundColor="#020807" border="1px solid #8b3a3a" />
+            </Form>
           </HStack>
         </For>
       </VStack>
@@ -40,6 +45,9 @@
     </VStack>
   </Modal>
   <VStack padding=10 backgroundColor="#061211" border="1px solid #1f4b44" color="#d6eee9">
+    <If test={state.new_user_status != ""}>
+      <Text value={state.new_user_status} breakWords=true />
+    </If>
     <Text value={state.status} breakWords=true />
   </VStack>
 </AppLayout>

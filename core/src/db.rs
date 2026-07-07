@@ -1102,6 +1102,15 @@ pub fn load_user(conn: &Connection, username: &str) -> anyhow::Result<Option<Use
 	Ok(None)
 }
 
+pub fn delete_user(conn: &Connection, username: &str) -> anyhow::Result<()> {
+	conn.execute(
+		"DELETE FROM sessions WHERE username = ?1",
+		params![username],
+	)?;
+	conn.execute("DELETE FROM users WHERE username = ?1", params![username])?;
+	Ok(())
+}
+
 pub fn save_session(
 	conn: &Connection,
 	token_hash: &[u8],

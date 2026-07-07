@@ -176,6 +176,23 @@ impl PuppyNet {
 			.map_err(|e| anyhow!("CreateUser response channel closed: {e}"))?
 	}
 
+	pub fn delete_user(&self, username: String) -> anyhow::Result<()> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::DeleteUser { username, tx })
+			.map_err(|e| anyhow!("failed to send DeleteUser command: {e}"))?;
+		block_on(rx).map_err(|e| anyhow!("DeleteUser response channel closed: {e}"))?
+	}
+
+	pub async fn delete_user_async(&self, username: String) -> anyhow::Result<()> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::DeleteUser { username, tx })
+			.map_err(|e| anyhow!("failed to send DeleteUser command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("DeleteUser response channel closed: {e}"))?
+	}
+
 	pub fn change_password(
 		&self,
 		username: String,
