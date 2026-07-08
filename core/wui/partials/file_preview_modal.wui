@@ -1,14 +1,19 @@
 <Modal open={state.file_preview_modal_open} onClick="CloseFilePreviewModal">
   <VStack spacing=6 padding=10 fill=true maxWidth=900 maxHeight=520 overflow="scroll" backgroundColor="#061211" border="1px solid #1f4b44" color="#d6eee9">
     <HStack spacing=6 wrap=true fill=true>
-      <Text value="" grow=1 minWidth=0 />
+      <VStack spacing=2 grow=1 minWidth=0>
+        <Text value={state.file_preview_peer} breakWords=true color="#79f2c0" />
+        <Text value={state.file_preview_path} breakWords=true color="#d6eee9" />
+      </VStack>
       <Button text="Close" onClick="CloseFilePreviewModal" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
     </HStack>
-    <HStack spacing=6 wrap=true fill=true>
-      <TextInput value={state.file_preview_peer} placeholder="Device id (optional)" onTextChanged="EditFilePreviewPeer" grow=1 minWidth=0 color="#d6eee9" backgroundColor="#020807" border="1px solid #2d6258" />
-      <TextInput value={state.file_preview_path} placeholder="Path to read" onTextChanged="EditFilePreviewPath" grow=1 minWidth=0 color="#d6eee9" backgroundColor="#020807" border="1px solid #2d6258" />
-      <Button text="Load preview" onClick="LoadFilePreview" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
-    </HStack>
+    <If test={state.file_preview_can_load}>
+      <HStack spacing=6 wrap=true fill=true>
+        <TextInput value={state.file_preview_peer} placeholder="Device id (optional)" onTextChanged="EditFilePreviewPeer" grow=1 minWidth=0 color="#d6eee9" backgroundColor="#020807" border="1px solid #2d6258" />
+        <TextInput value={state.file_preview_path} placeholder="Path to read" onTextChanged="EditFilePreviewPath" grow=1 minWidth=0 color="#d6eee9" backgroundColor="#020807" border="1px solid #2d6258" />
+        <Button text="Load preview" onClick="LoadFilePreview" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
+      </HStack>
+    </If>
     <Text value={state.file_preview_status} breakWords=true />
     <If test={state.file_preview_has_image}>
       <Image src={state.file_preview_image_src} alt="File preview" maxWidth=860 maxHeight=420 objectFit="contain" />

@@ -289,6 +289,7 @@ struct UiClientSession {
 	file_preview_status: String,
 	file_preview_content: String,
 	file_preview_image_src: String,
+	file_preview_loaded: bool,
 	file_preview_modal_open: bool,
 	shell_peer: String,
 	shell_input: String,
@@ -354,6 +355,7 @@ pub(super) struct UiViewState {
 	file_preview_content: String,
 	file_preview_image_src: String,
 	file_preview_has_image: bool,
+	file_preview_can_load: bool,
 	file_preview_modal_open: bool,
 	shell_peer: String,
 	shell_input: String,
@@ -1132,6 +1134,7 @@ impl UiControllerCore<'_> {
 			file_preview_content: session.file_preview_content,
 			file_preview_has_image: !session.file_preview_image_src.is_empty(),
 			file_preview_image_src: session.file_preview_image_src,
+			file_preview_can_load: !session.file_preview_loaded,
 			file_preview_modal_open: session.file_preview_modal_open,
 			shell_peer: session.shell_peer,
 			shell_input: session.shell_input,
@@ -1820,6 +1823,7 @@ impl UiControllerCore<'_> {
 					session.file_preview_status.clear();
 					session.file_preview_content.clear();
 					session.file_preview_image_src.clear();
+					session.file_preview_loaded = false;
 					session.file_preview_modal_open = true;
 				});
 				self.load_file_preview();
@@ -1831,6 +1835,7 @@ impl UiControllerCore<'_> {
 						String::from("Local file path not found for selected hash");
 					session.file_preview_content.clear();
 					session.file_preview_image_src.clear();
+					session.file_preview_loaded = false;
 				});
 			}
 			Err(err) => {
@@ -1839,6 +1844,7 @@ impl UiControllerCore<'_> {
 					session.file_preview_status = format!("Failed to resolve file: {err}");
 					session.file_preview_content.clear();
 					session.file_preview_image_src.clear();
+					session.file_preview_loaded = false;
 				});
 			}
 		}
@@ -1874,6 +1880,7 @@ impl UiControllerCore<'_> {
 			session.file_preview_status.clear();
 			session.file_preview_content.clear();
 			session.file_preview_image_src.clear();
+			session.file_preview_loaded = false;
 			session.file_preview_modal_open = true;
 		});
 		self.load_file_preview();
@@ -2303,6 +2310,7 @@ impl UiControllerCore<'_> {
 				session.file_preview_status.clear();
 				session.file_preview_content.clear();
 				session.file_preview_image_src.clear();
+				session.file_preview_loaded = false;
 				session.file_preview_modal_open = true;
 			});
 			self.load_file_preview();
@@ -2329,6 +2337,7 @@ impl UiControllerCore<'_> {
 			session.file_preview_status.clear();
 			session.file_preview_content.clear();
 			session.file_preview_image_src.clear();
+			session.file_preview_loaded = false;
 		});
 	}
 
@@ -2342,6 +2351,7 @@ impl UiControllerCore<'_> {
 			session.file_preview_status.clear();
 			session.file_preview_content.clear();
 			session.file_preview_image_src.clear();
+			session.file_preview_loaded = false;
 		});
 	}
 
@@ -2362,6 +2372,7 @@ impl UiControllerCore<'_> {
 				session.file_preview_status = String::from("Path is required");
 				session.file_preview_content.clear();
 				session.file_preview_image_src.clear();
+				session.file_preview_loaded = false;
 			});
 			return;
 		}
@@ -2382,12 +2393,14 @@ impl UiControllerCore<'_> {
 								String::from("Invalid or missing peer id");
 							session.file_preview_content.clear();
 							session.file_preview_image_src.clear();
+							session.file_preview_loaded = false;
 						});
 						return;
 					}
 				}
 			}
 		};
+		let peer_label = peer.to_string();
 		if is_image_path(&path) {
 			match self.block_on(self.ctx.state.server.puppy.get_thumbnail(
 				peer,
@@ -2398,6 +2411,7 @@ impl UiControllerCore<'_> {
 				Ok(thumbnail) => {
 					let encoded = base64::engine::general_purpose::STANDARD.encode(thumbnail.data);
 					self.update_session(|session| {
+						session.file_preview_peer = peer_label.clone();
 						session.file_preview_status = format!(
 							"Loaded image preview from {} ({}x{})",
 							path, thumbnail.width, thumbnail.height
@@ -2405,14 +2419,17 @@ impl UiControllerCore<'_> {
 						session.file_preview_image_src =
 							format!("data:{};base64,{encoded}", thumbnail.mime_type);
 						session.file_preview_content.clear();
+						session.file_preview_loaded = true;
 					});
 				}
 				Err(err) => {
 					self.update_session(|session| {
+						session.file_preview_peer = peer_label.clone();
 						session.file_preview_status =
 							format!("Failed to load image preview: {err}");
 						session.file_preview_content.clear();
 						session.file_preview_image_src.clear();
+						session.file_preview_loaded = false;
 					});
 				}
 			}
@@ -2427,6 +2444,7 @@ impl UiControllerCore<'_> {
 			Ok(chunk) => {
 				let preview = format_preview_bytes(&chunk.data);
 				self.update_session(|session| {
+					session.file_preview_peer = peer_label.clone();
 					session.file_preview_status = format!(
 						"Loaded {} byte(s) from {}{}",
 						chunk.data.len(),
@@ -2435,13 +2453,16 @@ impl UiControllerCore<'_> {
 					);
 					session.file_preview_content = preview;
 					session.file_preview_image_src.clear();
+					session.file_preview_loaded = true;
 				});
 			}
 			Err(err) => {
 				self.update_session(|session| {
+					session.file_preview_peer = peer_label;
 					session.file_preview_status = format!("Failed to read file: {err}");
 					session.file_preview_content.clear();
 					session.file_preview_image_src.clear();
+					session.file_preview_loaded = false;
 				});
 			}
 		}
