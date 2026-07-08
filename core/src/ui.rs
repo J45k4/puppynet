@@ -2413,8 +2413,8 @@ impl UiControllerCore<'_> {
 					self.update_session(|session| {
 						session.file_preview_peer = peer_label.clone();
 						session.file_preview_status = format!(
-							"Loaded image preview from {} ({}x{})",
-							path, thumbnail.width, thumbnail.height
+							"Loaded image preview ({}x{})",
+							thumbnail.width, thumbnail.height
 						);
 						session.file_preview_image_src =
 							format!("data:{};base64,{encoded}", thumbnail.mime_type);
@@ -2446,9 +2446,8 @@ impl UiControllerCore<'_> {
 				self.update_session(|session| {
 					session.file_preview_peer = peer_label.clone();
 					session.file_preview_status = format!(
-						"Loaded {} byte(s) from {}{}",
+						"Loaded {} byte(s){}",
 						chunk.data.len(),
-						path,
 						if chunk.eof { "" } else { " (truncated)" }
 					);
 					session.file_preview_content = preview;

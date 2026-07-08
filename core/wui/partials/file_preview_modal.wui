@@ -1,5 +1,5 @@
 <Modal open={state.file_preview_modal_open} onClick="CloseFilePreviewModal">
-  <VStack spacing=6 padding=10 fill=true maxWidth=900 maxHeight=520 overflow="scroll" backgroundColor="#061211" border="1px solid #1f4b44" color="#d6eee9">
+  <VStack spacing=6 padding=10 fill=true maxWidth=900 maxHeight=520 overflow="hidden" backgroundColor="#061211" border="1px solid #1f4b44" color="#d6eee9">
     <HStack spacing=6 wrap=true fill=true>
       <VStack spacing=2 grow=1 minWidth=0>
         <Text value={state.file_preview_peer} breakWords=true color="#79f2c0" />
@@ -15,11 +15,13 @@
       </HStack>
     </If>
     <Text value={state.file_preview_status} breakWords=true />
-    <If test={state.file_preview_has_image}>
-      <Image src={state.file_preview_image_src} alt="File preview" maxWidth=860 maxHeight=420 objectFit="contain" />
-    </If>
-    <Else>
-      <Text value={state.file_preview_content} breakWords=true />
-    </Else>
+    <VStack fill=true grow=1 minHeight=0 overflow="scroll">
+      <If test={state.file_preview_has_image}>
+        <Image src={state.file_preview_image_src} alt="File preview" maxWidth=860 maxHeight=420 objectFit="contain" />
+      </If>
+      <Else>
+        <Text value={state.file_preview_content} breakWords=true whiteSpace="pre-wrap" />
+      </Else>
+    </VStack>
   </VStack>
 </Modal>
