@@ -8,8 +8,8 @@ use crate::db::{
 };
 use crate::p2p::{
 	AudioCapability, AudioDevice, CpuInfo, DesktopInput, DirEntry, DiskInfo, InterfaceInfo,
-	MediaCapability, MediaFrame, MediaSource, PeerInfo, PermissionGrant, Thumbnail,
-	grant_from_permission, permission_from_grant,
+	LiveSearchArgs, MediaCapability, MediaFrame, MediaSource, PeerInfo, PermissionGrant,
+	SearchEvent, Thumbnail, grant_from_permission, permission_from_grant,
 };
 use crate::scan::ScanEvent;
 use crate::state::{FLAG_READ, FLAG_SEARCH, FLAG_WRITE, Peer, Permission, State};
@@ -52,6 +52,12 @@ impl ScanHandle {
 	}
 }
 
+#[derive(Clone, Debug)]
+pub struct LiveSearchPeerEvent {
+	pub peer: PeerId,
+	pub event: SearchEvent,
+}
+
 pub struct PuppyNet {
 	shutdown_tx: Option<oneshot::Sender<()>>,
 	handle: JoinHandle<()>,
@@ -59,6 +65,8 @@ pub struct PuppyNet {
 	db: Arc<Mutex<SqliteConnection>>,
 	remote_scans: Arc<Mutex<HashMap<u64, mpsc::Sender<ScanEvent>>>>,
 	remote_scan_counter: AtomicU64,
+	remote_searches: Arc<Mutex<HashMap<u64, mpsc::Sender<SearchEvent>>>>,
+	remote_search_counter: AtomicU64,
 	remote_updates: Arc<Mutex<HashMap<u64, mpsc::Sender<UpdateProgress>>>>,
 	remote_update_counter: AtomicU64,
 }
@@ -76,11 +84,13 @@ impl PuppyNet {
 		// channel to request shutdown
 		let (shutdown_tx, shutdown_rx) = oneshot::channel();
 		let remote_scans = Arc::new(Mutex::new(HashMap::new()));
+		let remote_searches = Arc::new(Mutex::new(HashMap::new()));
 		let remote_updates = Arc::new(Mutex::new(HashMap::new()));
 		let (mut app, cmd_tx) = App::new(
 			state,
 			db.clone(),
 			remote_scans.clone(),
+			remote_searches.clone(),
 			remote_updates.clone(),
 		);
 		let mut shutdown_rx = shutdown_rx;
@@ -103,6 +113,8 @@ impl PuppyNet {
 			db,
 			remote_scans,
 			remote_scan_counter: AtomicU64::new(1),
+			remote_searches,
+			remote_search_counter: AtomicU64::new(1),
 			remote_updates,
 			remote_update_counter: AtomicU64::new(1),
 		}
@@ -136,6 +148,15 @@ impl PuppyNet {
 		block_on(rx).map_err(|e| anyhow!("RegisterSharedFolder response channel closed: {e}"))?
 	}
 
+	async fn register_shared_folder_async(&self, path: PathBuf, flags: u8) -> anyhow::Result<()> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::RegisterSharedFolder { path, flags, tx })
+			.map_err(|e| anyhow!("failed to send RegisterSharedFolder command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("RegisterSharedFolder response channel closed: {e}"))?
+	}
+
 	pub fn share_read_only_folder(&self, path: impl AsRef<Path>) -> anyhow::Result<()> {
 		let canonical = std::fs::canonicalize(path.as_ref())
 			.map_err(|err| anyhow!("failed to canonicalize path: {err}"))?;
@@ -146,6 +167,25 @@ impl PuppyNet {
 		let canonical = std::fs::canonicalize(path.as_ref())
 			.map_err(|err| anyhow!("failed to canonicalize path: {err}"))?;
 		self.register_shared_folder(canonical, FLAG_READ | FLAG_WRITE | FLAG_SEARCH)
+	}
+
+	pub async fn share_read_only_folder_async(&self, path: impl AsRef<Path>) -> anyhow::Result<()> {
+		let canonical = tokio::fs::canonicalize(path.as_ref())
+			.await
+			.map_err(|err| anyhow!("failed to canonicalize path: {err}"))?;
+		self.register_shared_folder_async(canonical, FLAG_READ | FLAG_SEARCH)
+			.await
+	}
+
+	pub async fn share_read_write_folder_async(
+		&self,
+		path: impl AsRef<Path>,
+	) -> anyhow::Result<()> {
+		let canonical = tokio::fs::canonicalize(path.as_ref())
+			.await
+			.map_err(|err| anyhow!("failed to canonicalize path: {err}"))?;
+		self.register_shared_folder_async(canonical, FLAG_READ | FLAG_WRITE | FLAG_SEARCH)
+			.await
 	}
 
 	pub fn create_user(&self, username: String, password: String) -> anyhow::Result<()> {
@@ -625,6 +665,49 @@ impl PuppyNet {
 			receiver: Arc::new(Mutex::new(rx)),
 			cancel_flag,
 		})
+	}
+
+	pub fn live_search_peers(
+		&self,
+		peers: Vec<PeerId>,
+		args: LiveSearchArgs,
+	) -> Result<Arc<Mutex<mpsc::Receiver<LiveSearchPeerEvent>>>, String> {
+		let (events_tx, events_rx) = mpsc::channel();
+		for peer in peers {
+			let (tx, rx) = mpsc::channel();
+			let search_id = self.remote_search_counter.fetch_add(1, Ordering::SeqCst);
+			self.remote_searches
+				.lock()
+				.unwrap()
+				.insert(search_id, tx.clone());
+
+			let forward_tx = events_tx.clone();
+			std::thread::spawn(move || {
+				while let Ok(event) = rx.recv() {
+					let terminal = matches!(
+						event,
+						SearchEvent::Finished { .. } | SearchEvent::Failed { .. }
+					);
+					let _ = forward_tx.send(LiveSearchPeerEvent { peer, event });
+					if terminal {
+						break;
+					}
+				}
+			});
+
+			if let Err(err) = self.cmd_tx.send(Command::LiveSearch {
+				peer,
+				args: args.clone(),
+				search_id,
+			}) {
+				self.remote_searches.lock().unwrap().remove(&search_id);
+				let _ = tx.send(SearchEvent::Failed {
+					error: format!("failed to send LiveSearch command: {err}"),
+				});
+			}
+		}
+		drop(events_tx);
+		Ok(Arc::new(Mutex::new(events_rx)))
 	}
 
 	pub fn fetch_scan_results_page(

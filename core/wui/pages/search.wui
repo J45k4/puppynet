@@ -3,13 +3,21 @@
 <AppLayout>
   <VStack spacing=6 fill=true>
     <HStack spacing=6 wrap=true fill=true>
-      <TextInput value={state.search_name_query} placeholder="Search by file name" onTextChanged="EditSearchNameQuery" grow=1 minWidth=0 />
-      <Button text="Search" onClick="RunSearch" />
+      <TextInput value={state.search_name_query} placeholder="Search by file name" onTextChanged="EditSearchNameQuery" grow=1 minWidth=0 color="#d6eee9" backgroundColor="#020807" border="1px solid #2d6258" />
+      <Select value={state.search_target} options={state.search_target_options} onSelect="SelectSearchTarget" minWidth=180 color="#d6eee9" backgroundColor="#020807" border="1px solid #2d6258" />
+      <Button text="Search" onClick="RunSearch" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
+    </HStack>
+    <HStack spacing=6 wrap=true fill=true>
+      <Text value="Sort" />
+      <Select value={state.search_sort} options={state.search_sort_options} onSelect="SelectSearchSort" minWidth=120 color="#d6eee9" backgroundColor="#020807" border="1px solid #2d6258" />
+      <Text value="Batch" />
+      <Select value={state.search_page_size} options={state.search_page_size_options} onSelect="SelectSearchPageSize" minWidth=90 color="#d6eee9" backgroundColor="#020807" border="1px solid #2d6258" />
+      <Text value={state.search_page_text} grow=1 minWidth=0 breakWords=true />
     </HStack>
     <HStack spacing=6 wrap=true fill=true>
       <Text value="Mime filters:" />
       <Text value={state.search_selected_mimes_text} grow=1 minWidth=0 breakWords=true />
-      <Button text="Clear" onClick="ClearSearchMimes" />
+      <Button text="Clear" onClick="ClearSearchMimes" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
     </HStack>
     <If test={!state.has_search_mime_options}>
       <Text value="No mime options available." />
@@ -29,16 +37,34 @@
       <Text value="No results." />
     </If>
     <Else>
-      <For each={state.search_results} itemAs="row" indexAs="i">
-        <VStack spacing=2 fill=true>
-          <Text value={row.name} breakWords=true />
-          <Text value={row.path} breakWords=true />
-          <Text value={row.size} />
-          <Text value={row.replicas} />
-          <Text value={row.peer_id} breakWords=true />
-          <Button text="Preview file" onClick="SearchPreview" arg={i} />
-        </VStack>
-      </For>
+      <VStack fill=true overflow="scroll" onScrollNearBottom="SearchScrollLoadMore">
+        <HStack spacing=0 fill=true border="1px solid #2d6258">
+          <Text value="Name" grow=2 minWidth=160 />
+          <Text value="Device" minWidth=150 />
+          <Text value="Size" minWidth=90 />
+          <Text value="Mime" minWidth=150 />
+          <Text value="Modified" minWidth=210 />
+          <Text value="Action" minWidth=110 />
+        </HStack>
+        <For each={state.search_results} itemAs="row" indexAs="i">
+          <HStack spacing=0 fill=true border="1px solid #1f4b44">
+            <VStack grow=2 minWidth=160 padding=8>
+              <Text value={row.name} breakWords=true />
+              <Text value={row.path} breakWords=true color="#8fbab1" />
+            </VStack>
+            <Text value={row.device} minWidth=150 breakWords=true />
+            <Text value={row.size} minWidth=90 />
+            <Text value={row.mime_type} minWidth=150 breakWords=true />
+            <Text value={row.modified_at} minWidth=210 breakWords=true />
+            <VStack minWidth=110 padding=8>
+              <Button text="Preview" onClick="SearchPreview" arg={i} color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
+            </VStack>
+          </HStack>
+        </For>
+      </VStack>
+      <If test={state.search_can_load_more}>
+        <Button text="Load more" onClick="SearchLoadMore" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
+      </If>
     </Else>
   </VStack>
   <Import src="../partials/file_preview_modal.wui" />

@@ -173,6 +173,17 @@ const MIGRATIONS: &[Migration] = &[
 			create index if not exists sessions_username on sessions(username);
 		",
 	},
+	Migration {
+		id: 20250313,
+		name: "shared_folders",
+		sql: r"
+			create table if not exists shared_folders (
+				path text primary key,
+				flags integer not null,
+				created_at timestamp not null default current_timestamp
+			);
+		",
+	},
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1060,6 +1071,29 @@ pub fn load_peer_permissions(
 		}
 	}
 	Ok(results)
+}
+
+pub fn save_shared_folder(conn: &Connection, rule: &FolderRule) -> anyhow::Result<()> {
+	conn.execute(
+		"INSERT INTO shared_folders (path, flags) VALUES (?1, ?2)
+		ON CONFLICT(path) DO UPDATE SET flags = excluded.flags",
+		params![rule.path().to_string_lossy(), rule.flags() as i64],
+	)?;
+	Ok(())
+}
+
+pub fn load_shared_folders(conn: &Connection) -> anyhow::Result<Vec<FolderRule>> {
+	let mut stmt = conn.prepare("SELECT path, flags FROM shared_folders ORDER BY path ASC")?;
+	let rows = stmt.query_map([], |row| {
+		let path: String = row.get(0)?;
+		let flags: i64 = row.get(1)?;
+		Ok(FolderRule::new(PathBuf::from(path), flags as u8))
+	})?;
+	let mut folders = Vec::new();
+	for row in rows {
+		folders.push(row?);
+	}
+	Ok(folders)
 }
 
 pub fn save_user(conn: &Connection, user: &User) -> anyhow::Result<()> {

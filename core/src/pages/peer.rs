@@ -63,6 +63,18 @@ impl PeerController {
 		self.core().select_audio_device(value);
 	}
 
+	pub fn edit_shared_folder_path(&mut self, value: String) {
+		self.core().edit_shared_folder_path(value);
+	}
+
+	pub fn select_shared_folder_access(&mut self, value: String) {
+		self.core().select_shared_folder_access(value);
+	}
+
+	pub fn add_shared_folder(&mut self) {
+		self.core().add_shared_folder();
+	}
+
 	pub fn edit_update_version(&mut self, value: String) {
 		self.core().edit_update_version(value);
 	}

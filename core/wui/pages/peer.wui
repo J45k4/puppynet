@@ -14,6 +14,28 @@
         <Link text="Monitor and control" href={state.selected_peer_control_href} />
       </VStack>
     </HStack>
+    <If test={state.is_current_device}>
+      <VStack spacing=6 fill=true border="1px solid #1f4b44" padding=8>
+        <Text value="Allowed folders" />
+        <HStack spacing=6 wrap=true fill=true>
+          <TextInput value={state.shared_folder_path} placeholder="Folder path" onTextChanged="EditSharedFolderPath" grow=1 minWidth=0 color="#d6eee9" backgroundColor="#020807" border="1px solid #2d6258" />
+          <Select value={state.shared_folder_access} options={state.shared_folder_access_options} onSelect="SelectSharedFolderAccess" minWidth=140 color="#d6eee9" backgroundColor="#020807" border="1px solid #2d6258" />
+          <Button text="Add folder" onClick="AddSharedFolder" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
+        </HStack>
+        <Text value={state.shared_folder_status} breakWords=true />
+        <If test={!state.has_shared_folders}>
+          <Text value="No allowed folders configured." />
+        </If>
+        <Else>
+          <For each={state.shared_folders} itemAs="folder">
+            <HStack spacing=6 wrap=true fill=true border="1px solid #12342f">
+              <Text value={folder.path} grow=1 minWidth=0 breakWords=true />
+              <Text value={folder.access} minWidth=150 />
+            </HStack>
+          </For>
+        </Else>
+      </VStack>
+    </If>
     <Text value="CPUs:" />
     <If test={!state.has_cpus}>
       <Text value="No CPU data available." />

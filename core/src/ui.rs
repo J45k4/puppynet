@@ -2,16 +2,17 @@ use crate::auth;
 use crate::db::FileEntry;
 use crate::p2p::{
 	AudioCapability, AudioDevice, AudioDeviceKind, CpuInfo, DesktopInput, DirEntry, InterfaceInfo,
-	MediaCapability, MediaFrame, MediaSource, MediaSourceKind, MouseButton, PeerInfo,
+	LiveSearchArgs, MediaCapability, MediaFrame, MediaSource, MediaSourceKind, MouseButton,
+	PeerInfo, SearchEvent, SearchSort,
 };
 use crate::updater::UpdateProgress;
-use crate::{PuppyNet, StorageUsageFile};
+use crate::{FLAG_WRITE, LiveSearchPeerEvent, PuppyNet, StorageUsageFile};
 use anyhow::{Context, Result};
 use base64::Engine;
 use libp2p::PeerId;
 use rand::RngCore;
 use rand::rngs::OsRng;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -25,9 +26,17 @@ use wgui::{HttpRequest, HttpResponse, Wgui, WguiModel};
 
 const SESSION_COOKIE: &str = "sid";
 const SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 7;
+const COMMON_SEARCH_MIME_TYPES: &[&str] = &[
+	"application/pdf",
+	"image/jpeg",
+	"image/png",
+	"text/plain",
+	"video/mp4",
+];
 const FAVICON_ICO: &[u8] = include_bytes!("../http_assets/favicon.ico");
 const MONITOR_STREAM_JS: &[u8] = include_bytes!("../http_assets/monitor_stream.js");
 const TRACKPAD_JS: &[u8] = include_bytes!("../http_assets/trackpad.js");
+const SEARCH_ALL_DEVICES: &str = "__all__";
 
 #[path = "pages/mod.rs"]
 mod pages;
@@ -81,6 +90,7 @@ struct UiState {
 	peer_screen_status: String,
 	peer_files_path: String,
 	peer_files: Vec<DirEntry>,
+	shared_folders: Vec<UiSharedFolder>,
 	files: Vec<FileEntry>,
 	storage: Vec<StorageUsageFile>,
 	users: Vec<String>,
@@ -105,6 +115,7 @@ impl UiState {
 			peer_screen_status: String::from("Monitor capability not checked yet."),
 			peer_files_path: String::from("/"),
 			peer_files: Vec::new(),
+			shared_folders: Vec::new(),
 			files: Vec::new(),
 			storage: Vec::new(),
 			users: Vec::new(),
@@ -198,6 +209,12 @@ struct UiStorageRow {
 }
 
 #[derive(Clone, WguiModel)]
+struct UiSharedFolder {
+	path: String,
+	access: String,
+}
+
+#[derive(Clone, WguiModel)]
 struct UiMimeOption {
 	name: String,
 	selected: bool,
@@ -209,6 +226,19 @@ struct UiSearchRow {
 	path: String,
 	size: String,
 	replicas: String,
+	peer_id: String,
+	device: String,
+	mime_type: String,
+	modified_at: String,
+}
+
+#[derive(Clone)]
+struct UiSearchRawRow {
+	name: String,
+	path: String,
+	size: u64,
+	mime_type: Option<String>,
+	modified_at: Option<String>,
 	peer_id: String,
 }
 
@@ -234,9 +264,22 @@ struct UiClientSession {
 	confirm_password: String,
 	password_change_status: String,
 	search_name_query: String,
+	search_target: String,
+	search_sort: String,
+	search_page_size: String,
+	search_visible_count: usize,
+	search_raw_rows: Vec<UiSearchRawRow>,
 	search_selected_mimes: Vec<String>,
 	search_results: Vec<UiSearchRow>,
 	search_status: String,
+	search_in_progress: bool,
+	search_total_peers: usize,
+	search_done_peers: usize,
+	search_truncated: bool,
+	search_rx: Option<Arc<std::sync::Mutex<mpsc::Receiver<LiveSearchPeerEvent>>>>,
+	shared_folder_path: String,
+	shared_folder_access: String,
+	shared_folder_status: String,
 	new_user_username: String,
 	new_user_password: String,
 	new_user_status: String,
@@ -279,12 +322,28 @@ pub(super) struct UiViewState {
 	confirm_password: String,
 	password_change_status: String,
 	search_name_query: String,
+	search_target: String,
+	search_target_options: Vec<UiSelectOption>,
+	search_sort: String,
+	search_sort_options: Vec<UiSelectOption>,
+	search_page_size: String,
+	search_page_size_options: Vec<UiSelectOption>,
+	search_page_text: String,
+	search_can_load_more: bool,
+	search_in_progress: bool,
 	search_selected_mimes_text: String,
 	search_mime_options: Vec<UiMimeOption>,
 	has_search_mime_options: bool,
 	search_status: String,
 	search_results: Vec<UiSearchRow>,
 	search_has_results: bool,
+	is_current_device: bool,
+	shared_folder_path: String,
+	shared_folder_access: String,
+	shared_folder_access_options: Vec<UiSelectOption>,
+	shared_folder_status: String,
+	shared_folders: Vec<UiSharedFolder>,
+	has_shared_folders: bool,
 	new_user_username: String,
 	new_user_password: String,
 	new_user_status: String,
@@ -415,6 +474,130 @@ impl<'a> UiControllerCore<'a> {
 	pub(super) fn is_authenticated(&self) -> bool {
 		self.authenticated_username().is_some()
 	}
+}
+
+fn search_sort_options() -> Vec<UiSelectOption> {
+	vec![
+		UiSelectOption {
+			value: String::from("latest"),
+			name: String::from("Latest"),
+		},
+		UiSelectOption {
+			value: String::from("name"),
+			name: String::from("Name"),
+		},
+		UiSelectOption {
+			value: String::from("size"),
+			name: String::from("Size"),
+		},
+	]
+}
+
+fn search_page_size_options() -> Vec<UiSelectOption> {
+	["25", "50", "100"]
+		.into_iter()
+		.map(|value| UiSelectOption {
+			value: value.to_string(),
+			name: value.to_string(),
+		})
+		.collect()
+}
+
+fn shared_folder_access_options() -> Vec<UiSelectOption> {
+	vec![
+		UiSelectOption {
+			value: String::from("read"),
+			name: String::from("Read"),
+		},
+		UiSelectOption {
+			value: String::from("write"),
+			name: String::from("Read/write"),
+		},
+	]
+}
+
+fn shared_folder_access_label(flags: u8) -> String {
+	if flags & FLAG_WRITE != 0 {
+		String::from("read/write/search")
+	} else {
+		String::from("read/search")
+	}
+}
+
+fn search_target_options(peers: &[PeerRow]) -> Vec<UiSelectOption> {
+	let mut options = vec![UiSelectOption {
+		value: String::from(SEARCH_ALL_DEVICES),
+		name: String::from("All devices"),
+	}];
+	options.extend(peers.iter().map(|peer| UiSelectOption {
+		value: peer.id.clone(),
+		name: if peer.local {
+			format!("{} (current)", peer.name)
+		} else {
+			peer.name.clone()
+		},
+	}));
+	options
+}
+
+fn search_sort(value: &str) -> SearchSort {
+	match value {
+		"name" => SearchSort::Name,
+		"size" => SearchSort::Size,
+		_ => SearchSort::Latest,
+	}
+}
+
+fn search_page_size(value: &str) -> usize {
+	value.parse::<usize>().unwrap_or(50).clamp(1, 250)
+}
+
+fn reset_search_visible_count(session: &mut UiClientSession) {
+	session.search_visible_count = search_page_size(&session.search_page_size);
+}
+
+fn search_row_device(raw: &UiSearchRawRow) -> String {
+	short_peer_id(&raw.peer_id)
+}
+
+fn search_row_to_ui(raw: UiSearchRawRow) -> UiSearchRow {
+	let device = search_row_device(&raw);
+	UiSearchRow {
+		name: raw.name,
+		path: raw.path,
+		size: format_size(raw.size),
+		replicas: String::from("Live result"),
+		peer_id: raw.peer_id.clone(),
+		device,
+		mime_type: raw.mime_type.unwrap_or_else(|| String::from("unknown")),
+		modified_at: raw.modified_at.unwrap_or_else(|| String::from("unknown")),
+	}
+}
+
+fn rebuild_search_results(session: &mut UiClientSession) {
+	let page_size = search_page_size(&session.search_page_size);
+	let visible_count = session.search_visible_count.max(page_size);
+	let mut rows = session.search_raw_rows.clone();
+	match search_sort(&session.search_sort) {
+		SearchSort::Name => rows.sort_by(|left, right| {
+			left.name
+				.to_ascii_lowercase()
+				.cmp(&right.name.to_ascii_lowercase())
+		}),
+		SearchSort::Size => rows.sort_by_key(|row| std::cmp::Reverse(row.size)),
+		SearchSort::Latest => rows.sort_by(|left, right| {
+			right
+				.modified_at
+				.cmp(&left.modified_at)
+				.then_with(|| left.name.cmp(&right.name))
+		}),
+	}
+	session.search_visible_count = visible_count;
+	session.search_results = rows
+		.into_iter()
+		.take(visible_count)
+		.map(search_row_to_ui)
+		.collect();
 }
 
 fn short_peer_id(peer_id: &str) -> String {
@@ -671,6 +854,7 @@ impl UiControllerCore<'_> {
 		let state = self.block_on(self.ctx.state.server.snapshot());
 		let session = self.current_session();
 		let authenticated_username = self.authenticated_username();
+		let search_targets = search_target_options(&state.peers);
 		let peers = state
 			.peers
 			.into_iter()
@@ -857,6 +1041,13 @@ impl UiControllerCore<'_> {
 				),
 			})
 			.collect::<Vec<_>>();
+		let is_current_device = state
+			.selected_peer
+			.as_deref()
+			.zip(state.local_peer_id.as_deref())
+			.map(|(selected, local)| selected == local)
+			.unwrap_or(false);
+		let shared_folders = state.shared_folders;
 		let users = state.users;
 		let search_mime_options = state
 			.search_mime_types
@@ -869,6 +1060,25 @@ impl UiControllerCore<'_> {
 					.any(|selected| selected == mime),
 			})
 			.collect::<Vec<_>>();
+		let search_target = if session.search_target.is_empty() {
+			String::from(SEARCH_ALL_DEVICES)
+		} else {
+			session.search_target.clone()
+		};
+		let search_sort = if session.search_sort.is_empty() {
+			String::from("latest")
+		} else {
+			session.search_sort.clone()
+		};
+		let search_page_size_text = if session.search_page_size.is_empty() {
+			String::from("50")
+		} else {
+			session.search_page_size.clone()
+		};
+		let search_total_rows = session.search_raw_rows.len();
+		let search_visible_rows = session.search_results.len();
+		let search_page_text =
+			format!("Showing {search_visible_rows} of {search_total_rows} result(s)");
 		UiViewState {
 			page: page_label(&state.page).to_string(),
 			status: state.status,
@@ -882,6 +1092,15 @@ impl UiControllerCore<'_> {
 			confirm_password: session.confirm_password,
 			password_change_status: session.password_change_status,
 			search_name_query: session.search_name_query,
+			search_target,
+			search_target_options: search_targets,
+			search_sort,
+			search_sort_options: search_sort_options(),
+			search_page_size: search_page_size_text,
+			search_page_size_options: search_page_size_options(),
+			search_page_text,
+			search_can_load_more: search_visible_rows < search_total_rows,
+			search_in_progress: session.search_in_progress,
 			search_selected_mimes_text: if session.search_selected_mimes.is_empty() {
 				String::from("All mime types")
 			} else {
@@ -892,6 +1111,17 @@ impl UiControllerCore<'_> {
 			search_status: session.search_status,
 			search_has_results: !session.search_results.is_empty(),
 			search_results: session.search_results,
+			is_current_device,
+			shared_folder_path: session.shared_folder_path,
+			shared_folder_access: if session.shared_folder_access.is_empty() {
+				String::from("read")
+			} else {
+				session.shared_folder_access
+			},
+			shared_folder_access_options: shared_folder_access_options(),
+			shared_folder_status: session.shared_folder_status,
+			has_shared_folders: !shared_folders.is_empty(),
+			shared_folders,
 			new_user_username: session.new_user_username,
 			new_user_password: session.new_user_password,
 			new_user_status: session.new_user_status,
@@ -1715,46 +1945,342 @@ impl UiControllerCore<'_> {
 		});
 	}
 
+	pub fn edit_shared_folder_path(&self, value: String) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		self.update_session(|session| {
+			session.shared_folder_path = value;
+			session.shared_folder_status.clear();
+		});
+	}
+
+	pub fn select_shared_folder_access(&self, value: String) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		self.update_session(|session| {
+			session.shared_folder_access = value;
+			session.shared_folder_status.clear();
+		});
+	}
+
+	pub fn add_shared_folder(&self) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		let snapshot = self.block_on(self.ctx.state.server.snapshot());
+		if snapshot.selected_peer != snapshot.local_peer_id {
+			self.update_session(|session| {
+				session.shared_folder_status =
+					String::from("Allowed folders can only be changed on the current device");
+			});
+			return;
+		}
+		let (path, access) = {
+			let session = self.current_session();
+			(
+				session.shared_folder_path.trim().to_string(),
+				session.shared_folder_access,
+			)
+		};
+		if path.is_empty() {
+			self.update_session(|session| {
+				session.shared_folder_status = String::from("Path is required");
+			});
+			return;
+		}
+		let result = self.block_on(async {
+			tokio::time::timeout(std::time::Duration::from_secs(3), async {
+				if access == "write" {
+					self.ctx
+						.state
+						.server
+						.puppy
+						.share_read_write_folder_async(&path)
+						.await
+				} else {
+					self.ctx
+						.state
+						.server
+						.puppy
+						.share_read_only_folder_async(&path)
+						.await
+				}
+			})
+			.await
+			.unwrap_or_else(|_| Err(anyhow::anyhow!("daemon did not respond in time")))
+		});
+		match result {
+			Ok(()) => {
+				self.block_on(self.ctx.state.server.refresh_peers());
+				self.update_session(|session| {
+					session.shared_folder_path.clear();
+					session.shared_folder_access = String::from("read");
+					session.shared_folder_status = format!("Added allowed folder {path}");
+				});
+			}
+			Err(err) => {
+				self.update_session(|session| {
+					session.shared_folder_status = format!("Failed to add folder: {err}");
+				});
+			}
+		}
+	}
+
+	pub fn select_search_target(&self, value: String) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		self.update_session(|session| {
+			session.search_target = value;
+			reset_search_visible_count(session);
+			rebuild_search_results(session);
+		});
+	}
+
+	pub fn select_search_sort(&self, value: String) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		self.update_session(|session| {
+			session.search_sort = value;
+			reset_search_visible_count(session);
+			rebuild_search_results(session);
+		});
+	}
+
+	pub fn select_search_page_size(&self, value: String) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		self.update_session(|session| {
+			session.search_page_size = value;
+			reset_search_visible_count(session);
+			rebuild_search_results(session);
+		});
+	}
+
+	pub fn search_load_more(&self) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		self.update_session(|session| {
+			let page_size = search_page_size(&session.search_page_size);
+			session.search_visible_count = session
+				.search_visible_count
+				.max(page_size)
+				.saturating_add(page_size);
+			rebuild_search_results(session);
+		});
+	}
+
+	fn watch_live_search(&self, rx: Arc<std::sync::Mutex<mpsc::Receiver<LiveSearchPeerEvent>>>) {
+		let Some(client_id) = self.ctx.client_id() else {
+			return;
+		};
+		let session_key = self.session_key();
+		let route_path = self
+			.ctx
+			.route()
+			.map(|route| route.path)
+			.unwrap_or_else(|| String::from("/search"));
+		let ctx = Arc::clone(self.ctx);
+		std::thread::spawn(move || {
+			loop {
+				let event = match rx.lock() {
+					Ok(stream) => stream.recv(),
+					Err(err) => {
+						if let Ok(mut sessions) = ctx.state.sessions.lock()
+							&& let Some(session) = sessions.get_mut(&session_key)
+						{
+							session.search_status = format!("Search stream lock failed: {err}");
+							session.search_in_progress = false;
+							if session
+								.search_rx
+								.as_ref()
+								.map(|current| Arc::ptr_eq(current, &rx))
+								.unwrap_or(false)
+							{
+								session.search_rx = None;
+							}
+						}
+						ctx.push_state_for_client(client_id, route_path.clone());
+						break;
+					}
+				};
+				let event = match event {
+					Ok(event) => event,
+					Err(_) => {
+						if let Ok(mut sessions) = ctx.state.sessions.lock()
+							&& let Some(session) = sessions.get_mut(&session_key)
+							&& session
+								.search_rx
+								.as_ref()
+								.map(|current| Arc::ptr_eq(current, &rx))
+								.unwrap_or(false)
+						{
+							session.search_in_progress = false;
+							session.search_rx = None;
+							rebuild_search_results(session);
+							if session.search_status == "Search started" {
+								session.search_status =
+									format!("Found {} result(s)", session.search_raw_rows.len());
+							}
+						}
+						ctx.push_state_for_client(client_id, route_path.clone());
+						break;
+					}
+				};
+				if let Ok(mut sessions) = ctx.state.sessions.lock()
+					&& let Some(session) = sessions.get_mut(&session_key)
+				{
+					if !session
+						.search_rx
+						.as_ref()
+						.map(|current| Arc::ptr_eq(current, &rx))
+						.unwrap_or(false)
+					{
+						break;
+					}
+					match event.event {
+						SearchEvent::Rows { rows } => {
+							session.search_raw_rows.extend(rows.into_iter().map(|row| {
+								UiSearchRawRow {
+									name: row.name,
+									path: row.path,
+									size: row.size,
+									mime_type: row.mime_type,
+									modified_at: row.modified_at,
+									peer_id: event.peer.to_string(),
+								}
+							}));
+							rebuild_search_results(session);
+							session.search_status =
+								format!("Searching... {} result(s)", session.search_raw_rows.len());
+						}
+						SearchEvent::Progress { visited, matched } => {
+							session.search_status =
+								format!("Searching... visited {visited}, matched {matched}");
+						}
+						SearchEvent::Finished { total, truncated } => {
+							session.search_done_peers = session.search_done_peers.saturating_add(1);
+							session.search_truncated |= truncated;
+							rebuild_search_results(session);
+							if session.search_done_peers >= session.search_total_peers {
+								session.search_in_progress = false;
+								session.search_rx = None;
+								session.search_status = if session.search_truncated {
+									format!(
+										"Found {} result(s); result set was truncated",
+										session.search_raw_rows.len()
+									)
+								} else {
+									format!("Found {} result(s)", session.search_raw_rows.len())
+								};
+							} else {
+								session.search_status = format!(
+									"Device finished with {total} result(s); {}/{} done",
+									session.search_done_peers, session.search_total_peers
+								);
+							}
+						}
+						SearchEvent::Failed { error } => {
+							session.search_done_peers = session.search_done_peers.saturating_add(1);
+							rebuild_search_results(session);
+							if session.search_done_peers >= session.search_total_peers {
+								session.search_in_progress = false;
+								session.search_rx = None;
+							}
+							session.search_status = format!("Search failed on a device: {error}");
+						}
+					}
+				}
+				ctx.push_state_for_client(client_id, route_path.clone());
+			}
+		});
+	}
+
 	pub fn run_search(&self) {
 		if !self.is_authenticated() {
 			self.ctx.push_state("/login");
 			return;
 		}
+		let snapshot = self.block_on(self.ctx.state.server.snapshot());
 		let session = self.current_session();
-		let query = session.search_name_query;
-		let args = crate::SearchFilesArgs {
+		let query = session.search_name_query.clone();
+		let target = if session.search_target.is_empty() {
+			String::from(SEARCH_ALL_DEVICES)
+		} else {
+			session.search_target.clone()
+		};
+		let peer_ids = snapshot
+			.peers
+			.iter()
+			.filter(|peer| target == SEARCH_ALL_DEVICES || peer.id == target)
+			.filter_map(|peer| PeerId::from_str(&peer.id).ok())
+			.collect::<Vec<_>>();
+		if peer_ids.is_empty() {
+			self.update_session(|session| {
+				session.search_raw_rows.clear();
+				session.search_results.clear();
+				session.search_status = String::from("No target devices available");
+				session.search_in_progress = false;
+				session.search_rx = None;
+			});
+			return;
+		}
+		let total_peers = peer_ids.len();
+		let page_size = search_page_size(&session.search_page_size);
+		let args = LiveSearchArgs {
 			name_query: if query.trim().is_empty() {
 				None
 			} else {
 				Some(query.clone())
 			},
-			mime_types: session.search_selected_mimes,
+			mime_types: session.search_selected_mimes.clone(),
 			page: 0,
-			page_size: 50,
+			page_size,
+			sort: search_sort(&session.search_sort),
 			sort_desc: true,
-			..Default::default()
 		};
-		match self.ctx.state.server.puppy.search_files(args) {
-			Ok((rows, _mimes, total)) => {
-				let view_rows = rows
-					.into_iter()
-					.map(|row| UiSearchRow {
-						name: row.name,
-						path: row.path,
-						size: format_size(row.size),
-						replicas: format!("Replicas: {}", row.replicas),
-						peer_id: format_hash(&row.node_id),
-					})
-					.collect::<Vec<_>>();
+		match self
+			.ctx
+			.state
+			.server
+			.puppy
+			.live_search_peers(peer_ids, args)
+		{
+			Ok(rx) => {
+				let watch_rx = Arc::clone(&rx);
 				self.update_session(|session| {
-					session.search_results = view_rows;
-					session.search_status = format!("Found {} result(s)", total);
+					session.search_target = target;
+					session.search_visible_count = page_size;
+					session.search_raw_rows.clear();
+					session.search_results.clear();
+					session.search_status = String::from("Search started");
+					session.search_in_progress = true;
+					session.search_total_peers = total_peers;
+					session.search_done_peers = 0;
+					session.search_truncated = false;
+					session.search_rx = Some(rx);
 				});
+				self.watch_live_search(watch_rx);
 			}
 			Err(err) => {
 				self.update_session(|session| {
 					session.search_status = format!("Search failed: {err}");
+					session.search_raw_rows.clear();
 					session.search_results.clear();
+					session.search_in_progress = false;
+					session.search_rx = None;
 				});
 			}
 		}
@@ -2644,13 +3170,19 @@ impl UiServer {
 	}
 
 	async fn refresh_search_mime_types(&self) {
+		let mut merged = COMMON_SEARCH_MIME_TYPES
+			.iter()
+			.map(|mime| mime.to_string())
+			.collect::<BTreeSet<_>>();
 		match self.puppy.get_mime_types() {
 			Ok(mimes) => {
+				merged.extend(mimes);
 				let mut state = self.state.lock().await;
-				state.search_mime_types = mimes;
+				state.search_mime_types = merged.into_iter().collect();
 			}
 			Err(err) => {
 				let mut state = self.state.lock().await;
+				state.search_mime_types = merged.into_iter().collect();
 				state.status = format!("Failed to load mime types: {err}");
 			}
 		}
@@ -2715,6 +3247,14 @@ impl UiServer {
 				let mut state = self.state.lock().await;
 				state.peers = peers;
 				state.local_peer_id = Some(local_id);
+				state.shared_folders = snapshot
+					.shared_folders
+					.into_iter()
+					.map(|folder| UiSharedFolder {
+						path: folder.path().to_string_lossy().into_owned(),
+						access: shared_folder_access_label(folder.flags()),
+					})
+					.collect();
 				state.status = format!("Loaded {} device(s)", state.peers.len());
 			}
 			None => {
@@ -3410,6 +3950,7 @@ pub async fn run_ui(puppy: Arc<PuppyNet>, bind: SocketAddr) -> Result<()> {
 	let _template_rebuild_sentinel = [
 		include_str!("../wui/pages/home.wui"),
 		include_str!("../wui/pages/peers.wui"),
+		include_str!("../wui/pages/search.wui"),
 		include_str!("../wui/pages/settings.wui"),
 		include_str!("../wui/pages/users.wui"),
 		include_str!("../wui/partials/file_preview_modal.wui"),

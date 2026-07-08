@@ -21,5 +21,5 @@ pub use types::FileChunk;
 pub mod wait_group;
 pub use db::{FileEntry, FileSearchResult, SearchFilesArgs, StorageUsageFile};
 pub use p2p::Thumbnail;
-pub use puppynet::{PuppyNet, ScanHandle, ScanResultRow};
+pub use puppynet::{LiveSearchPeerEvent, PuppyNet, ScanHandle, ScanResultRow};
 pub use updater::{UpdateProgress, UpdateResult};

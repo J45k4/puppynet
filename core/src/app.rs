@@ -3,8 +3,9 @@ use crate::auth;
 use crate::desktop_input;
 use crate::p2p::{
 	AudioCapability, AudioDevice, AuthMethod, CpuInfo, DesktopInput, DirEntry, DiskInfo,
-	FileWriteAck, InterfaceInfo, MediaCapability, MediaFrame, MediaSource, PeerInfo, PeerReq,
-	PeerRes, PermissionGrant, Thumbnail, permission_from_grant,
+	FileWriteAck, InterfaceInfo, LiveSearchArgs, LiveSearchRow, MediaCapability, MediaFrame,
+	MediaSource, PeerInfo, PeerReq, PeerRes, PermissionGrant, SearchEvent, Thumbnail,
+	permission_from_grant,
 };
 use crate::types::FileChunk;
 use crate::updater::{self, UpdateProgress, UpdateResult};
@@ -14,8 +15,9 @@ use crate::{
 	db::{
 		Cpu as DbCpu, FileEntry, Interface as DbInterface, Node, NodeID, StorageUsageFile,
 		delete_user, fetch_file_entries_paginated, load_discovered_peers, load_peer_permissions,
-		load_peers, load_users, remove_discovered_peer, remove_stale_cpus, remove_stale_interfaces,
-		save_cpu, save_discovered_peer, save_interface, save_node, save_peer, save_user,
+		load_peers, load_shared_folders, load_users, remove_discovered_peer, remove_stale_cpus,
+		remove_stale_interfaces, save_cpu, save_discovered_peer, save_interface, save_node,
+		save_peer, save_shared_folder, save_user,
 	},
 	p2p::{AgentBehaviour, AgentEvent, build_swarm, load_or_generate_keypair},
 	scan::{self, ScanEvent},
@@ -49,6 +51,7 @@ use tokio::{
 	},
 	task::JoinHandle,
 };
+use walkdir::WalkDir;
 
 use libp2p::request_response::{OutboundRequestId, ResponseChannel};
 
@@ -154,6 +157,11 @@ pub enum Command {
 		peer: PeerId,
 		path: String,
 		scan_id: u64,
+	},
+	LiveSearch {
+		peer: PeerId,
+		args: LiveSearchArgs,
+		search_id: u64,
 	},
 	GetThumbnail {
 		peer: PeerId,
@@ -355,6 +363,123 @@ async fn generate_thumbnail(path: &Path, max_width: u32, max_height: u32) -> Res
 	.map_err(|e| anyhow!("thumbnail task panicked: {}", e))??;
 
 	Ok(result)
+}
+
+const LIVE_SEARCH_BATCH_SIZE: usize = 25;
+const LIVE_SEARCH_PROGRESS_INTERVAL: usize = 250;
+const LIVE_SEARCH_VISITED_CAP: usize = 50_000;
+const LIVE_SEARCH_MATCH_CAP: usize = 5_000;
+
+fn search_name_matches(path: &Path, query: &Option<String>) -> bool {
+	let Some(query) = query
+		.as_ref()
+		.map(|value| value.trim())
+		.filter(|value| !value.is_empty())
+	else {
+		return true;
+	};
+	let query = query.to_ascii_lowercase();
+	path.file_name()
+		.and_then(|name| name.to_str())
+		.map(|name| name.to_ascii_lowercase().contains(&query))
+		.unwrap_or(false)
+}
+
+fn search_mime_matches(mime_type: &Option<String>, selected: &[String]) -> bool {
+	if selected.is_empty() {
+		return true;
+	}
+	mime_type
+		.as_ref()
+		.map(|mime| selected.iter().any(|selected| selected == mime))
+		.unwrap_or(false)
+}
+
+fn live_search_row(path: &Path, metadata: &std::fs::Metadata) -> LiveSearchRow {
+	let name = path
+		.file_name()
+		.and_then(|name| name.to_str())
+		.unwrap_or_default()
+		.to_string();
+	let mime_type = mime_guess::from_path(path)
+		.first_raw()
+		.map(|value| value.to_string());
+	let modified_at = metadata
+		.modified()
+		.ok()
+		.map(DateTime::<Utc>::from)
+		.map(|value| value.to_rfc3339());
+	LiveSearchRow {
+		name,
+		path: path.to_string_lossy().to_string(),
+		size: metadata.len(),
+		mime_type,
+		modified_at,
+	}
+}
+
+fn live_search_roots<F>(roots: Vec<PathBuf>, args: LiveSearchArgs, mut emit: F)
+where
+	F: FnMut(SearchEvent),
+{
+	let mut visited = 0usize;
+	let mut matched = 0usize;
+	let mut truncated = false;
+	let mut batch = Vec::new();
+
+	for root in roots {
+		if visited >= LIVE_SEARCH_VISITED_CAP || matched >= LIVE_SEARCH_MATCH_CAP {
+			truncated = true;
+			break;
+		}
+		for entry in WalkDir::new(&root).follow_links(false).into_iter() {
+			if visited >= LIVE_SEARCH_VISITED_CAP || matched >= LIVE_SEARCH_MATCH_CAP {
+				truncated = true;
+				break;
+			}
+			let Ok(entry) = entry else {
+				continue;
+			};
+			if !entry.file_type().is_file() {
+				continue;
+			}
+			visited += 1;
+			let Ok(path) = std::fs::canonicalize(entry.path()) else {
+				continue;
+			};
+			if !path.starts_with(&root) || !search_name_matches(&path, &args.name_query) {
+				continue;
+			}
+			let Ok(metadata) = std::fs::metadata(&path) else {
+				continue;
+			};
+			if !metadata.is_file() {
+				continue;
+			}
+			let row = live_search_row(&path, &metadata);
+			if !search_mime_matches(&row.mime_type, &args.mime_types) {
+				continue;
+			}
+			matched += 1;
+			batch.push(row);
+			if batch.len() >= LIVE_SEARCH_BATCH_SIZE {
+				emit(SearchEvent::Rows {
+					rows: std::mem::take(&mut batch),
+				});
+			}
+			if visited.is_multiple_of(LIVE_SEARCH_PROGRESS_INTERVAL) {
+				emit(SearchEvent::Progress { visited, matched });
+			}
+		}
+	}
+	if !batch.is_empty() {
+		emit(SearchEvent::Rows { rows: batch });
+	}
+	emit(SearchEvent::Progress { visited, matched });
+	emit(SearchEvent::Finished {
+		total: matched,
+		truncated,
+	});
 }
 
 trait ResponseDecoder: Sized + Send + 'static {
@@ -600,6 +725,63 @@ impl PendingResponseHandler for PendingScanEventAck {
 	}
 }
 
+struct PendingRemoteSearchStart {
+	search_id: u64,
+	channels: Arc<Mutex<HashMap<u64, mpsc::Sender<SearchEvent>>>>,
+}
+
+impl PendingRemoteSearchStart {
+	fn request(
+		search_id: u64,
+		channels: Arc<Mutex<HashMap<u64, mpsc::Sender<SearchEvent>>>>,
+	) -> PendingRequest {
+		Box::new(Self {
+			search_id,
+			channels,
+		})
+	}
+}
+
+impl PendingResponseHandler for PendingRemoteSearchStart {
+	fn complete(self: Box<Self>, response: PeerRes) {
+		match response {
+			PeerRes::SearchStarted(Ok(())) => {}
+			PeerRes::SearchStarted(Err(err)) => {
+				if let Some(tx) = self.channels.lock().unwrap().remove(&self.search_id) {
+					let _ = tx.send(SearchEvent::Failed { error: err });
+				}
+			}
+			other => {
+				log::warn!("unexpected response for remote search start {:?}", other);
+			}
+		}
+	}
+
+	fn fail(self: Box<Self>, error: anyhow::Error) {
+		if let Some(tx) = self.channels.lock().unwrap().remove(&self.search_id) {
+			let _ = tx.send(SearchEvent::Failed {
+				error: error.to_string(),
+			});
+		}
+	}
+}
+
+struct PendingSearchEventAck;
+
+impl PendingSearchEventAck {
+	fn request() -> PendingRequest {
+		Box::new(Self)
+	}
+}
+
+impl PendingResponseHandler for PendingSearchEventAck {
+	fn complete(self: Box<Self>, _response: PeerRes) {}
+
+	fn fail(self: Box<Self>, error: anyhow::Error) {
+		log::warn!("search event delivery failed: {}", error);
+	}
+}
+
 struct PendingRemoteUpdateStart {
 	update_id: u64,
 	channels: Arc<Mutex<HashMap<u64, mpsc::Sender<UpdateProgress>>>>,
@@ -703,6 +885,11 @@ enum InternalCommand {
 		scan_id: u64,
 		event: ScanEvent,
 	},
+	SendSearchEvent {
+		target: PeerId,
+		search_id: u64,
+		event: SearchEvent,
+	},
 	SendUpdateEvent {
 		target: PeerId,
 		update_id: u64,
@@ -722,6 +909,7 @@ pub struct App {
 	system: System,
 	db: Arc<Mutex<SqliteConnection>>,
 	remote_scans: Arc<Mutex<HashMap<u64, mpsc::Sender<ScanEvent>>>>,
+	remote_searches: Arc<Mutex<HashMap<u64, mpsc::Sender<SearchEvent>>>>,
 	remote_updates: Arc<Mutex<HashMap<u64, mpsc::Sender<UpdateProgress>>>>,
 	shell_sessions: HashMap<u64, ShellSession>,
 }
@@ -850,6 +1038,7 @@ impl App {
 		mut state: State,
 		db: Arc<Mutex<SqliteConnection>>,
 		remote_scans: Arc<Mutex<HashMap<u64, mpsc::Sender<ScanEvent>>>>,
+		remote_searches: Arc<Mutex<HashMap<u64, mpsc::Sender<SearchEvent>>>>,
 		remote_updates: Arc<Mutex<HashMap<u64, mpsc::Sender<UpdateProgress>>>>,
 	) -> (Self, tokio::sync::mpsc::UnboundedSender<Command>) {
 		let key_path = env::var("KEYPAIR").unwrap_or_else(|_| String::from("peer_keypair.bin"));
@@ -904,6 +1093,16 @@ impl App {
 				}
 			}
 		};
+		let stored_shared_folders = {
+			let conn = db.lock().unwrap();
+			match load_shared_folders(&conn) {
+				Ok(folders) => folders,
+				Err(err) => {
+					log::error!("failed to load shared folders: {err}");
+					Vec::new()
+				}
+			}
+		};
 		let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 		let (internal_tx, internal_rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -918,6 +1117,9 @@ impl App {
 		for (target, permissions) in stored_permissions {
 			state.set_peer_permissions_from_storage(target, permissions);
 		}
+		for folder in stored_shared_folders {
+			state.add_shared_folder(folder);
+		}
 		let mut app = App {
 			state,
 			swarm,
@@ -928,6 +1130,7 @@ impl App {
 			system: System::new(),
 			db,
 			remote_scans,
+			remote_searches,
 			remote_updates,
 			shell_sessions: HashMap::new(),
 		};
@@ -1226,6 +1429,47 @@ impl App {
 					let _ = forward.await;
 				});
 				PeerRes::ScanStarted(Ok(()))
+			}
+			PeerReq::StartSearch { id, args } => {
+				let roots = self.state.search_roots_for_peer(&peer);
+				let target = peer;
+				let internal_tx = self.internal_tx.clone();
+				tokio::task::spawn_blocking(move || {
+					if roots.is_empty() {
+						let _ = internal_tx.send(InternalCommand::SendSearchEvent {
+							target,
+							search_id: id,
+							event: SearchEvent::Finished {
+								total: 0,
+								truncated: false,
+							},
+						});
+						return;
+					}
+					live_search_roots(roots, args, |event| {
+						let _ = internal_tx.send(InternalCommand::SendSearchEvent {
+							target,
+							search_id: id,
+							event,
+						});
+					});
+				});
+				PeerRes::SearchStarted(Ok(()))
+			}
+			PeerReq::SearchEvent { id, event } => {
+				let mut map = self.remote_searches.lock().unwrap();
+				if let Some(tx) = map.get(&id) {
+					let _ = tx.send(event.clone());
+					if matches!(
+						event,
+						SearchEvent::Finished { .. } | SearchEvent::Failed { .. }
+					) {
+						map.remove(&id);
+					}
+				} else {
+					log::warn!("received search event for unknown id {}", id);
+				}
+				PeerRes::SearchEventAck
 			}
 			PeerReq::ScanEvent { id, event } => {
 				let mut map = self.remote_scans.lock().unwrap();
@@ -2013,7 +2257,16 @@ impl App {
 			Command::ListDir { peer, path, tx } => {
 				let is_self = self.state.me == peer;
 				if is_self {
-					let result = Self::collect_dir_entries(Path::new(&path)).await;
+					let result = match fs::canonicalize(&path).await {
+						Ok(canonical) => {
+							if self.can_access(peer, &canonical, FLAG_READ | FLAG_SEARCH) {
+								Self::collect_dir_entries(&canonical).await
+							} else {
+								Err(anyhow!("Access denied"))
+							}
+						}
+						Err(err) => Err(anyhow!("Failed to access directory: {err}")),
+					};
 					let _ = tx.send(result);
 					return;
 				}
@@ -2268,7 +2521,16 @@ impl App {
 			}
 			Command::ReadFile(req) => {
 				if self.state.me == req.peer_id {
-					let chunk = read_file(Path::new(&req.path), req.offset, req.length).await;
+					let chunk = match fs::canonicalize(&req.path).await {
+						Ok(canonical) => {
+							if self.can_access(req.peer_id, &canonical, FLAG_READ | FLAG_SEARCH) {
+								read_file(&canonical, req.offset, req.length).await
+							} else {
+								Err(anyhow!("Access denied"))
+							}
+						}
+						Err(err) => Err(anyhow!("Failed to access file: {err}")),
+					};
 					let _ = req.tx.send(chunk);
 					return;
 				}
@@ -2288,6 +2550,19 @@ impl App {
 				tx,
 				cancel_flag,
 			} => {
+				let canonical = match fs::canonicalize(&path).await {
+					Ok(canonical) => canonical,
+					Err(err) => {
+						let _ = tx.send(ScanEvent::Finished(Err(format!(
+							"failed to access path: {err}"
+						))));
+						return;
+					}
+				};
+				if !self.can_access(self.state.me, &canonical, FLAG_READ | FLAG_SEARCH) {
+					let _ = tx.send(ScanEvent::Finished(Err(String::from("Access denied"))));
+					return;
+				}
 				let node_id = match self.local_node_id() {
 					Some(id) => id,
 					None => {
@@ -2299,6 +2574,7 @@ impl App {
 				};
 				let db = Arc::clone(&self.db);
 				let cancel_flag = Arc::clone(&cancel_flag);
+				let path = canonical.to_string_lossy().to_string();
 				tokio::task::spawn_blocking(move || {
 					let result = db
 						.lock()
@@ -2320,6 +2596,42 @@ impl App {
 					};
 					let _ = tx.send(final_event);
 				});
+			}
+			Command::LiveSearch {
+				peer,
+				args,
+				search_id,
+			} => {
+				if self.state.me == peer {
+					let roots = self.state.search_roots_for_peer(&peer);
+					let tx = self.remote_searches.lock().unwrap().remove(&search_id);
+					if let Some(tx) = tx {
+						tokio::task::spawn_blocking(move || {
+							if roots.is_empty() {
+								let _ = tx.send(SearchEvent::Finished {
+									total: 0,
+									truncated: false,
+								});
+								return;
+							}
+							live_search_roots(roots, args, |event| {
+								let _ = tx.send(event);
+							});
+						});
+					}
+					return;
+				}
+				let request_id = self.swarm.behaviour_mut().puppynet.send_request(
+					&peer,
+					PeerReq::StartSearch {
+						id: search_id,
+						args,
+					},
+				);
+				self.pending_requests.insert(
+					request_id,
+					PendingRemoteSearchStart::request(search_id, Arc::clone(&self.remote_searches)),
+				);
 			}
 			Command::RemoteScan {
 				peer,
@@ -2349,7 +2661,16 @@ impl App {
 			} => {
 				let is_self = self.state.me == peer;
 				if is_self {
-					let result = generate_thumbnail(Path::new(&path), max_width, max_height).await;
+					let result = match fs::canonicalize(&path).await {
+						Ok(canonical) => {
+							if self.can_access(peer, &canonical, FLAG_READ | FLAG_SEARCH) {
+								generate_thumbnail(&canonical, max_width, max_height).await
+							} else {
+								Err(anyhow!("Access denied"))
+							}
+						}
+						Err(err) => Err(anyhow!("Failed to access file: {err}")),
+					};
 					let _ = tx.send(result);
 					return;
 				}
@@ -2390,7 +2711,12 @@ impl App {
 			}
 			Command::RegisterSharedFolder { path, flags, tx } => {
 				let result = (|| -> anyhow::Result<()> {
-					self.state.add_shared_folder(FolderRule::new(path, flags));
+					let rule = FolderRule::new(path, flags);
+					{
+						let conn = self.db.lock().map_err(|_| anyhow!("db lock poisoned"))?;
+						save_shared_folder(&conn, &rule)?;
+					}
+					self.state.add_shared_folder(rule);
 					Ok(())
 				})();
 				let _ = tx.send(result);
@@ -2575,6 +2901,21 @@ impl App {
 				self.pending_requests
 					.insert(request_id, PendingScanEventAck::new());
 			}
+			InternalCommand::SendSearchEvent {
+				target,
+				search_id,
+				event,
+			} => {
+				let request_id = self.swarm.behaviour_mut().puppynet.send_request(
+					&target,
+					PeerReq::SearchEvent {
+						id: search_id,
+						event,
+					},
+				);
+				self.pending_requests
+					.insert(request_id, PendingSearchEventAck::request());
+			}
 			InternalCommand::SendUpdateEvent {
 				target,
 				update_id,
@@ -2641,4 +2982,102 @@ fn parse_ip_addr(value: &str) -> Option<IpAddr> {
 	let mut parts = value.split('/');
 	let addr = parts.next()?.trim();
 	addr.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn test_dir(name: &str) -> PathBuf {
+		let now = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.unwrap()
+			.as_nanos();
+		std::env::temp_dir().join(format!("puppynet-{name}-{}-{now}", std::process::id()))
+	}
+
+	#[test]
+	fn live_search_only_walks_supplied_roots() {
+		let root = test_dir("live-search-allowed");
+		let denied = test_dir("live-search-denied");
+		std::fs::create_dir_all(&root).unwrap();
+		std::fs::create_dir_all(&denied).unwrap();
+		let visible = root.join("visible.txt");
+		let hidden = denied.join("hidden.txt");
+		std::fs::write(&visible, "visible").unwrap();
+		std::fs::write(&hidden, "hidden").unwrap();
+
+		let mut events = Vec::new();
+		live_search_roots(
+			vec![std::fs::canonicalize(&root).unwrap()],
+			LiveSearchArgs {
+				name_query: Some(String::from(".txt")),
+				..Default::default()
+			},
+			|event| events.push(event),
+		);
+
+		let rows = events
+			.iter()
+			.flat_map(|event| match event {
+				SearchEvent::Rows { rows } => rows.clone(),
+				_ => Vec::new(),
+			})
+			.collect::<Vec<_>>();
+		assert_eq!(rows.len(), 1);
+		assert_eq!(
+			rows[0].path,
+			std::fs::canonicalize(&visible)
+				.unwrap()
+				.to_string_lossy()
+				.to_string()
+		);
+		assert!(
+			!rows
+				.iter()
+				.any(|row| row.path == hidden.to_string_lossy().to_string())
+		);
+		assert!(events.iter().any(|event| matches!(
+			event,
+			SearchEvent::Finished {
+				total: 1,
+				truncated: false
+			}
+		)));
+
+		let _ = std::fs::remove_dir_all(root);
+		let _ = std::fs::remove_dir_all(denied);
+	}
+
+	#[test]
+	fn live_search_filters_by_mime_type() {
+		let root = test_dir("live-search-mime");
+		std::fs::create_dir_all(&root).unwrap();
+		let text = root.join("notes.txt");
+		let image = root.join("photo.png");
+		std::fs::write(&text, "notes").unwrap();
+		std::fs::write(&image, "not-really-a-png").unwrap();
+
+		let mut events = Vec::new();
+		live_search_roots(
+			vec![std::fs::canonicalize(&root).unwrap()],
+			LiveSearchArgs {
+				mime_types: vec![String::from("text/plain")],
+				..Default::default()
+			},
+			|event| events.push(event),
+		);
+
+		let rows = events
+			.iter()
+			.flat_map(|event| match event {
+				SearchEvent::Rows { rows } => rows.clone(),
+				_ => Vec::new(),
+			})
+			.collect::<Vec<_>>();
+		assert_eq!(rows.len(), 1);
+		assert_eq!(rows[0].name, "notes.txt");
+
+		let _ = std::fs::remove_dir_all(root);
+	}
 }

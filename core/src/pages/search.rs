@@ -39,8 +39,28 @@ impl SearchController {
 		self.core().clear_search_mimes();
 	}
 
+	pub fn select_search_target(&mut self, value: String) {
+		self.core().select_search_target(value);
+	}
+
+	pub fn select_search_sort(&mut self, value: String) {
+		self.core().select_search_sort(value);
+	}
+
+	pub fn select_search_page_size(&mut self, value: String) {
+		self.core().select_search_page_size(value);
+	}
+
 	pub fn run_search(&mut self) {
 		self.core().run_search();
+	}
+
+	pub fn search_load_more(&mut self) {
+		self.core().search_load_more();
+	}
+
+	pub fn search_scroll_load_more(&mut self) {
+		self.core().search_load_more();
 	}
 
 	pub fn search_preview(&mut self, idx: u32) {

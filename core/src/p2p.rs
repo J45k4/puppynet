@@ -88,6 +88,14 @@ pub enum PeerReq {
 		offset: u64,
 		limit: u64,
 	},
+	StartSearch {
+		id: u64,
+		args: LiveSearchArgs,
+	},
+	SearchEvent {
+		id: u64,
+		event: SearchEvent,
+	},
 	ScanEvent {
 		id: u64,
 		event: ScanEvent,
@@ -169,6 +177,8 @@ pub enum PeerRes {
 	MediaSources(Vec<MediaSource>),
 	MediaFrame(MediaFrame),
 	FileEntries(Vec<FileEntry>),
+	SearchStarted(Result<(), String>),
+	SearchEventAck,
 	ScanStarted(Result<(), String>),
 	ScanEventAck,
 	AuthSuccess {
@@ -221,6 +231,53 @@ pub enum PeerRes {
 	},
 	/// Acknowledgment for desktop mouse or keyboard input.
 	DesktopInputAck(Result<(), String>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SearchSort {
+	Latest,
+	Name,
+	Size,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiveSearchArgs {
+	pub name_query: Option<String>,
+	pub mime_types: Vec<String>,
+	pub sort: SearchSort,
+	pub sort_desc: bool,
+	pub page: usize,
+	pub page_size: usize,
+}
+
+impl Default for LiveSearchArgs {
+	fn default() -> Self {
+		Self {
+			name_query: None,
+			mime_types: Vec::new(),
+			sort: SearchSort::Latest,
+			sort_desc: true,
+			page: 0,
+			page_size: 50,
+		}
+	}
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiveSearchRow {
+	pub name: String,
+	pub path: String,
+	pub size: u64,
+	pub mime_type: Option<String>,
+	pub modified_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SearchEvent {
+	Progress { visited: usize, matched: usize },
+	Rows { rows: Vec<LiveSearchRow> },
+	Finished { total: usize, truncated: bool },
+	Failed { error: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

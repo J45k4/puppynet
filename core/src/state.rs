@@ -176,6 +176,8 @@ impl State {
 	pub fn authenticate(&mut self, peer_id: PeerId, method: AuthMethod) {}
 
 	pub fn add_shared_folder(&mut self, rule: FolderRule) {
+		self.shared_folders
+			.retain(|existing| existing.path() != rule.path());
 		self.shared_folders.push(rule);
 	}
 
@@ -204,15 +206,54 @@ impl State {
 			.collect()
 	}
 
-	pub fn has_fs_access(&self, src: PeerId, path: &Path, access: u8) -> bool {
-		if src == self.me {
-			return true;
+	pub fn hard_roots_for_access(&self, access: u8) -> Vec<FolderRule> {
+		self.shared_folders
+			.iter()
+			.filter(|rule| rule.allows(access))
+			.cloned()
+			.collect()
+	}
+
+	pub fn search_roots_for_peer(&self, peer_id: &PeerId) -> Vec<PathBuf> {
+		let hard_roots = self.hard_roots_for_access(FLAG_SEARCH);
+		if *peer_id == self.me {
+			return hard_roots
+				.into_iter()
+				.map(|rule| rule.path().to_path_buf())
+				.collect();
 		}
 
-		for rule in &self.shared_folders {
-			if path.starts_with(rule.path()) && rule.allows(access) {
-				return true;
+		let mut roots = Vec::new();
+		for hard_root in &hard_roots {
+			for permission in self.permissions_granted_to_peer(peer_id) {
+				match permission.rule() {
+					Rule::Owner => roots.push(hard_root.path().to_path_buf()),
+					Rule::Folder(folder) if folder.allows(FLAG_SEARCH) => {
+						if hard_root.path().starts_with(folder.path()) {
+							roots.push(hard_root.path().to_path_buf());
+						} else if folder.path().starts_with(hard_root.path()) {
+							roots.push(folder.path().to_path_buf());
+						}
+					}
+					_ => {}
+				}
 			}
+		}
+		roots.sort();
+		roots.dedup();
+		roots
+	}
+
+	pub fn has_fs_access(&self, src: PeerId, path: &Path, access: u8) -> bool {
+		let within_hard_root = self
+			.shared_folders
+			.iter()
+			.any(|rule| path.starts_with(rule.path()) && rule.allows(access));
+		if !within_hard_root {
+			return false;
+		}
+		if src == self.me {
+			return true;
 		}
 
 		for rel in &self.relationships {
@@ -319,5 +360,81 @@ impl State {
 			passw,
 		});
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn rule(path: &str, flags: u8) -> FolderRule {
+		FolderRule::new(PathBuf::from(path), flags)
+	}
+
+	#[test]
+	fn local_fs_access_is_limited_to_hard_roots() {
+		let mut state = State::default();
+		state.add_shared_folder(rule("/tmp/puppynet-allowed", FLAG_READ | FLAG_SEARCH));
+
+		assert!(state.has_fs_access(
+			state.me,
+			Path::new("/tmp/puppynet-allowed/file.txt"),
+			FLAG_READ | FLAG_SEARCH
+		));
+		assert!(!state.has_fs_access(
+			state.me,
+			Path::new("/tmp/puppynet-denied/file.txt"),
+			FLAG_READ | FLAG_SEARCH
+		));
+	}
+
+	#[test]
+	fn remote_search_roots_require_explicit_grant_inside_hard_root() {
+		let mut state = State::default();
+		let peer = PeerId::random();
+		state.add_shared_folder(rule("/tmp/puppynet-allowed", FLAG_READ | FLAG_SEARCH));
+		state.set_peer_permissions(
+			peer,
+			vec![Permission::new(Rule::Folder(rule(
+				"/tmp/puppynet-allowed/subdir",
+				FLAG_READ | FLAG_SEARCH,
+			)))],
+		);
+
+		assert_eq!(
+			state.search_roots_for_peer(&peer),
+			vec![PathBuf::from("/tmp/puppynet-allowed/subdir")]
+		);
+		assert!(state.has_fs_access(
+			peer,
+			Path::new("/tmp/puppynet-allowed/subdir/file.txt"),
+			FLAG_READ | FLAG_SEARCH
+		));
+		assert!(!state.has_fs_access(
+			peer,
+			Path::new("/tmp/puppynet-allowed/other/file.txt"),
+			FLAG_READ | FLAG_SEARCH
+		));
+	}
+
+	#[test]
+	fn remote_search_roots_never_escape_hard_roots() {
+		let mut state = State::default();
+		let peer = PeerId::random();
+		state.add_shared_folder(rule("/tmp/puppynet-allowed", FLAG_READ | FLAG_SEARCH));
+		state.set_peer_permissions(
+			peer,
+			vec![Permission::new(Rule::Folder(rule(
+				"/tmp/puppynet-denied",
+				FLAG_READ | FLAG_SEARCH,
+			)))],
+		);
+
+		assert!(state.search_roots_for_peer(&peer).is_empty());
+		assert!(!state.has_fs_access(
+			peer,
+			Path::new("/tmp/puppynet-denied/file.txt"),
+			FLAG_READ | FLAG_SEARCH
+		));
 	}
 }
