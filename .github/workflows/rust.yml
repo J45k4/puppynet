@@ -54,7 +54,7 @@ jobs:
           override: true
       - name: Install Ubuntu system dependencies
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev libxkbcommon-dev
       - name: Clippy
         run: cargo clippy --workspace
       - name: Test
