@@ -63,6 +63,10 @@ impl PeerController {
 		self.core().select_audio_device(value);
 	}
 
+	pub fn select_microphone(&mut self, value: String) {
+		self.core().select_microphone(value);
+	}
+
 	pub fn edit_shared_folder_path(&mut self, value: String) {
 		self.core().edit_shared_folder_path(value);
 	}

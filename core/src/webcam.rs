@@ -3,8 +3,11 @@ use crate::p2p::{
 };
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{DeviceId, FromSample, Sample, SampleFormat, SizedSample, SupportedStreamConfig};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::Duration as StdDuration;
@@ -24,6 +27,7 @@ use v4l::video::Capture;
 use v4l::{FourCC, context};
 
 const DEFAULT_SCREEN_SOURCE_ID: &str = "screen:default";
+const DEFAULT_MICROPHONE_SOURCE_ID: &str = "microphone:default";
 const SCREEN_STREAM_MAX_HEIGHT: u32 = 540;
 const SCREEN_STREAM_MAX_WIDTH: u32 = 960;
 const SCREEN_STREAM_QUALITY: u8 = 60;
@@ -115,6 +119,53 @@ fn screen_source() -> MediaSource {
 			codec: Some(String::from("mjpeg")),
 		}],
 	}
+}
+
+fn microphone_source(id: &str, name: &str) -> MediaSource {
+	MediaSource {
+		id: id.to_string(),
+		name: name.to_string(),
+		kind: MediaSourceKind::Microphone,
+		live: true,
+		outputs: vec![MediaOutput {
+			transport: MediaTransport::Stream,
+			mime: String::from("audio/wav"),
+			codec: Some(String::from("pcm_s16le")),
+		}],
+	}
+}
+
+fn microphone_source_id(device_id: &DeviceId) -> String {
+	format!("microphone:{device_id}")
+}
+
+pub(crate) fn microphone_device(source_id: &str) -> Result<(cpal::Device, SupportedStreamConfig)> {
+	let host = cpal::default_host();
+	let device = if source_id == DEFAULT_MICROPHONE_SOURCE_ID {
+		host.default_input_device()
+	} else {
+		let rest = source_id
+			.strip_prefix("microphone:")
+			.ok_or_else(|| anyhow!("invalid microphone source"))?;
+		let id = DeviceId::from_str(rest)
+			.map_err(|err| anyhow!("invalid microphone source: {err}"))?;
+		host.device_by_id(&id)
+	}
+	.ok_or_else(|| anyhow!("No microphone input device is available for {source_id}"))?;
+	let config = device.default_input_config()?;
+	Ok((device, config))
+}
+
+fn validate_microphone_id(source_id: &str) -> Result<()> {
+	if source_id == DEFAULT_MICROPHONE_SOURCE_ID {
+		return Ok(());
+	}
+	if let Some(rest) = source_id.strip_prefix("microphone:")
+		&& DeviceId::from_str(rest).is_ok()
+	{
+		return Ok(());
+	}
+	bail!("invalid microphone source");
 }
 
 fn validate_screen_id(source_id: &str) -> Result<()> {
@@ -294,6 +345,165 @@ async fn screen_available() -> Result<()> {
 async fn list_screen_sources() -> Result<Vec<MediaSource>> {
 	screen_available().await?;
 	Ok(vec![screen_source()])
+}
+
+fn default_microphone() -> Result<(cpal::Device, SupportedStreamConfig)> {
+	let host = cpal::default_host();
+	let device = host
+		.default_input_device()
+		.ok_or_else(|| anyhow!("No default microphone input device is available."))?;
+	let config = device.default_input_config()?;
+	Ok((device, config))
+}
+
+fn list_input_devices() -> Vec<(cpal::Device, String)> {
+	let host = cpal::default_host();
+	let mut devices = Vec::new();
+	if let Ok(inputs) = host.input_devices() {
+		for device in inputs {
+			if let Ok(id) = device.id() {
+				devices.push((device, microphone_source_id(&id)));
+			}
+		}
+	}
+	devices
+}
+
+fn pcm_s16le_wav(samples: Vec<i16>, channels: u16, sample_rate: u32) -> Result<Vec<u8>> {
+	let data_size = u32::try_from(samples.len().saturating_mul(2))?;
+	let sample_size = 16_u16;
+	let byte_rate = sample_rate * u32::from(channels) * u32::from(sample_size / 8);
+	let block_align = channels * (sample_size / 8);
+	let mut wav = Vec::with_capacity(44 + data_size as usize);
+	wav.extend_from_slice(b"RIFF");
+	wav.extend_from_slice(&(36 + data_size).to_le_bytes());
+	wav.extend_from_slice(b"WAVEfmt ");
+	wav.extend_from_slice(&16_u32.to_le_bytes());
+	wav.extend_from_slice(&1_u16.to_le_bytes());
+	wav.extend_from_slice(&channels.to_le_bytes());
+	wav.extend_from_slice(&sample_rate.to_le_bytes());
+	wav.extend_from_slice(&byte_rate.to_le_bytes());
+	wav.extend_from_slice(&block_align.to_le_bytes());
+	wav.extend_from_slice(&sample_size.to_le_bytes());
+	wav.extend_from_slice(b"data");
+	wav.extend_from_slice(&data_size.to_le_bytes());
+	for sample in samples {
+		wav.extend_from_slice(&sample.to_le_bytes());
+	}
+	Ok(wav)
+}
+
+fn build_microphone_stream<T>(
+	device: &cpal::Device,
+	config: &cpal::StreamConfig,
+	samples: Arc<Mutex<Vec<i16>>>,
+	stream_error: Arc<Mutex<Option<String>>>,
+) -> Result<cpal::Stream>
+where
+	T: Sample + SizedSample,
+	i16: FromSample<T>,
+{
+	let data_callback = move |data: &[T], _: &cpal::InputCallbackInfo| {
+		if let Ok(mut samples) = samples.lock() {
+			samples.extend(data.iter().copied().map(i16::from_sample));
+		}
+	};
+	let error_callback = move |error: cpal::Error| {
+		if let Ok(mut stream_error) = stream_error.lock() {
+			*stream_error = Some(error.to_string());
+		}
+	};
+	Ok(device.build_input_stream(*config, data_callback, error_callback, None)?)
+}
+
+fn capture_microphone_audio(source_id: &str) -> Result<Vec<u8>> {
+	let (device, supported_config) = microphone_device(source_id)?;
+	let channels = supported_config.channels();
+	let sample_rate = supported_config.sample_rate();
+	let sample_format = supported_config.sample_format();
+	let config = supported_config.into();
+	let samples = Arc::new(Mutex::new(Vec::new()));
+	let stream_error = Arc::new(Mutex::new(None));
+	let stream = match sample_format {
+		SampleFormat::I8 => {
+			build_microphone_stream::<i8>(&device, &config, samples.clone(), stream_error.clone())?
+		}
+		SampleFormat::I16 => {
+			build_microphone_stream::<i16>(&device, &config, samples.clone(), stream_error.clone())?
+		}
+		SampleFormat::I32 => {
+			build_microphone_stream::<i32>(&device, &config, samples.clone(), stream_error.clone())?
+		}
+		SampleFormat::F32 => {
+			build_microphone_stream::<f32>(&device, &config, samples.clone(), stream_error.clone())?
+		}
+		format => bail!("Unsupported microphone sample format: {format}"),
+	};
+	stream.play()?;
+	thread::sleep(StdDuration::from_secs(1));
+	drop(stream);
+	let samples = Arc::try_unwrap(samples)
+		.map_err(|_| anyhow!("failed to finish microphone capture"))?
+		.into_inner()?;
+	if samples.is_empty() {
+		let message = stream_error
+			.lock()
+			.ok()
+			.and_then(|error| error.clone())
+			.unwrap_or_else(|| String::from("microphone capture returned no audio data"));
+		bail!(message);
+	}
+	pcm_s16le_wav(samples, channels, sample_rate)
+}
+
+async fn microphone_available() -> Result<()> {
+	task::spawn_blocking(|| default_microphone().map(|_| ())).await??;
+	Ok(())
+}
+
+async fn list_microphone_sources() -> Result<Vec<MediaSource>> {
+	microphone_available().await?;
+	let sources = task::spawn_blocking(|| {
+		let mut sources = Vec::new();
+		let default_id = cpal::default_host()
+			.default_input_device()
+			.and_then(|device| device.id().ok())
+			.map(|id| microphone_source_id(&id));
+		sources.push(microphone_source(
+			DEFAULT_MICROPHONE_SOURCE_ID,
+			"Default microphone",
+		));
+		for (device, source_id) in list_input_devices() {
+			if Some(&source_id) == default_id.as_ref() {
+				continue;
+			}
+			let name = device
+				.description()
+				.map(|desc| desc.name().to_owned())
+				.unwrap_or_else(|_| source_id.clone());
+			sources.push(microphone_source(&source_id, &name));
+		}
+		sources
+	})
+	.await?;
+	Ok(sources)
+}
+
+async fn capture_microphone_frame(source_id: String) -> Result<MediaFrame> {
+	validate_microphone_id(&source_id)?;
+	let data = timeout(
+		Duration::from_secs(5),
+		task::spawn_blocking(move || capture_microphone_audio(&source_id)),
+	)
+	.await
+	.map_err(|_| anyhow!("timed out capturing microphone audio"))???;
+	if data.is_empty() {
+		bail!("microphone capture returned no audio data");
+	}
+	Ok(MediaFrame {
+		mime: String::from("audio/wav"),
+		data,
+	})
 }
 
 fn screen_stream_frame(data: Vec<u8>) -> Result<MediaFrame> {
@@ -604,7 +814,8 @@ pub(crate) async fn media_capability() -> MediaCapability {
 	let backend = select_webcam_backend().await;
 	let webcam_available = backend.available().await;
 	let screen_available = screen_available().await;
-	if webcam_available.is_ok() || screen_available.is_ok() {
+	let microphone_available = microphone_available().await;
+	if webcam_available.is_ok() || screen_available.is_ok() || microphone_available.is_ok() {
 		let mut backends = Vec::new();
 		let mut details = Vec::new();
 		if webcam_available.is_ok() {
@@ -618,6 +829,12 @@ pub(crate) async fn media_capability() -> MediaCapability {
 			details.push(String::from("Screen capture is available."));
 		} else if let Err(err) = &screen_available {
 			details.push(format!("Screen capture unavailable: {err}"));
+		}
+		if microphone_available.is_ok() {
+			backends.push(String::from("cpal"));
+			details.push(String::from("Microphone listening is available."));
+		} else if let Err(err) = &microphone_available {
+			details.push(format!("Microphone listening unavailable: {err}"));
 		}
 		return MediaCapability {
 			supported: true,
@@ -633,10 +850,14 @@ pub(crate) async fn media_capability() -> MediaCapability {
 		.err()
 		.map(|err| err.to_string())
 		.unwrap_or_else(|| String::from("screen unavailable"));
+	let microphone_error = microphone_available
+		.err()
+		.map(|err| err.to_string())
+		.unwrap_or_else(|| String::from("microphone unavailable"));
 	MediaCapability {
 		supported: false,
 		backend: Some(backend.name().to_string()),
-		message: format!("{webcam_error} {screen_error}"),
+		message: format!("{webcam_error} {screen_error} {microphone_error}"),
 	}
 }
 
@@ -649,6 +870,9 @@ pub(crate) async fn list_media_sources() -> Result<Vec<MediaSource>> {
 	if screen_available().await.is_ok() {
 		sources.extend(list_screen_sources().await?);
 	}
+	if microphone_available().await.is_ok() {
+		sources.extend(list_microphone_sources().await?);
+	}
 	if sources.is_empty() {
 		bail!("No live media sources are available.");
 	}
@@ -658,6 +882,9 @@ pub(crate) async fn list_media_sources() -> Result<Vec<MediaSource>> {
 pub(crate) async fn capture_media_frame(source_id: String) -> Result<MediaFrame> {
 	if source_id == DEFAULT_SCREEN_SOURCE_ID {
 		return capture_screen_frame(source_id).await;
+	}
+	if source_id == DEFAULT_MICROPHONE_SOURCE_ID || source_id.starts_with("microphone:") {
+		return capture_microphone_frame(source_id).await;
 	}
 	let backend = select_webcam_backend().await;
 	backend.available().await?;
@@ -805,6 +1032,26 @@ impl WebcamBackend for UnsupportedWebcamBackend {
 mod tests {
 	use super::*;
 	use image::{ImageBuffer, ImageEncoder, Rgba};
+
+	#[test]
+	fn pcm_samples_encode_as_wav() {
+		let wav = pcm_s16le_wav(vec![-32_768, 0, 32_767], 1, 48_000).unwrap();
+
+		assert_eq!(&wav[0..4], b"RIFF");
+		assert_eq!(&wav[8..12], b"WAVE");
+		assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 48_000);
+		assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 6);
+		assert_eq!(&wav[44..], &[0, 128, 0, 0, 255, 127]);
+	}
+
+	#[test]
+	#[ignore = "requires a microphone input device"]
+	fn captures_default_microphone() {
+		let wav = capture_microphone_audio(DEFAULT_MICROPHONE_SOURCE_ID).unwrap();
+
+		assert_eq!(&wav[0..4], b"RIFF");
+		assert!(wav.len() > 44);
+	}
 
 	#[test]
 	fn screen_stream_frame_encodes_resized_jpeg() {

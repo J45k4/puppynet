@@ -1,0 +1,1 @@
+<CustomComponent name="MicrophoneListener" entry="/assets/media_receiver.js?v=2" props={props} fill=true minHeight=110 />

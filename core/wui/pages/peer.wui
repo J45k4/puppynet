@@ -1,4 +1,5 @@
 <Import name="AppLayout" from="../layouts/app" />
+<Import name="MicrophoneListener" from="../partials/microphone_listener" />
 
 <AppLayout>
   <VStack spacing=6 fill=true color="#d6eee9">
@@ -85,6 +86,17 @@
         </For>
       </Else>
     </Else>
+    <Text value="Microphone listening" />
+    <If test={state.has_microphone_options}>
+      <HStack spacing=6 wrap=true fill=true>
+        <Text value="Input" />
+        <Select value={state.selected_microphone} options={state.microphone_options} onSelect="SelectMicrophone" grow=1 minWidth=0 color="#d6eee9" backgroundColor="#020807" border="1px solid #2d6258" />
+      </HStack>
+    </If>
+    <Text value={state.microphone_status} breakWords=true />
+    <If test={state.microphone_has_stream}>
+      <MicrophoneListener props={state.microphone_listener_props} />
+    </If>
     <Text value="Remote shell" />
     <HStack spacing=6 wrap=true fill=true>
       <Button text="Start shell" onClick="StartShell" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
