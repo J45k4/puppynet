@@ -12,7 +12,7 @@ use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Async, FixedAsync, PolynomialDegree, Resampler};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc as std_mpsc};
 use std::time::Duration;
 use tokio::sync::{Mutex, oneshot};
@@ -44,6 +44,7 @@ const VIDEO_BITRATE: u32 = 1_200_000;
 const VIDEO_FPS: u32 = 15;
 const VIDEO_MAX_HEIGHT: u32 = 540;
 const VIDEO_MAX_WIDTH: u32 = 960;
+const VIDEO_RTCP_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct SessionDescription {
@@ -70,9 +71,17 @@ struct MediaSession {
 
 struct MediaProducer {
 	force_keyframe: Arc<AtomicBool>,
+	last_rtcp: Arc<AtomicU64>,
 	stop: Arc<AtomicBool>,
 	subscribers: usize,
 	track: Arc<TrackLocalStaticSample>,
+}
+
+fn epoch_millis() -> u64 {
+	std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
+		.map(|d| d.as_millis() as u64)
+		.unwrap_or(0)
 }
 
 pub(crate) struct MediaSessionManager {
@@ -308,6 +317,7 @@ async fn run_video_producer(
 	track: Arc<TrackLocalStaticSample>,
 	stop: Arc<AtomicBool>,
 	force_keyframe: Arc<AtomicBool>,
+	last_rtcp: Arc<AtomicU64>,
 ) {
 	let (encoder, fps) = match video_encoder(&kind) {
 		Ok(result) => result,
@@ -319,6 +329,12 @@ async fn run_video_producer(
 	let encoder = Arc::new(std::sync::Mutex::new(encoder));
 	let frame_duration = Duration::from_secs_f64(1.0 / fps as f64);
 	while !stop.load(Ordering::Relaxed) {
+		let elapsed = epoch_millis().saturating_sub(last_rtcp.load(Ordering::Relaxed));
+		if Duration::from_millis(elapsed) > VIDEO_RTCP_TIMEOUT {
+			log::info!("video WebRTC producer stopping: no receiver RTCP for {elapsed}ms");
+			stop.store(true, Ordering::Relaxed);
+			break;
+		}
 		let started = tokio::time::Instant::now();
 		match webcam::capture_media_frame(source_id.clone()).await {
 			Ok(frame) => {
@@ -363,6 +379,7 @@ fn start_video_producer(
 	track: Arc<TrackLocalStaticSample>,
 	stop: Arc<AtomicBool>,
 	force_keyframe: Arc<AtomicBool>,
+	last_rtcp: Arc<AtomicU64>,
 ) {
 	tokio::spawn(run_video_producer(
 		source_id,
@@ -370,6 +387,7 @@ fn start_video_producer(
 		track,
 		stop,
 		force_keyframe,
+		last_rtcp,
 	));
 }
 
@@ -377,6 +395,7 @@ async fn producer_for_source(source_id: &str, kind: &MediaSourceKind) -> Result<
 	let track = media_track(source_id, kind);
 	let stop = Arc::new(AtomicBool::new(false));
 	let force_keyframe = Arc::new(AtomicBool::new(true));
+	let last_rtcp = Arc::new(AtomicU64::new(epoch_millis()));
 	if kind == &MediaSourceKind::Microphone {
 		start_microphone_producer(source_id.to_string(), Arc::clone(&track), Arc::clone(&stop))
 			.await?;
@@ -387,12 +406,14 @@ async fn producer_for_source(source_id: &str, kind: &MediaSourceKind) -> Result<
 			Arc::clone(&track),
 			Arc::clone(&stop),
 			Arc::clone(&force_keyframe),
+			Arc::clone(&last_rtcp),
 		);
 	} else {
 		bail!("unsupported WebRTC media source");
 	}
 	Ok(MediaProducer {
 		force_keyframe,
+		last_rtcp,
 		stop,
 		subscribers: 1,
 		track,
@@ -419,20 +440,23 @@ impl MediaSessionManager {
 		&self,
 		source_id: &str,
 		kind: &MediaSourceKind,
-	) -> Result<(Arc<TrackLocalStaticSample>, Arc<AtomicBool>)> {
+	) -> Result<(Arc<TrackLocalStaticSample>, Arc<AtomicBool>, Arc<AtomicU64>)> {
 		let mut producers = self.producers.lock().await;
 		if let Some(producer) = producers.get_mut(source_id) {
 			producer.subscribers += 1;
 			producer.force_keyframe.store(true, Ordering::Relaxed);
+			producer.last_rtcp.store(epoch_millis(), Ordering::Relaxed);
 			return Ok((
 				Arc::clone(&producer.track),
 				Arc::clone(&producer.force_keyframe),
+				Arc::clone(&producer.last_rtcp),
 			));
 		}
 		let producer = producer_for_source(source_id, kind).await?;
 		let result = (
 			Arc::clone(&producer.track),
 			Arc::clone(&producer.force_keyframe),
+			Arc::clone(&producer.last_rtcp),
 		);
 		producers.insert(source_id.to_string(), producer);
 		Ok(result)
@@ -464,8 +488,10 @@ impl MediaSessionManager {
 	async fn watch_keyframe_requests(
 		sender: Arc<webrtc::rtp_transceiver::rtp_sender::RTCRtpSender>,
 		force_keyframe: Arc<AtomicBool>,
+		last_rtcp: Arc<AtomicU64>,
 	) {
 		while let Ok((packets, _)) = sender.read_rtcp().await {
+			last_rtcp.store(epoch_millis(), Ordering::Relaxed);
 			if packets.iter().any(|packet| {
 				packet.as_any().is::<PictureLossIndication>()
 					|| packet.as_any().is::<FullIntraRequest>()
@@ -479,6 +505,7 @@ impl MediaSessionManager {
 		&self,
 		track: Arc<TrackLocalStaticSample>,
 		force_keyframe: Arc<AtomicBool>,
+		last_rtcp: Arc<AtomicU64>,
 		kind: &MediaSourceKind,
 		offer: &SessionDescription,
 	) -> Result<(Arc<RTCPeerConnection>, SessionDescription)> {
@@ -497,7 +524,11 @@ impl MediaSessionManager {
 			.add_track(track as Arc<dyn TrackLocal + Send + Sync>)
 			.await?;
 		if kind != &MediaSourceKind::Microphone {
-			tokio::spawn(Self::watch_keyframe_requests(sender, force_keyframe));
+			tokio::spawn(Self::watch_keyframe_requests(
+				sender,
+				force_keyframe,
+				last_rtcp,
+			));
 		}
 		peer_connection
 			.set_remote_description(RTCSessionDescription::offer(offer.sdp.clone())?)
@@ -580,9 +611,10 @@ impl MediaSessionManager {
 		request: CreateMediaSession,
 	) -> Result<CreatedMediaSession> {
 		let kind = Self::source_kind(&request.source_id).await?;
-		let (track, force_keyframe) = self.acquire_producer(&request.source_id, &kind).await?;
+		let (track, force_keyframe, last_rtcp) =
+			self.acquire_producer(&request.source_id, &kind).await?;
 		let negotiated = self
-			.negotiate(track, force_keyframe, &kind, &request.offer)
+			.negotiate(track, force_keyframe, last_rtcp, &kind, &request.offer)
 			.await;
 		let (peer_connection, answer) = match negotiated {
 			Ok(negotiated) => negotiated,
@@ -695,6 +727,7 @@ mod tests {
 			.negotiate(
 				track,
 				Arc::new(AtomicBool::new(false)),
+				Arc::new(AtomicU64::new(epoch_millis())),
 				&MediaSourceKind::Microphone,
 				&SessionDescription {
 					r#type: String::from("offer"),
