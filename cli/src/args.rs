@@ -69,5 +69,6 @@ pub enum Command {
 		#[clap(long = "write", value_name = "PATH")]
 		write: Vec<String>,
 	},
+	Peers,
 	Daemon,
 }

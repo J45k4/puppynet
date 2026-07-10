@@ -3,6 +3,7 @@ use puppynet_core::{
 	FLAG_READ, FLAG_SEARCH, FLAG_WRITE, FolderRule, PeerId, Permission, PuppyNet, Rule, updater,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(unix)]
@@ -28,6 +29,7 @@ enum ControlRequest {
 		read: Vec<String>,
 		write: Vec<String>,
 	},
+	Peers,
 	Update {
 		version: Option<String>,
 		current_version: u32,
@@ -38,6 +40,8 @@ enum ControlRequest {
 struct ControlResponse {
 	ok: bool,
 	message: String,
+	#[serde(default)]
+	peers: Option<Vec<String>>,
 }
 
 fn app_dir() -> Result<PathBuf> {
@@ -58,6 +62,7 @@ fn ok(message: impl Into<String>) -> ControlResponse {
 	ControlResponse {
 		ok: true,
 		message: message.into(),
+		peers: None,
 	}
 }
 
@@ -65,6 +70,15 @@ fn error_response(message: impl Into<String>) -> ControlResponse {
 	ControlResponse {
 		ok: false,
 		message: message.into(),
+		peers: None,
+	}
+}
+
+fn peers_response(peer_ids: Vec<String>) -> ControlResponse {
+	ControlResponse {
+		ok: true,
+		message: String::new(),
+		peers: Some(peer_ids),
 	}
 }
 
@@ -160,6 +174,19 @@ async fn handle_request(peer: &PuppyNet, request: ControlRequest) -> ControlResp
 				}
 			}
 			Err(err) => error_response(format!("invalid peer id {peer_id}: {err}")),
+		},
+		ControlRequest::Peers => match peer.state_snapshot().await {
+			Some(state) => {
+				let peer_ids = state
+					.connections
+					.into_iter()
+					.map(|connection| connection.peer_id.to_string())
+					.collect::<BTreeSet<_>>()
+					.into_iter()
+					.collect();
+				peers_response(peer_ids)
+			}
+			None => error_response("failed to read daemon state"),
 		},
 		ControlRequest::Update {
 			version,
@@ -259,7 +286,7 @@ async fn connect_or_start_daemon(path: &PathBuf) -> Result<tokio::net::UnixStrea
 }
 
 #[cfg(unix)]
-async fn send_request(request: ControlRequest) -> Result<String> {
+async fn send_request(request: ControlRequest) -> Result<ControlResponse> {
 	let path = socket_path()?;
 	let mut stream = connect_or_start_daemon(&path).await?;
 	let mut line = serde_json::to_vec(&request).context("failed to encode control request")?;
@@ -278,14 +305,14 @@ async fn send_request(request: ControlRequest) -> Result<String> {
 	let response: ControlResponse =
 		serde_json::from_str(&response_line).context("failed to decode control response")?;
 	if response.ok {
-		Ok(response.message)
+		Ok(response)
 	} else {
 		bail!("{}", response.message)
 	}
 }
 
 #[cfg(not(unix))]
-async fn send_request(_request: ControlRequest) -> Result<String> {
+async fn send_request(_request: ControlRequest) -> Result<ControlResponse> {
 	bail!("daemon control socket is only supported on Unix platforms")
 }
 
@@ -304,7 +331,7 @@ pub async fn create_user(username: &str, password: &str) -> Result<String> {
 		username: username.to_string(),
 		password: password.to_string(),
 	};
-	send_request(request).await
+	Ok(send_request(request).await?.message)
 }
 
 pub async fn grant(peer_id: &str, all: bool, read: &[String], write: &[String]) -> Result<String> {
@@ -315,7 +342,14 @@ pub async fn grant(peer_id: &str, all: bool, read: &[String], write: &[String]) 
 		read: read.to_vec(),
 		write: write.to_vec(),
 	};
-	send_request(request).await
+	Ok(send_request(request).await?.message)
+}
+
+pub async fn connected_peers() -> Result<Vec<String>> {
+	let response = send_request(ControlRequest::Peers).await?;
+	response
+		.peers
+		.ok_or_else(|| anyhow!("daemon returned no connected peer list"))
 }
 
 pub async fn update(version: Option<&str>, current_version: u32) -> Result<String> {
@@ -323,7 +357,7 @@ pub async fn update(version: Option<&str>, current_version: u32) -> Result<Strin
 		version: version.map(str::to_string),
 		current_version,
 	};
-	send_request(request).await
+	Ok(send_request(request).await?.message)
 }
 
 #[cfg(unix)]

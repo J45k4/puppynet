@@ -123,6 +123,21 @@ async fn main() {
 			};
 			return;
 		}
+		Some(Command::Peers) => {
+			match puppynet_daemon::control::connected_peers().await {
+				Ok(peers) => {
+					log::info!("connected peers: {}", peers.len());
+					for peer in peers {
+						log::info!("{peer}");
+					}
+				}
+				Err(err) => {
+					log::error!("failed to get connected peers: {err:?}");
+					std::process::exit(1);
+				}
+			};
+			return;
+		}
 		Some(Command::Daemon) => {
 			run_daemon(&args).await;
 			return;
