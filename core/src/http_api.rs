@@ -20,15 +20,12 @@ use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::env;
 use std::fmt::Write;
-use std::fs;
 use std::io::{ErrorKind, SeekFrom};
 use std::net::SocketAddr;
-use std::path::Path;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -286,61 +283,6 @@ fn authenticate(req: &Request<Body>, state: &Arc<ApiState>) -> Option<String> {
 		}
 	}
 	None
-}
-
-#[cfg(not(debug_assertions))]
-fn load_asset(name: &str) -> Option<Cow<'static, [u8]>> {
-	match name {
-		"index.html" => Some(Cow::Borrowed(include_bytes!("../http_assets/index.html"))),
-		"index.css" => Some(Cow::Borrowed(include_bytes!("../http_assets/index.css"))),
-		"index.js" => Some(Cow::Borrowed(include_bytes!("../http_assets/index.js"))),
-		"favicon.ico" => Some(Cow::Borrowed(include_bytes!("../http_assets/favicon.ico"))),
-		"favicon.png" => Some(Cow::Borrowed(include_bytes!("../http_assets/favicon.png"))),
-		_ => None,
-	}
-}
-
-#[cfg(debug_assertions)]
-fn load_asset(name: &str) -> Option<Cow<'static, [u8]>> {
-	let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-		.join("http_assets")
-		.join(name);
-	std::fs::read(path).ok().map(Cow::Owned)
-}
-
-fn load_dist_asset(name: &str) -> Option<Vec<u8>> {
-	if name.contains("..") {
-		return None;
-	}
-	let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-		.join("..")
-		.join("web")
-		.join("dist")
-		.join(name);
-	if path.is_dir() {
-		return None;
-	}
-	fs::read(path).ok()
-}
-
-fn asset_response(path: &str, data: impl Into<Body>) -> Response<Body> {
-	let content_type = from_path(path)
-		.first_or_octet_stream()
-		.essence_str()
-		.to_string();
-	Response::builder()
-		.status(StatusCode::OK)
-		.header(hyper::header::CONTENT_TYPE, content_type)
-		.body(data.into())
-		.unwrap()
-}
-
-fn serve_static_path(path: &str) -> Option<Response<Body>> {
-	let path = if path.is_empty() { "index.html" } else { path };
-	if let Some(data) = load_dist_asset(path) {
-		return Some(asset_response(path, data));
-	}
-	load_asset(path).map(|data| asset_response(path, data))
 }
 
 fn with_cors(mut resp: Response<Body>, origin: Option<&str>) -> Response<Body> {
@@ -1374,13 +1316,6 @@ async fn handle_request(
 					StatusCode::NOT_FOUND,
 					json!({ "error": "update not found" }),
 				),
-			}
-		}
-		(&Method::GET, segments) => {
-			let path = segments.join("/");
-			match serve_static_path(&path) {
-				Some(resp) => resp,
-				None => json_response(StatusCode::NOT_FOUND, json!({ "error": "not found" })),
 			}
 		}
 		_ => json_response(StatusCode::NOT_FOUND, json!({ "error": "not found" })),
