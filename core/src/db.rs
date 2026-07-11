@@ -1265,6 +1265,10 @@ pub fn run_migrations(conn: &mut Connection) -> anyhow::Result<()> {
 }
 
 pub fn open_db() -> Connection {
-	let db_name = env::var("DB").unwrap_or_else(|_| String::from("puppynet.db"));
-	Connection::open(db_name).unwrap()
+	let db_path = env::var_os("DB").map(PathBuf::from).unwrap_or_else(|| {
+		let path = homedir::my_home().unwrap().unwrap().join(".puppynet");
+		std::fs::create_dir_all(&path).unwrap();
+		path.join("puppynet.db")
+	});
+	Connection::open(db_path).unwrap()
 }
