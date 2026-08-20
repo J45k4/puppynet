@@ -80,6 +80,16 @@ pub enum PeerReq {
 	GetMediaFrame {
 		source_id: String,
 	},
+	ListOnvifCameras,
+	TestOnvifCamera {
+		config: OnvifCameraConfig,
+	},
+	SaveOnvifCamera {
+		config: OnvifCameraConfig,
+	},
+	DeleteOnvifCamera {
+		id: String,
+	},
 	StartScan {
 		id: u64,
 		path: String,
@@ -176,6 +186,8 @@ pub enum PeerRes {
 	MediaCapability(MediaCapability),
 	MediaSources(Vec<MediaSource>),
 	MediaFrame(MediaFrame),
+	OnvifCameras(Vec<OnvifCamera>),
+	OnvifCameraMutation(OnvifCameraMutation),
 	FileEntries(Vec<FileEntry>),
 	SearchStarted(Result<(), String>),
 	SearchEventAck,
@@ -435,6 +447,44 @@ pub struct MediaFrame {
 	pub mime: String,
 	#[serde(with = "base64_bytes")]
 	pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnvifCameraConfig {
+	pub id: String,
+	pub name: String,
+	pub device_service_url: String,
+	pub username: String,
+	pub password: String,
+	pub profile_token: String,
+	pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnvifCamera {
+	pub id: String,
+	pub name: String,
+	pub device_service_url: String,
+	pub profile_token: String,
+	pub enabled: bool,
+}
+
+impl From<&OnvifCameraConfig> for OnvifCamera {
+	fn from(config: &OnvifCameraConfig) -> Self {
+		Self {
+			id: config.id.clone(),
+			name: config.name.clone(),
+			device_service_url: config.device_service_url.clone(),
+			profile_token: config.profile_token.clone(),
+			enabled: config.enabled,
+		}
+	}
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnvifCameraMutation {
+	pub camera: OnvifCamera,
+	pub message: String,
 }
 
 mod base64_bytes {

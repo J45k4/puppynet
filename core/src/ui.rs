@@ -3,8 +3,8 @@ use crate::db::FileEntry;
 use crate::media_webrtc::{CreateMediaSession, MediaSessionManager};
 use crate::p2p::{
 	AudioCapability, AudioDevice, AudioDeviceKind, CpuInfo, DesktopInput, DirEntry, InterfaceInfo,
-	LiveSearchArgs, MediaCapability, MediaSource, MediaSourceKind, MouseButton, PeerInfo,
-	SearchEvent, SearchSort,
+	LiveSearchArgs, MediaCapability, MediaFrame, MediaSource, MediaSourceKind, MouseButton,
+	OnvifCamera, OnvifCameraConfig, PeerInfo, SearchEvent, SearchSort,
 };
 use crate::updater::UpdateProgress;
 use crate::{FLAG_WRITE, LiveSearchPeerEvent, PuppyNet, StorageUsageFile};
@@ -14,6 +14,7 @@ use libp2p::PeerId;
 use rand::RngCore;
 use rand::rngs::OsRng;
 use std::collections::{BTreeSet, HashMap};
+use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -42,9 +43,10 @@ const SEARCH_ALL_DEVICES: &str = "__all__";
 mod pages;
 
 use pages::{
-	FilesController, HomeController, LoginController, NotFoundController, PeerControlController,
-	PeerController, PeerFilesController, PeerWebcamsController, PeersController, SearchController,
-	SettingsController, StorageController, UpdatesController, UsersController,
+	FilesController, HomeController, LoginController, NotFoundController, OnvifCameraController,
+	OnvifCamerasController, PeerControlController, PeerController, PeerFilesController,
+	PeerWebcamsController, PeersController, PuppyEyeCameraController, PuppyEyeController,
+	SearchController, SettingsController, StorageController, UpdatesController, UsersController,
 };
 
 #[derive(Clone, PartialEq, Eq)]
@@ -55,6 +57,10 @@ enum Page {
 	PeerControl { peer_id: String },
 	PeerFiles { peer_id: String, path: String },
 	PeerWebcams { peer_id: String },
+	PuppyEye,
+	PuppyEyeCamera { peer_id: String, source_id: String },
+	OnvifCameras,
+	OnvifCamera { peer_id: String, camera_id: String },
 	Files,
 	Search,
 	Storage,
@@ -74,6 +80,20 @@ struct PeerRow {
 }
 
 #[derive(Clone)]
+struct PuppyEyeCamera {
+	device_id: String,
+	device_name: String,
+	source: MediaSource,
+}
+
+#[derive(Clone)]
+struct PuppyEyeConfiguredCamera {
+	device_id: String,
+	device_name: String,
+	camera: OnvifCamera,
+}
+
+#[derive(Clone)]
 struct UiState {
 	page: Page,
 	local_peer_id: Option<String>,
@@ -86,6 +106,9 @@ struct UiState {
 	peer_audio_devices: Vec<AudioDevice>,
 	peer_webcam_capability: Option<MediaCapability>,
 	peer_webcams: Vec<MediaSource>,
+	puppy_eye_cameras: Vec<PuppyEyeCamera>,
+	puppy_eye_configured_cameras: Vec<PuppyEyeConfiguredCamera>,
+	puppy_eye_status: String,
 	peer_microphones: Vec<MediaSource>,
 	peer_screens: Vec<MediaSource>,
 	peer_screen_status: String,
@@ -112,6 +135,9 @@ impl UiState {
 			peer_audio_devices: Vec::new(),
 			peer_webcam_capability: None,
 			peer_webcams: Vec::new(),
+			puppy_eye_cameras: Vec::new(),
+			puppy_eye_configured_cameras: Vec::new(),
+			puppy_eye_status: String::from("Camera discovery has not run yet."),
 			peer_microphones: Vec::new(),
 			peer_screens: Vec::new(),
 			peer_screen_status: String::from("Monitor capability not checked yet."),
@@ -190,6 +216,28 @@ struct UiWebcamDevice {
 	id: String,
 	name: String,
 	selected: bool,
+}
+
+#[derive(Clone, WguiModel)]
+struct UiPuppyEyeCamera {
+	alt: String,
+	camera_name: String,
+	device_href: String,
+	device_name: String,
+	index: u32,
+	source_id: String,
+	stream_src: String,
+	view_href: String,
+}
+
+#[derive(Clone, WguiModel)]
+struct UiOnvifCamera {
+	name: String,
+	device_name: String,
+	device_service_url: String,
+	profile_token: String,
+	enabled: bool,
+	view_href: String,
 }
 
 #[derive(Clone, WguiModel)]
@@ -314,6 +362,14 @@ struct UiClientSession {
 	update_events: Vec<String>,
 	update_in_progress: bool,
 	update_rx: Option<Arc<std::sync::Mutex<mpsc::Receiver<UpdateProgress>>>>,
+	onvif_modal_open: bool,
+	onvif_target_device: String,
+	onvif_name: String,
+	onvif_device_service_url: String,
+	onvif_username: String,
+	onvif_password: String,
+	onvif_profile_token: String,
+	onvif_status: String,
 }
 
 #[derive(Clone, WguiModel)]
@@ -396,6 +452,35 @@ pub(super) struct UiViewState {
 	has_webcam_devices: bool,
 	webcam_stream_props: UiMediaReceiverProps,
 	webcam_has_stream: bool,
+	puppy_eye_cameras: Vec<UiPuppyEyeCamera>,
+	puppy_eye_has_cameras: bool,
+	puppy_eye_status: String,
+	puppy_eye_viewer_found: bool,
+	puppy_eye_viewer_alt: String,
+	puppy_eye_viewer_name: String,
+	puppy_eye_viewer_device_name: String,
+	puppy_eye_viewer_device_href: String,
+	puppy_eye_viewer_source_id: String,
+	puppy_eye_viewer_stream_src: String,
+	onvif_cameras: Vec<UiOnvifCamera>,
+	onvif_has_cameras: bool,
+	onvif_modal_open: bool,
+	onvif_target_device: String,
+	onvif_target_device_options: Vec<UiSelectOption>,
+	onvif_name: String,
+	onvif_device_service_url: String,
+	onvif_username: String,
+	onvif_password: String,
+	onvif_profile_token: String,
+	onvif_status: String,
+	onvif_viewer_found: bool,
+	onvif_viewer_enabled: bool,
+	onvif_viewer_name: String,
+	onvif_viewer_device_name: String,
+	onvif_viewer_device_href: String,
+	onvif_viewer_device_service_url: String,
+	onvif_viewer_profile_token: String,
+	onvif_viewer_stream_src: String,
 	monitor_has_stream: bool,
 	monitor_status: String,
 	update_version: String,
@@ -552,6 +637,20 @@ fn search_target_options(peers: &[PeerRow]) -> Vec<UiSelectOption> {
 		},
 	}));
 	options
+}
+
+fn puppy_eye_node_options(peers: &[PeerRow]) -> Vec<UiSelectOption> {
+	peers
+		.iter()
+		.map(|peer| UiSelectOption {
+			value: peer.id.clone(),
+			name: if peer.local {
+				format!("{} (current)", peer.name)
+			} else {
+				peer.name.clone()
+			},
+		})
+		.collect()
 }
 
 fn search_sort(value: &str) -> SearchSort {
@@ -771,6 +870,20 @@ fn peer_webcams_href(peer_id: &str) -> String {
 	}
 }
 
+fn puppy_eye_stream_href(peer_id: &str, source_id: &str) -> String {
+	let query = url::form_urlencoded::Serializer::new(String::new())
+		.append_pair("device", source_id)
+		.finish();
+	format!("/api/peers/{peer_id}/webcam.mjpeg?{query}")
+}
+
+fn puppy_eye_view_href(peer_id: &str, source_id: &str) -> String {
+	let query = url::form_urlencoded::Serializer::new(String::new())
+		.append_pair("source", source_id)
+		.finish();
+	format!("/puppy-eye/{peer_id}/view?{query}")
+}
+
 fn media_sessions_href(peer_id: &str) -> String {
 	if peer_id.is_empty() {
 		String::new()
@@ -863,6 +976,18 @@ impl UiControllerCore<'_> {
 		let session = self.current_session();
 		let authenticated_username = self.authenticated_username();
 		let search_targets = search_target_options(&state.peers);
+		let onvif_target_device_options = puppy_eye_node_options(&state.peers);
+		let onvif_target_device = if session.onvif_target_device.is_empty() {
+			state
+				.peers
+				.iter()
+				.find(|peer| peer.local)
+				.or_else(|| state.peers.first())
+				.map(|peer| peer.id.clone())
+				.unwrap_or_default()
+		} else {
+			session.onvif_target_device.clone()
+		};
 		let peers = state
 			.peers
 			.into_iter()
@@ -972,6 +1097,89 @@ impl UiControllerCore<'_> {
 				selected: device.id == selected_webcam_device,
 			})
 			.collect::<Vec<_>>();
+		let puppy_eye_cameras = state
+			.puppy_eye_cameras
+			.iter()
+			.enumerate()
+			.map(|(index, camera)| UiPuppyEyeCamera {
+				alt: format!(
+					"Puppy Eye camera: {} on {}",
+					camera.source.name, camera.device_name
+				),
+				camera_name: camera.source.name.clone(),
+				device_href: peer_details_href(&camera.device_id),
+				device_name: camera.device_name.clone(),
+				index: index as u32,
+				source_id: camera.source.id.clone(),
+				stream_src: puppy_eye_stream_href(&camera.device_id, &camera.source.id),
+				view_href: puppy_eye_view_href(&camera.device_id, &camera.source.id),
+			})
+			.collect::<Vec<_>>();
+		let puppy_eye_viewer = match &state.page {
+			Page::PuppyEyeCamera { peer_id, source_id } => state
+				.puppy_eye_cameras
+				.iter()
+				.find(|camera| camera.device_id == *peer_id && camera.source.id == *source_id),
+			_ => None,
+		};
+		let puppy_eye_viewer_name = puppy_eye_viewer
+			.map(|camera| camera.source.name.clone())
+			.unwrap_or_default();
+		let puppy_eye_viewer_alt = format!("Puppy Eye fullscreen: {puppy_eye_viewer_name}");
+		let puppy_eye_viewer_device_name = puppy_eye_viewer
+			.map(|camera| camera.device_name.clone())
+			.unwrap_or_default();
+		let puppy_eye_viewer_device_href = puppy_eye_viewer
+			.map(|camera| peer_details_href(&camera.device_id))
+			.unwrap_or_else(|| String::from("/devices"));
+		let puppy_eye_viewer_source_id = puppy_eye_viewer
+			.map(|camera| camera.source.id.clone())
+			.unwrap_or_default();
+		let puppy_eye_viewer_stream_src = puppy_eye_viewer
+			.map(|camera| puppy_eye_stream_href(&camera.device_id, &camera.source.id))
+			.unwrap_or_default();
+		let onvif_cameras = state
+			.puppy_eye_configured_cameras
+			.iter()
+			.map(|camera| UiOnvifCamera {
+				name: camera.camera.name.clone(),
+				device_name: camera.device_name.clone(),
+				device_service_url: camera.camera.device_service_url.clone(),
+				profile_token: camera.camera.profile_token.clone(),
+				enabled: camera.camera.enabled,
+				view_href: format!("/onvif-cameras/{}/{}", camera.device_id, camera.camera.id),
+			})
+			.collect::<Vec<_>>();
+		let onvif_viewer = match &state.page {
+			Page::OnvifCamera { peer_id, camera_id } => state
+				.puppy_eye_configured_cameras
+				.iter()
+				.find(|camera| camera.device_id == *peer_id && camera.camera.id == *camera_id),
+			_ => None,
+		};
+		let onvif_viewer_enabled = onvif_viewer
+			.map(|camera| camera.camera.enabled)
+			.unwrap_or(false);
+		let onvif_viewer_name = onvif_viewer
+			.map(|camera| camera.camera.name.clone())
+			.unwrap_or_default();
+		let onvif_viewer_device_name = onvif_viewer
+			.map(|camera| camera.device_name.clone())
+			.unwrap_or_default();
+		let onvif_viewer_device_href = onvif_viewer
+			.map(|camera| peer_details_href(&camera.device_id))
+			.unwrap_or_else(|| String::from("/devices"));
+		let onvif_viewer_device_service_url = onvif_viewer
+			.map(|camera| camera.camera.device_service_url.clone())
+			.unwrap_or_default();
+		let onvif_viewer_profile_token = onvif_viewer
+			.map(|camera| camera.camera.profile_token.clone())
+			.unwrap_or_default();
+		let onvif_viewer_stream_src = onvif_viewer
+			.map(|camera| {
+				puppy_eye_stream_href(&camera.device_id, &format!("onvif:{}", camera.camera.id))
+			})
+			.unwrap_or_default();
 		let selected_screen = state
 			.peer_screens
 			.first()
@@ -1228,6 +1436,35 @@ impl UiControllerCore<'_> {
 				source_id: selected_webcam_device.clone(),
 			},
 			webcam_has_stream: is_current_device && !selected_webcam_device.is_empty(),
+			puppy_eye_has_cameras: !puppy_eye_cameras.is_empty(),
+			puppy_eye_cameras,
+			puppy_eye_status: state.puppy_eye_status,
+			puppy_eye_viewer_found: puppy_eye_viewer.is_some(),
+			puppy_eye_viewer_alt,
+			puppy_eye_viewer_name,
+			puppy_eye_viewer_device_name,
+			puppy_eye_viewer_device_href,
+			puppy_eye_viewer_source_id,
+			puppy_eye_viewer_stream_src,
+			onvif_has_cameras: !onvif_cameras.is_empty(),
+			onvif_cameras,
+			onvif_modal_open: session.onvif_modal_open,
+			onvif_target_device,
+			onvif_target_device_options,
+			onvif_name: session.onvif_name,
+			onvif_device_service_url: session.onvif_device_service_url,
+			onvif_username: session.onvif_username,
+			onvif_password: session.onvif_password,
+			onvif_profile_token: session.onvif_profile_token,
+			onvif_status: session.onvif_status,
+			onvif_viewer_found: onvif_viewer.is_some(),
+			onvif_viewer_enabled,
+			onvif_viewer_name,
+			onvif_viewer_device_name,
+			onvif_viewer_device_href,
+			onvif_viewer_device_service_url,
+			onvif_viewer_profile_token,
+			onvif_viewer_stream_src,
 			monitor_has_stream: is_current_device
 				&& monitor_stream_enabled
 				&& !selected_screen.is_empty(),
@@ -1344,6 +1581,46 @@ impl UiControllerCore<'_> {
 		self.block_on(self.ctx.state.server.set_page(page));
 		if should_refresh {
 			self.block_on(self.ctx.state.server.refresh_peer_webcams(&peer_id));
+		}
+		self.state()
+	}
+
+	pub(super) fn puppy_eye_state(&self) -> UiViewState {
+		let snapshot = self.block_on(self.ctx.state.server.snapshot());
+		let should_refresh = snapshot.page != Page::PuppyEye;
+		self.block_on(self.ctx.state.server.set_page(Page::PuppyEye));
+		if should_refresh {
+			self.block_on(self.ctx.state.server.refresh_puppy_eye());
+		}
+		self.state()
+	}
+
+	pub(super) fn puppy_eye_camera_state(&self, peer_id: String, source_id: String) -> UiViewState {
+		let page = Page::PuppyEyeCamera { peer_id, source_id };
+		let should_refresh = self.block_on(self.ctx.state.server.snapshot()).page != page;
+		self.block_on(self.ctx.state.server.set_page(page));
+		if should_refresh {
+			self.block_on(self.ctx.state.server.refresh_puppy_eye());
+		}
+		self.state()
+	}
+
+	pub(super) fn onvif_cameras_state(&self) -> UiViewState {
+		let snapshot = self.block_on(self.ctx.state.server.snapshot());
+		let should_refresh = snapshot.page != Page::OnvifCameras;
+		self.block_on(self.ctx.state.server.set_page(Page::OnvifCameras));
+		if should_refresh {
+			self.block_on(self.ctx.state.server.refresh_puppy_eye());
+		}
+		self.state()
+	}
+
+	pub(super) fn onvif_camera_state(&self, peer_id: String, camera_id: String) -> UiViewState {
+		let page = Page::OnvifCamera { peer_id, camera_id };
+		let should_refresh = self.block_on(self.ctx.state.server.snapshot()).page != page;
+		self.block_on(self.ctx.state.server.set_page(page));
+		if should_refresh {
+			self.block_on(self.ctx.state.server.refresh_puppy_eye());
 		}
 		self.state()
 	}
@@ -1657,6 +1934,184 @@ impl UiControllerCore<'_> {
 			return;
 		};
 		self.block_on(self.ctx.state.server.refresh_peer_webcams(&peer_id));
+	}
+
+	fn onvif_camera_config(&self) -> Result<(PeerId, OnvifCameraConfig)> {
+		let session = self.current_session();
+		let peer = PeerId::from_str(session.onvif_target_device.trim())
+			.context("select a PuppyNet node")?;
+		if session.onvif_name.trim().is_empty() {
+			anyhow::bail!("camera name is required");
+		}
+		if session.onvif_device_service_url.trim().is_empty() {
+			anyhow::bail!("ONVIF device URL is required");
+		}
+		Ok((
+			peer,
+			OnvifCameraConfig {
+				id: String::new(),
+				name: session.onvif_name.trim().to_string(),
+				device_service_url: session.onvif_device_service_url.trim().to_string(),
+				username: session.onvif_username.trim().to_string(),
+				password: session.onvif_password,
+				profile_token: session.onvif_profile_token.trim().to_string(),
+				enabled: true,
+			},
+		))
+	}
+
+	pub fn open_onvif_camera_modal(&self) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		let default_peer = self
+			.block_on(self.ctx.state.server.snapshot())
+			.peers
+			.into_iter()
+			.find(|peer| peer.local)
+			.map(|peer| peer.id);
+		self.update_session(|session| {
+			session.onvif_modal_open = true;
+			session.onvif_status.clear();
+			if session.onvif_target_device.is_empty()
+				&& let Some(peer) = default_peer
+			{
+				session.onvif_target_device = peer;
+			}
+		});
+	}
+
+	pub fn close_onvif_camera_modal(&self) {
+		self.update_session(|session| {
+			session.onvif_modal_open = false;
+			session.onvif_password.clear();
+		});
+	}
+
+	pub fn select_onvif_target_device(&self, value: String) {
+		self.update_session(|session| session.onvif_target_device = value);
+	}
+
+	pub fn edit_onvif_name(&self, value: String) {
+		self.update_session(|session| session.onvif_name = value);
+	}
+
+	pub fn edit_onvif_device_service_url(&self, value: String) {
+		self.update_session(|session| session.onvif_device_service_url = value);
+	}
+
+	pub fn edit_onvif_username(&self, value: String) {
+		self.update_session(|session| session.onvif_username = value);
+	}
+
+	pub fn edit_onvif_password(&self, value: String) {
+		self.update_session(|session| session.onvif_password = value);
+	}
+
+	pub fn edit_onvif_profile_token(&self, value: String) {
+		self.update_session(|session| session.onvif_profile_token = value);
+	}
+
+	pub fn test_onvif_camera(&self) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		let result = self.onvif_camera_config().and_then(|(peer, config)| {
+			self.block_on(self.ctx.state.server.puppy.test_onvif_camera(peer, config))
+		});
+		self.update_session(|session| match result {
+			Ok(result) => {
+				session.onvif_profile_token = result.camera.profile_token;
+				session.onvif_status = result.message;
+			}
+			Err(error) => session.onvif_status = format!("Camera test failed: {error}"),
+		});
+	}
+
+	pub fn save_onvif_camera(&self) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		let result = self.onvif_camera_config().and_then(|(peer, config)| {
+			self.block_on(self.ctx.state.server.puppy.save_onvif_camera(peer, config))
+		});
+		let saved = result.is_ok();
+		self.update_session(|session| match result {
+			Ok(result) => {
+				session.onvif_modal_open = false;
+				session.onvif_name.clear();
+				session.onvif_device_service_url.clear();
+				session.onvif_username.clear();
+				session.onvif_password.clear();
+				session.onvif_profile_token.clear();
+				session.onvif_status = result.message;
+			}
+			Err(error) => session.onvif_status = format!("Save camera failed: {error}"),
+		});
+		if saved {
+			self.block_on(self.ctx.state.server.refresh_puppy_eye());
+		}
+	}
+
+	pub fn delete_onvif_camera(&self, index: usize) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		let camera = self
+			.block_on(self.ctx.state.server.snapshot())
+			.puppy_eye_configured_cameras
+			.get(index)
+			.cloned();
+		let result = camera
+			.ok_or_else(|| anyhow::anyhow!("camera was not found"))
+			.and_then(|camera| {
+				let peer = PeerId::from_str(&camera.device_id)?;
+				self.block_on(
+					self.ctx
+						.state
+						.server
+						.puppy
+						.delete_onvif_camera(peer, camera.camera.id),
+				)
+			});
+		let deleted = result.is_ok();
+		self.update_session(|session| {
+			session.onvif_status = match result {
+				Ok(result) => result.message,
+				Err(error) => format!("Delete camera failed: {error}"),
+			};
+		});
+		if deleted {
+			self.block_on(self.ctx.state.server.refresh_puppy_eye());
+		}
+	}
+
+	pub fn refresh_puppy_eye(&self) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		self.block_on(self.ctx.state.server.refresh_puppy_eye());
+	}
+
+	pub fn open_puppy_eye_camera(&self, index: u32) {
+		if !self.is_authenticated() {
+			self.ctx.push_state("/login");
+			return;
+		}
+		let camera = self
+			.block_on(self.ctx.state.server.snapshot())
+			.puppy_eye_cameras
+			.get(index as usize)
+			.cloned();
+		if let Some(camera) = camera {
+			self.ctx
+				.push_state(puppy_eye_view_href(&camera.device_id, &camera.source.id));
+		}
 	}
 
 	pub fn view_webcam(&self, idx: u32) {
@@ -3535,6 +3990,78 @@ impl UiServer {
 		}
 	}
 
+	async fn refresh_puppy_eye(&self) {
+		let devices = {
+			let mut state = self.state.lock().await;
+			state.puppy_eye_status = String::from("Looking for cameras on PuppyNet devices...");
+			state.peers.clone()
+		};
+		let device_count = devices.len();
+		let results = futures::future::join_all(devices.into_iter().map(|device| {
+			let puppy = Arc::clone(&self.puppy);
+			async move {
+				let result: Result<(Vec<MediaSource>, Vec<OnvifCamera>)> = async {
+					let peer = PeerId::from_str(&device.id)?;
+					let capability = puppy.media_capability(peer).await?;
+					let sources = if capability.supported {
+						puppy
+							.list_media_sources(peer)
+							.await?
+							.into_iter()
+							.filter(|source| source.kind == MediaSourceKind::Webcam)
+							.collect::<Vec<_>>()
+					} else {
+						Vec::new()
+					};
+					let configured = puppy.list_onvif_cameras(peer).await?;
+					Ok((sources, configured))
+				}
+				.await;
+				(device, result)
+			}
+		}))
+		.await;
+
+		let mut cameras = Vec::new();
+		let mut configured_cameras = Vec::new();
+		let mut failed_devices = 0;
+		for (device, result) in results {
+			match result {
+				Ok((sources, configured)) => {
+					cameras.extend(sources.into_iter().map(|source| PuppyEyeCamera {
+						device_id: device.id.clone(),
+						device_name: device.name.clone(),
+						source,
+					}));
+					configured_cameras.extend(configured.into_iter().map(|camera| {
+						PuppyEyeConfiguredCamera {
+							device_id: device.id.clone(),
+							device_name: device.name.clone(),
+							camera,
+						}
+					}));
+				}
+				Err(error) => {
+					failed_devices += 1;
+					log::warn!("failed to discover cameras on {}: {error}", device.id);
+				}
+			}
+		}
+
+		let mut state = self.state.lock().await;
+		state.puppy_eye_status = format!(
+			"Detected {} camera(s) across {device_count} device(s).",
+			cameras.len()
+		);
+		if failed_devices > 0 {
+			state.puppy_eye_status.push_str(&format!(
+				" {failed_devices} device(s) could not be checked."
+			));
+		}
+		state.puppy_eye_cameras = cameras;
+		state.puppy_eye_configured_cameras = configured_cameras;
+	}
+
 	async fn refresh_peer_webcams(&self, peer_id: &str) {
 		if !self.is_local_media_peer(peer_id).await {
 			let mut state = self.state.lock().await;
@@ -3789,6 +4316,10 @@ fn page_label(page: &Page) -> &'static str {
 		Page::PeerControl { .. } => "peer_control",
 		Page::PeerFiles { .. } => "peer_files",
 		Page::PeerWebcams { .. } => "peer_webcams",
+		Page::PuppyEye => "puppy_eye",
+		Page::PuppyEyeCamera { .. } => "puppy_eye_camera",
+		Page::OnvifCameras => "onvif_cameras",
+		Page::OnvifCamera { .. } => "onvif_camera",
 		Page::Files => "files",
 		Page::Search => "search",
 		Page::Storage => "storage",
@@ -3866,7 +4397,6 @@ fn is_image_path(path: &str) -> bool {
 		.unwrap_or(false)
 }
 
-#[cfg(any())]
 fn decode_query_value(value: &str) -> String {
 	url::form_urlencoded::parse(format!("value={value}").as_bytes())
 		.find_map(|(key, value)| {
@@ -3879,11 +4409,9 @@ fn decode_query_value(value: &str) -> String {
 		.unwrap_or_else(|| value.to_string())
 }
 
-#[cfg(any())]
 fn peer_webcam_stream_peer(path: &str) -> Option<&str> {
 	let rest = path.strip_prefix("/api/peers/")?;
 	rest.strip_suffix("/webcam.mjpeg")
-		.or_else(|| rest.strip_suffix("/monitor.mjpeg"))
 }
 
 #[cfg(any())]
@@ -3892,7 +4420,6 @@ fn peer_microphone_stream_peer(path: &str) -> Option<&str> {
 	rest.strip_suffix("/microphone.wav")
 }
 
-#[cfg(any())]
 fn mjpeg_frame_chunk(mime: &str, data: &[u8]) -> Vec<u8> {
 	let mut chunk = Vec::new();
 	chunk.extend_from_slice(b"--puppynetframe\r\n");
@@ -3903,7 +4430,6 @@ fn mjpeg_frame_chunk(mime: &str, data: &[u8]) -> Vec<u8> {
 	chunk
 }
 
-#[cfg(any())]
 fn media_stream_label(path: &str) -> &'static str {
 	if path.ends_with("/monitor.mjpeg") {
 		"monitor"
@@ -3912,7 +4438,6 @@ fn media_stream_label(path: &str) -> &'static str {
 	}
 }
 
-#[cfg(any())]
 fn media_stream_frame_delay(stream_label: &str) -> std::time::Duration {
 	if stream_label == "monitor" {
 		std::time::Duration::from_millis(500)
@@ -3921,7 +4446,6 @@ fn media_stream_frame_delay(stream_label: &str) -> std::time::Duration {
 	}
 }
 
-#[cfg(any())]
 fn monitor_stream_enabled_for_session(
 	ctx: &Arc<Ctx<UiContext, ()>>,
 	session_id: Option<&str>,
@@ -3941,7 +4465,6 @@ fn monitor_stream_enabled_for_session(
 		.unwrap_or(false)
 }
 
-#[cfg(any())]
 async fn handle_peer_webcam_stream(
 	request: HttpRequest,
 	ctx: Arc<Ctx<UiContext, ()>>,
@@ -4236,6 +4759,9 @@ async fn handle_ui_http(
 	ctx: Arc<Ctx<UiContext, ()>>,
 ) -> Option<HttpResponse> {
 	match (request.method.as_str(), request.path.as_str()) {
+		("GET", path) if peer_webcam_stream_peer(path).is_some() => {
+			Some(handle_peer_webcam_stream(request, ctx).await)
+		}
 		("POST", path) if peer_media_sessions_peer(path).is_some() => {
 			Some(handle_create_media_session(request, ctx).await)
 		}
@@ -4310,6 +4836,10 @@ pub async fn run_ui(puppy: Arc<PuppyNet>, bind: SocketAddr) -> Result<()> {
 	let _template_rebuild_sentinel = [
 		include_str!("../wui/pages/home.wui"),
 		include_str!("../wui/pages/peers.wui"),
+		include_str!("../wui/pages/puppy_eye.wui"),
+		include_str!("../wui/pages/puppy_eye_camera.wui"),
+		include_str!("../wui/pages/onvif_camera.wui"),
+		include_str!("../wui/pages/onvif_cameras.wui"),
 		include_str!("../wui/pages/search.wui"),
 		include_str!("../wui/pages/settings.wui"),
 		include_str!("../wui/pages/users.wui"),
@@ -4334,6 +4864,10 @@ pub async fn run_ui(puppy: Arc<PuppyNet>, bind: SocketAddr) -> Result<()> {
 	wgui.add_page::<HomeController>("/");
 	wgui.add_page::<LoginController>("/login");
 	wgui.add_page::<PeersController>("/devices");
+	wgui.add_page::<PuppyEyeController>("/puppy-eye");
+	wgui.add_page::<PuppyEyeCameraController>("/puppy-eye/:peer_id/view");
+	wgui.add_page::<OnvifCamerasController>("/onvif-cameras");
+	wgui.add_page::<OnvifCameraController>("/onvif-cameras/:peer_id/:camera_id");
 	wgui.add_page::<PeerControlController>("/devices/:peer_id/control");
 	wgui.add_page::<PeerFilesController>("/devices/:peer_id/files");
 	wgui.add_page::<PeerWebcamsController>("/devices/:peer_id/webcams");
@@ -4404,6 +4938,10 @@ mod tests {
 			"pages/peer",
 			"pages/peer_control",
 			"pages/peer_webcams",
+			"pages/puppy_eye",
+			"pages/puppy_eye_camera",
+			"pages/onvif_camera",
+			"pages/onvif_cameras",
 			"pages/files",
 			"pages/search",
 			"pages/storage",
@@ -4421,7 +4959,15 @@ mod tests {
 	}
 
 	#[test]
-	fn media_session_routes_require_exact_paths() {
+	fn media_routes_require_exact_paths() {
+		assert_eq!(
+			peer_webcam_stream_peer("/api/peers/peer-id/webcam.mjpeg"),
+			Some("peer-id")
+		);
+		assert_eq!(
+			peer_webcam_stream_peer("/api/peers/peer-id/webcam.mjpeg/extra"),
+			None
+		);
 		assert_eq!(
 			peer_media_sessions_peer("/api/peers/peer-id/media/sessions"),
 			Some("peer-id")

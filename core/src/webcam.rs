@@ -1,3 +1,4 @@
+use crate::onvif;
 use crate::p2p::{
 	MediaCapability, MediaFrame, MediaOutput, MediaSource, MediaSourceKind, MediaTransport,
 };
@@ -147,8 +148,8 @@ pub(crate) fn microphone_device(source_id: &str) -> Result<(cpal::Device, Suppor
 		let rest = source_id
 			.strip_prefix("microphone:")
 			.ok_or_else(|| anyhow!("invalid microphone source"))?;
-		let id = DeviceId::from_str(rest)
-			.map_err(|err| anyhow!("invalid microphone source: {err}"))?;
+		let id =
+			DeviceId::from_str(rest).map_err(|err| anyhow!("invalid microphone source: {err}"))?;
 		host.device_by_id(&id)
 	}
 	.ok_or_else(|| anyhow!("No microphone input device is available for {source_id}"))?;
@@ -815,7 +816,14 @@ pub(crate) async fn media_capability() -> MediaCapability {
 	let webcam_available = backend.available().await;
 	let screen_available = screen_available().await;
 	let microphone_available = microphone_available().await;
-	if webcam_available.is_ok() || screen_available.is_ok() || microphone_available.is_ok() {
+	let onvif_sources = onvif::configured_sources().unwrap_or_default();
+	let onvif_available =
+		!onvif_sources.is_empty() && command_available("ffmpeg", "-version").await;
+	if webcam_available.is_ok()
+		|| screen_available.is_ok()
+		|| microphone_available.is_ok()
+		|| onvif_available
+	{
 		let mut backends = Vec::new();
 		let mut details = Vec::new();
 		if webcam_available.is_ok() {
@@ -835,6 +843,13 @@ pub(crate) async fn media_capability() -> MediaCapability {
 			details.push(String::from("Microphone listening is available."));
 		} else if let Err(err) = &microphone_available {
 			details.push(format!("Microphone listening unavailable: {err}"));
+		}
+		if onvif_available {
+			backends.push(String::from("onvif-rtsp"));
+			details.push(format!(
+				"{} configured ONVIF camera(s) are available.",
+				onvif_sources.len()
+			));
 		}
 		return MediaCapability {
 			supported: true,
@@ -873,6 +888,7 @@ pub(crate) async fn list_media_sources() -> Result<Vec<MediaSource>> {
 	if microphone_available().await.is_ok() {
 		sources.extend(list_microphone_sources().await?);
 	}
+	sources.extend(onvif::configured_sources()?);
 	if sources.is_empty() {
 		bail!("No live media sources are available.");
 	}
@@ -880,6 +896,9 @@ pub(crate) async fn list_media_sources() -> Result<Vec<MediaSource>> {
 }
 
 pub(crate) async fn capture_media_frame(source_id: String) -> Result<MediaFrame> {
+	if source_id.starts_with("onvif:") {
+		return onvif::capture_frame(source_id).await;
+	}
 	if source_id == DEFAULT_SCREEN_SOURCE_ID {
 		return capture_screen_frame(source_id).await;
 	}

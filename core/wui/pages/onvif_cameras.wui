@@ -1,0 +1,69 @@
+<Import name="AppLayout" from="../layouts/app" />
+
+<AppLayout>
+  <VStack spacing=10 padding=14 fill=true color="#d6eee9">
+    <HStack spacing=8 wrap=true fill=true>
+      <VStack spacing=2 grow=1 minWidth=0>
+        <Text value="ONVIF Cameras" color="#eafff6" />
+        <Text value="Configure network cameras and choose which PuppyNet node connects to them." color="#9fbdb6" />
+      </VStack>
+      <Link text="View Puppy Eye" href="/puppy-eye" />
+      <Button text="Add camera" onClick="OpenOnvifCameraModal" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
+      <Button text="Refresh" onClick="RefreshCameras" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
+    </HStack>
+    <If test={state.onvif_status != ""}>
+      <Text value={state.onvif_status} breakWords=true color="#79f2c0" />
+    </If>
+    <If test={!state.onvif_has_cameras}>
+      <VStack spacing=4 padding=14 fill=true backgroundColor="#061211" border="1px solid #2d6258">
+        <Text value="No ONVIF cameras configured." color="#eafff6" />
+        <Text value="Add a camera to make it available in Puppy Eye." color="#9fbdb6" />
+      </VStack>
+    </If>
+    <Else>
+      <VStack spacing=6 padding=10 fill=true backgroundColor="#061211" border="1px solid #2d6258">
+        <For each={state.onvif_cameras} itemAs="camera" indexAs="i">
+          <HStack spacing=8 padding=8 wrap=true fill=true border="1px solid #12332d">
+            <VStack spacing=2 grow=1 minWidth=240>
+              <Text value={camera.name} breakWords=true color="#eafff6" />
+              <Text value={camera.device_name} breakWords=true color="#79f2c0" />
+              <Text value={camera.device_service_url} breakWords=true color="#9fbdb6" />
+              <Text value={camera.profile_token} breakWords=true color="#9fbdb6" />
+            </VStack>
+            <If test={camera.enabled}>
+              <Text value="Enabled" color="#79f2c0" />
+            </If>
+            <Else>
+              <Text value="Disabled" color="#ffcf70" />
+            </Else>
+            <Link text="View" href={camera.view_href} />
+            <Button text="Delete" onClick="DeleteOnvifCamera" arg={i} color="#ff8f8f" backgroundColor="#020807" border="1px solid #8b3a3a" />
+          </HStack>
+        </For>
+      </VStack>
+    </Else>
+  </VStack>
+  <Modal open={state.onvif_modal_open} onClick="CloseOnvifCameraModal">
+    <VStack spacing=8 padding=16 width=520 maxWidth=520 backgroundColor="#061211" border="1px solid #1f4b44" color="#d6eee9">
+      <HStack spacing=6 wrap=true fill=true>
+        <Text value="ADD ONVIF CAMERA" grow=1 minWidth=0 color="#7bdcff" />
+        <Button text="Close" onClick="CloseOnvifCameraModal" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
+      </HStack>
+      <Text value="The selected PuppyNet node will connect to this camera and relay its frames." breakWords=true color="#9fbdb6" />
+      <Text value="PuppyNet node" color="#eafff6" />
+      <Select value={state.onvif_target_device} options={state.onvif_target_device_options} onSelect="SelectOnvifTargetDevice" fill=true color="#d6eee9" backgroundColor="#020807" border="1px solid #2d6258" />
+      <TextInput value={state.onvif_name} placeholder="Camera name" onTextChanged="EditOnvifName" fill=true />
+      <TextInput value={state.onvif_device_service_url} placeholder="Camera IP or ONVIF device service URL" onTextChanged="EditOnvifDeviceServiceUrl" fill=true />
+      <TextInput value={state.onvif_username} placeholder="Username (optional)" onTextChanged="EditOnvifUsername" fill=true />
+      <TextInput value={state.onvif_password} placeholder="Password (optional)" type="password" onTextChanged="EditOnvifPassword" fill=true />
+      <TextInput value={state.onvif_profile_token} placeholder="Profile token (automatic when empty)" onTextChanged="EditOnvifProfileToken" fill=true />
+      <HStack spacing=6 wrap=true fill=true>
+        <Button text="Test" onClick="TestOnvifCamera" color="#7bdcff" backgroundColor="#020807" border="1px solid #2d6258" />
+        <Button text="Save" onClick="SaveOnvifCamera" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
+      </HStack>
+      <If test={state.onvif_status != ""}>
+        <Text value={state.onvif_status} breakWords=true />
+      </If>
+    </VStack>
+  </Modal>
+</AppLayout>

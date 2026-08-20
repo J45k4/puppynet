@@ -6,6 +6,7 @@
     <HStack spacing=6 wrap=true grow=1 minWidth=0>
       <NavLink text="Home" href="/" />
       <NavLink text="Devices" href="/devices" activeWhen="/devices/*" />
+      <NavLink text="Puppy Eye" href="/puppy-eye" />
       <NavLink text="Files" href="/files" />
       <NavLink text="Search" href="/search" />
       <NavLink text="Storage" href="/storage" />

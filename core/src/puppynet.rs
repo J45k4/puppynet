@@ -8,8 +8,9 @@ use crate::db::{
 };
 use crate::p2p::{
 	AudioCapability, AudioDevice, CpuInfo, DesktopInput, DirEntry, DiskInfo, InterfaceInfo,
-	LiveSearchArgs, MediaCapability, MediaFrame, MediaSource, PeerInfo, PermissionGrant,
-	SearchEvent, Thumbnail, grant_from_permission, permission_from_grant,
+	LiveSearchArgs, MediaCapability, MediaFrame, MediaSource, OnvifCamera, OnvifCameraConfig,
+	OnvifCameraMutation, PeerInfo, PermissionGrant, SearchEvent, Thumbnail, grant_from_permission,
+	permission_from_grant,
 };
 use crate::scan::ScanEvent;
 use crate::state::{FLAG_READ, FLAG_SEARCH, FLAG_WRITE, Peer, Permission, State};
@@ -545,6 +546,62 @@ impl PuppyNet {
 			.map_err(|e| anyhow!("GetMediaFrame response channel closed: {e}"))?
 	}
 
+	pub async fn list_onvif_cameras(&self, peer_id: PeerId) -> Result<Vec<OnvifCamera>> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::ListOnvifCameras { tx, peer_id })
+			.map_err(|e| anyhow!("failed to send ListOnvifCameras command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("ListOnvifCameras response channel closed: {e}"))?
+	}
+
+	pub async fn test_onvif_camera(
+		&self,
+		peer_id: PeerId,
+		config: OnvifCameraConfig,
+	) -> Result<OnvifCameraMutation> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::TestOnvifCamera {
+				tx,
+				peer_id,
+				config,
+			})
+			.map_err(|e| anyhow!("failed to send TestOnvifCamera command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("TestOnvifCamera response channel closed: {e}"))?
+	}
+
+	pub async fn save_onvif_camera(
+		&self,
+		peer_id: PeerId,
+		config: OnvifCameraConfig,
+	) -> Result<OnvifCameraMutation> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::SaveOnvifCamera {
+				tx,
+				peer_id,
+				config,
+			})
+			.map_err(|e| anyhow!("failed to send SaveOnvifCamera command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("SaveOnvifCamera response channel closed: {e}"))?
+	}
+
+	pub async fn delete_onvif_camera(
+		&self,
+		peer_id: PeerId,
+		id: String,
+	) -> Result<OnvifCameraMutation> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd_tx
+			.send(Command::DeleteOnvifCamera { tx, peer_id, id })
+			.map_err(|e| anyhow!("failed to send DeleteOnvifCamera command: {e}"))?;
+		rx.await
+			.map_err(|e| anyhow!("DeleteOnvifCamera response channel closed: {e}"))?
+	}
+
 	pub fn scan_remote_peer(
 		&self,
 		peer: PeerId,
@@ -931,19 +988,23 @@ impl PuppyNet {
 		Ok(Arc::new(Mutex::new(rx)))
 	}
 
+	pub async fn shutdown(mut self) {
+		crate::onvif::shutdown_workers().await;
+		if let Some(tx) = self.shutdown_tx.take() {
+			let _ = tx.send(());
+		}
+		if let Err(e) = self.handle.await {
+			log::error!("task join error: {e}");
+		}
+	}
+
 	/// Wait for the peer until Ctrl+C (SIGINT) then perform a graceful shutdown.
-	pub async fn wait(mut self) {
+	pub async fn wait(self) {
 		// Wait for Ctrl+C
 		if let Err(e) = tokio::signal::ctrl_c().await {
 			log::error!("failed to listen for ctrl_c: {e}");
 		}
 		log::info!("interrupt received, shutting down");
-		if let Some(tx) = self.shutdown_tx.take() {
-			let _ = tx.send(());
-		}
-		// Await the background task
-		if let Err(e) = self.handle.await {
-			log::error!("task join error: {e}");
-		}
+		self.shutdown().await;
 	}
 }

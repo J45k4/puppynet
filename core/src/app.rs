@@ -1,11 +1,12 @@
 use crate::audio;
 use crate::auth;
 use crate::desktop_input;
+use crate::onvif;
 use crate::p2p::{
 	AudioCapability, AudioDevice, AuthMethod, CpuInfo, DesktopInput, DirEntry, DiskInfo,
 	FileWriteAck, InterfaceInfo, LiveSearchArgs, LiveSearchRow, MediaCapability, MediaFrame,
-	MediaSource, PeerInfo, PeerReq, PeerRes, PermissionGrant, SearchEvent, Thumbnail,
-	permission_from_grant,
+	MediaSource, OnvifCamera, OnvifCameraConfig, OnvifCameraMutation, PeerInfo, PeerReq, PeerRes,
+	PermissionGrant, SearchEvent, Thumbnail, permission_from_grant,
 };
 use crate::types::FileChunk;
 use crate::updater::{self, UpdateProgress, UpdateResult};
@@ -14,10 +15,11 @@ use crate::webcam;
 use crate::{
 	db::{
 		Cpu as DbCpu, FileEntry, Interface as DbInterface, Node, NodeID, StorageUsageFile,
-		delete_user, fetch_file_entries_paginated, load_discovered_peers, load_peer_permissions,
-		load_peers, load_shared_folders, load_users, remove_discovered_peer, remove_stale_cpus,
-		remove_stale_interfaces, save_cpu, save_discovered_peer, save_interface, save_node,
-		save_peer, save_shared_folder, save_user,
+		delete_onvif_camera, delete_user, fetch_file_entries_paginated, load_discovered_peers,
+		load_onvif_cameras, load_peer_permissions, load_peers, load_shared_folders, load_users,
+		remove_discovered_peer, remove_stale_cpus, remove_stale_interfaces, save_cpu,
+		save_discovered_peer, save_interface, save_node, save_onvif_camera, save_peer,
+		save_shared_folder, save_user,
 	},
 	p2p::{AgentBehaviour, AgentEvent, build_swarm, load_or_generate_keypair},
 	scan::{self, ScanEvent},
@@ -126,6 +128,25 @@ pub enum Command {
 		tx: oneshot::Sender<Result<MediaFrame>>,
 		peer_id: PeerId,
 		source_id: String,
+	},
+	ListOnvifCameras {
+		tx: oneshot::Sender<Result<Vec<OnvifCamera>>>,
+		peer_id: PeerId,
+	},
+	TestOnvifCamera {
+		tx: oneshot::Sender<Result<OnvifCameraMutation>>,
+		peer_id: PeerId,
+		config: OnvifCameraConfig,
+	},
+	SaveOnvifCamera {
+		tx: oneshot::Sender<Result<OnvifCameraMutation>>,
+		peer_id: PeerId,
+		config: OnvifCameraConfig,
+	},
+	DeleteOnvifCamera {
+		tx: oneshot::Sender<Result<OnvifCameraMutation>>,
+		peer_id: PeerId,
+		id: String,
 	},
 	ListFileEntries {
 		peer: PeerId,
@@ -586,6 +607,26 @@ impl ResponseDecoder for MediaFrame {
 	fn decode(response: PeerRes) -> anyhow::Result<Self> {
 		match response {
 			PeerRes::MediaFrame(frame) => Ok(frame),
+			other => Err(anyhow!("unexpected response: {:?}", other)),
+		}
+	}
+}
+
+impl ResponseDecoder for Vec<OnvifCamera> {
+	fn decode(response: PeerRes) -> anyhow::Result<Self> {
+		match response {
+			PeerRes::OnvifCameras(cameras) => Ok(cameras),
+			PeerRes::Error(error) => Err(anyhow!(error)),
+			other => Err(anyhow!("unexpected response: {:?}", other)),
+		}
+	}
+}
+
+impl ResponseDecoder for OnvifCameraMutation {
+	fn decode(response: PeerRes) -> anyhow::Result<Self> {
+		match response {
+			PeerRes::OnvifCameraMutation(result) => Ok(result),
+			PeerRes::Error(error) => Err(anyhow!(error)),
 			other => Err(anyhow!("unexpected response: {:?}", other)),
 		}
 	}
@@ -1160,6 +1201,17 @@ impl App {
 		peer: PeerId,
 		req: PeerReq,
 	) -> anyhow::Result<PeerRes> {
+		if matches!(
+			&req,
+			PeerReq::TestOnvifCamera { .. }
+				| PeerReq::SaveOnvifCamera { .. }
+				| PeerReq::DeleteOnvifCamera { .. }
+		) && !self.state.has_owner_access(peer)
+		{
+			return Ok(PeerRes::Error(String::from(
+				"owner access is required to configure ONVIF cameras",
+			)));
+		}
 		let res = match req {
 			PeerReq::PeerInfo => PeerRes::PeerInfo(Self::local_peer_info()),
 			PeerReq::ListDir { path } => {
@@ -1353,6 +1405,78 @@ impl App {
 			},
 			PeerReq::GetMediaFrame { .. } => {
 				PeerRes::Error(String::from("GetMediaFrame must be handled asynchronously"))
+			}
+			PeerReq::ListOnvifCameras => {
+				let configs = self
+					.db
+					.lock()
+					.map_err(|_| anyhow!("database lock was poisoned"))
+					.and_then(|conn| load_onvif_cameras(&conn));
+				match configs {
+					Ok(configs) => PeerRes::OnvifCameras(onvif::summaries(&configs)),
+					Err(error) => PeerRes::Error(error.to_string()),
+				}
+			}
+			PeerReq::TestOnvifCamera { mut config } => {
+				match onvif::test_camera(&mut config).await {
+					Ok(message) => PeerRes::OnvifCameraMutation(OnvifCameraMutation {
+						camera: OnvifCamera::from(&config),
+						message,
+					}),
+					Err(error) => PeerRes::Error(error.to_string()),
+				}
+			}
+			PeerReq::SaveOnvifCamera { mut config } => {
+				if config.id.trim().is_empty() {
+					config.id = uuid::Uuid::new_v4().to_string();
+				}
+				if config.name.trim().is_empty() {
+					return Ok(PeerRes::Error(String::from("camera name is required")));
+				}
+				match onvif::prepare_camera(&mut config).await {
+					Ok(message) => {
+						let saved = self
+							.db
+							.lock()
+							.map_err(|_| anyhow!("database lock was poisoned"))
+							.and_then(|conn| save_onvif_camera(&conn, &config));
+						match saved {
+							Ok(saved) => {
+								onvif::invalidate_camera(&saved.id);
+								PeerRes::OnvifCameraMutation(OnvifCameraMutation {
+									camera: OnvifCamera::from(&saved),
+									message: format!("Camera saved. {message}"),
+								})
+							}
+							Err(error) => PeerRes::Error(error.to_string()),
+						}
+					}
+					Err(error) => PeerRes::Error(error.to_string()),
+				}
+			}
+			PeerReq::DeleteOnvifCamera { id } => {
+				let deleted = self
+					.db
+					.lock()
+					.map_err(|_| anyhow!("database lock was poisoned"))
+					.and_then(|conn| {
+						let camera = crate::db::load_onvif_camera(&conn, &id)?
+							.ok_or_else(|| anyhow!("ONVIF camera was not found"))?;
+						if !delete_onvif_camera(&conn, &id)? {
+							bail!("ONVIF camera was not found");
+						}
+						Ok(camera)
+					});
+				match deleted {
+					Ok(camera) => {
+						onvif::invalidate_camera(&id);
+						PeerRes::OnvifCameraMutation(OnvifCameraMutation {
+							camera: OnvifCamera::from(&camera),
+							message: String::from("Camera deleted"),
+						})
+					}
+					Err(error) => PeerRes::Error(error.to_string()),
+				}
 			}
 			PeerReq::FileEntries { offset, limit } => {
 				match self.fetch_file_entries(offset, limit) {
@@ -2453,6 +2577,85 @@ impl App {
 					.send_request(&peer_id, PeerReq::GetMediaFrame { source_id });
 				self.pending_requests
 					.insert(request_id, Pending::<MediaFrame>::new(tx));
+			}
+			Command::ListOnvifCameras { tx, peer_id } => {
+				if self.state.me == peer_id {
+					let result = self
+						.handle_puppy_peer_req(peer_id, PeerReq::ListOnvifCameras)
+						.await
+						.and_then(Vec::<OnvifCamera>::decode);
+					let _ = tx.send(result);
+					return;
+				}
+				let request_id = self
+					.swarm
+					.behaviour_mut()
+					.puppynet
+					.send_request(&peer_id, PeerReq::ListOnvifCameras);
+				self.pending_requests
+					.insert(request_id, Pending::<Vec<OnvifCamera>>::new(tx));
+			}
+			Command::TestOnvifCamera {
+				tx,
+				peer_id,
+				config,
+			} => {
+				let request = PeerReq::TestOnvifCamera { config };
+				if self.state.me == peer_id {
+					let result = self
+						.handle_puppy_peer_req(peer_id, request)
+						.await
+						.and_then(OnvifCameraMutation::decode);
+					let _ = tx.send(result);
+					return;
+				}
+				let request_id = self
+					.swarm
+					.behaviour_mut()
+					.puppynet
+					.send_request(&peer_id, request);
+				self.pending_requests
+					.insert(request_id, Pending::<OnvifCameraMutation>::new(tx));
+			}
+			Command::SaveOnvifCamera {
+				tx,
+				peer_id,
+				config,
+			} => {
+				let request = PeerReq::SaveOnvifCamera { config };
+				if self.state.me == peer_id {
+					let result = self
+						.handle_puppy_peer_req(peer_id, request)
+						.await
+						.and_then(OnvifCameraMutation::decode);
+					let _ = tx.send(result);
+					return;
+				}
+				let request_id = self
+					.swarm
+					.behaviour_mut()
+					.puppynet
+					.send_request(&peer_id, request);
+				self.pending_requests
+					.insert(request_id, Pending::<OnvifCameraMutation>::new(tx));
+			}
+			Command::DeleteOnvifCamera { tx, peer_id, id } => {
+				let request = PeerReq::DeleteOnvifCamera { id };
+				if self.state.me == peer_id {
+					let result = self
+						.handle_puppy_peer_req(peer_id, request)
+						.await
+						.and_then(OnvifCameraMutation::decode);
+					let _ = tx.send(result);
+					return;
+				}
+				let request_id = self
+					.swarm
+					.behaviour_mut()
+					.puppynet
+					.send_request(&peer_id, request);
+				self.pending_requests
+					.insert(request_id, Pending::<OnvifCameraMutation>::new(tx));
 			}
 			Command::ListFileEntries {
 				peer,

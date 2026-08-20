@@ -276,6 +276,17 @@ impl State {
 		false
 	}
 
+	pub fn has_owner_access(&self, peer_id: PeerId) -> bool {
+		peer_id == self.me
+			|| self.relationships.iter().any(|relationship| {
+				(relationship.src == peer_id || relationship.target == peer_id)
+					&& relationship
+						.rules
+						.iter()
+						.any(|permission| matches!(permission.rule(), Rule::Owner))
+			})
+	}
+
 	pub fn set_peer_permissions(&mut self, peer_id: PeerId, permissions: Vec<Permission>) {
 		let me = self.me;
 		self.dirty_permission_targets.insert(peer_id);
@@ -436,5 +447,17 @@ mod tests {
 			Path::new("/tmp/puppynet-denied/file.txt"),
 			FLAG_READ | FLAG_SEARCH
 		));
+	}
+
+	#[test]
+	fn owner_access_requires_an_owner_relationship() {
+		let mut state = State::default();
+		let owner = PeerId::random();
+		let viewer = PeerId::random();
+		state.set_peer_permissions(owner, vec![Permission::new(Rule::Owner)]);
+
+		assert!(state.has_owner_access(state.me));
+		assert!(state.has_owner_access(owner));
+		assert!(!state.has_owner_access(viewer));
 	}
 }

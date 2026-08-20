@@ -7,6 +7,7 @@ mod db;
 mod desktop_input;
 pub mod http_api;
 mod media_webrtc;
+mod onvif;
 pub mod p2p;
 mod puppynet;
 pub mod scan;

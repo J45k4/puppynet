@@ -56,6 +56,28 @@ fn spawn_control(peer: Arc<PuppyNet>) -> tokio::task::JoinHandle<()> {
 }
 
 async fn wait_for_shutdown() {
+	#[cfg(unix)]
+	{
+		use tokio::signal::unix::{SignalKind, signal};
+
+		let mut terminate = match signal(SignalKind::terminate()) {
+			Ok(signal) => signal,
+			Err(err) => {
+				log::error!("failed to listen for SIGTERM: {err}");
+				let _ = tokio::signal::ctrl_c().await;
+				return;
+			}
+		};
+		tokio::select! {
+			result = tokio::signal::ctrl_c() => {
+				if let Err(err) = result {
+					log::error!("failed to listen for ctrl_c: {err}");
+				}
+			}
+			_ = terminate.recv() => {}
+		}
+	}
+	#[cfg(not(unix))]
 	if let Err(err) = tokio::signal::ctrl_c().await {
 		log::error!("failed to listen for ctrl_c: {err}");
 	}
@@ -68,7 +90,7 @@ async fn stop_task(task: tokio::task::JoinHandle<()>) {
 
 async fn wait_for_peer(peer: Arc<PuppyNet>) {
 	match Arc::try_unwrap(peer) {
-		Ok(p) => p.wait().await,
+		Ok(p) => p.shutdown().await,
 		Err(_) => {
 			log::warn!("PuppyNet still in use; skipping graceful shutdown");
 		}

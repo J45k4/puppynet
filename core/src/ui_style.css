@@ -229,6 +229,20 @@ span {
 	max-width: 100%;
 }
 
+img[alt^="Puppy Eye camera:"] {
+	cursor: pointer;
+}
+
+img[alt^="Puppy Eye fullscreen:"] {
+	flex: 1 1 0;
+	height: 100% !important;
+	max-height: 100% !important;
+	max-width: 100% !important;
+	min-height: 0;
+	object-fit: contain;
+	width: 100% !important;
+}
+
 ::selection {
 	background: rgba(76, 255, 145, 0.28);
 	color: #f2fff8;

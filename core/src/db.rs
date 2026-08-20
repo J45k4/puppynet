@@ -12,6 +12,7 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+use crate::p2p::OnvifCameraConfig;
 use crate::scan::FileHash;
 use crate::scan::FileLocation;
 use crate::state::{DiscoveredPeer, FolderRule, Peer, Permission, Rule, User};
@@ -181,6 +182,21 @@ const MIGRATIONS: &[Migration] = &[
 				path text primary key,
 				flags integer not null,
 				created_at timestamp not null default current_timestamp
+			);
+		",
+	},
+	Migration {
+		id: 20260819,
+		name: "onvif_cameras",
+		sql: r"
+			create table if not exists onvif_cameras (
+				id text primary key,
+				name text not null,
+				device_service_url text not null,
+				username text not null,
+				password text not null,
+				profile_token text not null,
+				enabled bool not null default true
 			);
 		",
 	},
@@ -1203,6 +1219,76 @@ pub fn delete_session(conn: &Connection, token_hash: &[u8]) -> anyhow::Result<()
 	Ok(())
 }
 
+pub fn load_onvif_camera(conn: &Connection, id: &str) -> anyhow::Result<Option<OnvifCameraConfig>> {
+	let mut stmt = conn.prepare(
+		"SELECT id, name, device_service_url, username, password, profile_token, enabled \
+		 FROM onvif_cameras WHERE id = ?1",
+	)?;
+	let mut rows = stmt.query_map(params![id], |row| {
+		Ok(OnvifCameraConfig {
+			id: row.get(0)?,
+			name: row.get(1)?,
+			device_service_url: row.get(2)?,
+			username: row.get(3)?,
+			password: row.get(4)?,
+			profile_token: row.get(5)?,
+			enabled: row.get(6)?,
+		})
+	})?;
+	rows.next().transpose().map_err(Into::into)
+}
+
+pub fn load_onvif_cameras(conn: &Connection) -> anyhow::Result<Vec<OnvifCameraConfig>> {
+	let mut stmt = conn.prepare(
+		"SELECT id, name, device_service_url, username, password, profile_token, enabled \
+		 FROM onvif_cameras ORDER BY name COLLATE NOCASE, id",
+	)?;
+	let rows = stmt.query_map((), |row| {
+		Ok(OnvifCameraConfig {
+			id: row.get(0)?,
+			name: row.get(1)?,
+			device_service_url: row.get(2)?,
+			username: row.get(3)?,
+			password: row.get(4)?,
+			profile_token: row.get(5)?,
+			enabled: row.get(6)?,
+		})
+	})?;
+	rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+pub fn save_onvif_camera(
+	conn: &Connection,
+	config: &OnvifCameraConfig,
+) -> anyhow::Result<OnvifCameraConfig> {
+	conn.execute(
+		"INSERT INTO onvif_cameras \
+		 (id, name, device_service_url, username, password, profile_token, enabled) \
+		 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+		 ON CONFLICT(id) DO UPDATE SET \
+		 name = excluded.name, \
+		 device_service_url = excluded.device_service_url, \
+		 username = excluded.username, \
+		 password = CASE WHEN excluded.password = '' THEN onvif_cameras.password ELSE excluded.password END, \
+		 profile_token = excluded.profile_token, \
+		 enabled = excluded.enabled",
+		params![
+			config.id,
+			config.name,
+			config.device_service_url,
+			config.username,
+			config.password,
+			config.profile_token,
+			config.enabled,
+		],
+	)?;
+	load_onvif_camera(conn, &config.id)?.ok_or_else(|| anyhow!("saved ONVIF camera was not found"))
+}
+
+pub fn delete_onvif_camera(conn: &Connection, id: &str) -> anyhow::Result<bool> {
+	Ok(conn.execute("DELETE FROM onvif_cameras WHERE id = ?1", params![id])? > 0)
+}
+
 /// Runs embedded database migrations.
 ///
 /// # Arguments
@@ -1270,5 +1356,44 @@ pub fn open_db() -> Connection {
 		std::fs::create_dir_all(&path).unwrap();
 		path.join("puppynet.db")
 	});
-	Connection::open(db_path).unwrap()
+	let conn = Connection::open(&db_path).unwrap();
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::PermissionsExt;
+		if let Ok(metadata) = std::fs::metadata(&db_path) {
+			let mut permissions = metadata.permissions();
+			permissions.set_mode(0o600);
+			let _ = std::fs::set_permissions(&db_path, permissions);
+		}
+	}
+	conn
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn onvif_camera_update_preserves_an_empty_password() {
+		let mut conn = Connection::open_in_memory().unwrap();
+		run_migrations(&mut conn).unwrap();
+		let mut config = OnvifCameraConfig {
+			id: String::from("front-door"),
+			name: String::from("Front door"),
+			device_service_url: String::from("http://camera/onvif/device_service"),
+			username: String::from("viewer"),
+			password: String::from("secret"),
+			profile_token: String::from("main"),
+			enabled: true,
+		};
+		save_onvif_camera(&conn, &config).unwrap();
+		config.name = String::from("Front entrance");
+		config.password.clear();
+		let saved = save_onvif_camera(&conn, &config).unwrap();
+
+		assert_eq!(saved.name, "Front entrance");
+		assert_eq!(saved.password, "secret");
+		assert_eq!(load_onvif_cameras(&conn).unwrap().len(), 1);
+		assert!(delete_onvif_camera(&conn, "front-door").unwrap());
+	}
 }

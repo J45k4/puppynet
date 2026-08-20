@@ -18,6 +18,7 @@ infer = "0.19"
 jsonwebtoken = "9"
 libp2p = { version = "0.56", features = ["tokio", "tcp", "identify", "noise", "yamux", "ping", "macros", "request-response", "json", "mdns"] }
 log = "0.4"
+md-5 = "0.10"
 mime_guess = "2"
 rand = "0.8"
 rayon = { version = "1", optional = true }
@@ -31,10 +32,12 @@ uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 reqwest = { version = "0.12", features = ["json", "gzip", "rustls-tls"] }
+quick-xml = "0.39"
 flate2 = "1"
 tar = "0.4"
 zip = "2"
 sha2 = { version = "0.10", features = ["oid"] }
+sha1 = "0.10"
 rsa = { version = "0.9", default-features = false, features = ["sha2", "pem"] }
 homedir = "0.3"
 hyper = { version = "0.14", features = ["full"] }

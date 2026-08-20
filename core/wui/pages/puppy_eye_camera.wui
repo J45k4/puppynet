@@ -1,0 +1,23 @@
+<VStack spacing=8 padding=8 fill=true grow=1 minHeight=0 overflow="hidden" backgroundColor="#020807" color="#d6eee9">
+  <HStack spacing=8 wrap=true fill=true>
+    <VStack spacing=2 grow=1 minWidth=0>
+      <Text value={state.puppy_eye_viewer_name} breakWords=true color="#eafff6" />
+      <Text value={state.puppy_eye_viewer_device_name} breakWords=true color="#79f2c0" />
+    </VStack>
+    <Link text="Back to Puppy Eye" href="/puppy-eye" />
+    <Link text="Device" href={state.puppy_eye_viewer_device_href} />
+    <Button text="Refresh" onClick="RefreshCamera" color="#79f2c0" backgroundColor="#020807" border="1px solid #2d6258" />
+  </HStack>
+  <If test={!state.puppy_eye_viewer_found}>
+    <VStack spacing=4 padding=14 fill=true backgroundColor="#061211" border="1px solid #2d6258">
+      <Text value="Camera not found." color="#ff8f8f" />
+      <Text value="It may have been removed or its PuppyNet node may be unavailable." color="#9fbdb6" />
+    </VStack>
+  </If>
+  <Else>
+    <VStack spacing=4 fill=true grow=1 minHeight=0 overflow="hidden" backgroundColor="#000000">
+      <Image src={state.puppy_eye_viewer_stream_src} alt={state.puppy_eye_viewer_alt} objectFit="contain" />
+    </VStack>
+    <Text value={state.puppy_eye_viewer_source_id} breakWords=true color="#5f8179" />
+  </Else>
+</VStack>
