@@ -1,7 +1,7 @@
 use crate::db::{load_onvif_camera, load_onvif_cameras, open_db};
 use crate::p2p::{
 	MediaFrame, MediaOutput, MediaSource, MediaSourceKind, MediaTransport, OnvifCamera,
-	OnvifCameraConfig,
+	OnvifCameraConfig, OnvifProfile,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
@@ -23,13 +23,13 @@ use tokio::time::{Duration, sleep, timeout};
 use url::Url;
 
 const SOURCE_PREFIX: &str = "onvif:";
-const WORKER_IDLE_TIMEOUT: StdDuration = StdDuration::from_secs(30);
 const FRAME_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_JPEG_SIZE: usize = 8 * 1024 * 1024;
 
 struct WorkerState {
 	frame: Mutex<Option<MediaFrame>>,
 	error: Mutex<Option<String>>,
+	idle_timeout: Option<StdDuration>,
 	last_access: Mutex<Instant>,
 }
 
@@ -148,6 +148,63 @@ fn profile_tokens(xml: &str) -> Result<Vec<String>> {
 				}
 			}
 			Event::Eof => return Ok(tokens),
+			_ => {}
+		}
+	}
+}
+
+fn profile_details(xml: &str) -> Result<Vec<OnvifProfile>> {
+	let mut reader = Reader::from_str(xml);
+	reader.config_mut().trim_text(true);
+	let mut profiles = Vec::new();
+	let mut current = None;
+	let mut field = None;
+	loop {
+		match reader.read_event()? {
+			Event::Start(element) if element.local_name().as_ref() == b"Profiles" => {
+				let mut token = String::new();
+				for attribute in element.attributes() {
+					let attribute = attribute?;
+					if attribute.key.local_name().as_ref() == b"token" {
+						token = attribute
+							.decode_and_unescape_value(reader.decoder())?
+							.into_owned();
+					}
+				}
+				current = Some(OnvifProfile {
+					token,
+					name: String::new(),
+					width: 0,
+					height: 0,
+				});
+			}
+			Event::Start(element) if current.is_some() => {
+				field = match element.local_name().as_ref() {
+					b"Name" => Some("name"),
+					b"Width" => Some("width"),
+					b"Height" => Some("height"),
+					_ => None,
+				};
+			}
+			Event::Text(text) if current.is_some() && field.is_some() => {
+				let value = text.decode()?.into_owned();
+				let profile = current.as_mut().unwrap();
+				match field.take().unwrap() {
+					"name" if profile.name.is_empty() => profile.name = value,
+					"width" if profile.width == 0 => profile.width = value.parse().unwrap_or(0),
+					"height" if profile.height == 0 => profile.height = value.parse().unwrap_or(0),
+					_ => {}
+				}
+			}
+			Event::End(element) if element.local_name().as_ref() == b"Profiles" => {
+				if let Some(profile) = current.take()
+					&& !profile.token.is_empty()
+				{
+					profiles.push(profile);
+				}
+				field = None;
+			}
+			Event::Eof => return Ok(profiles),
 			_ => {}
 		}
 	}
@@ -341,6 +398,20 @@ async fn select_profile_token(config: &OnvifCameraConfig, media_url: &str) -> Re
 		.ok_or_else(|| anyhow!("camera did not return an ONVIF media profile"))
 }
 
+pub(crate) async fn profiles(config: &OnvifCameraConfig) -> Result<Vec<OnvifProfile>> {
+	let media_url = media_service_url(config).await?;
+	let action = "http://www.onvif.org/ver10/media/wsdl/GetProfiles";
+	let body = soap_envelope(
+		&config.username,
+		&config.password,
+		r#"xmlns:trt="http://www.onvif.org/ver10/media/wsdl""#,
+		"<trt:GetProfiles/>",
+	);
+	let response =
+		soap_request(&media_url, action, &config.username, &config.password, body).await?;
+	profile_details(&response)
+}
+
 async fn stream_uri(config: &OnvifCameraConfig) -> Result<(String, String)> {
 	let media_url = media_service_url(config).await?;
 	let profile_token = select_profile_token(config, &media_url).await?;
@@ -394,10 +465,13 @@ fn trim_to_jpeg_start(buffer: &mut Vec<u8>) {
 }
 
 fn worker_is_idle(state: &WorkerState) -> bool {
+	let Some(idle_timeout) = state.idle_timeout else {
+		return false;
+	};
 	state
 		.last_access
 		.lock()
-		.map(|last_access| last_access.elapsed() >= WORKER_IDLE_TIMEOUT)
+		.map(|last_access| last_access.elapsed() >= idle_timeout)
 		.unwrap_or(true)
 }
 
@@ -425,7 +499,7 @@ async fn decode_stream_once(config: &OnvifCameraConfig, state: &WorkerState) -> 
 			&stream_uri,
 			"-an",
 			"-vf",
-			"fps=5,scale=960:540:force_original_aspect_ratio=decrease",
+			"fps=5",
 			"-f",
 			"image2pipe",
 			"-vcodec",
@@ -509,6 +583,8 @@ fn worker_state(config: OnvifCameraConfig) -> Result<Arc<WorkerState>> {
 	let state = Arc::new(WorkerState {
 		frame: Mutex::new(None),
 		error: Mutex::new(None),
+		idle_timeout: (config.idle_timeout_seconds > 0)
+			.then(|| StdDuration::from_secs(u64::from(config.idle_timeout_seconds))),
 		last_access: Mutex::new(Instant::now()),
 	});
 	let task = tokio::spawn(run_worker(config.clone(), Arc::clone(&state)));
@@ -633,6 +709,9 @@ pub(crate) fn invalidate_camera(id: &str) {
 	if let Ok(mut workers) = camera_workers().lock()
 		&& let Some(worker) = workers.remove(id)
 	{
+		if let Ok(mut error) = worker.state.error.lock() {
+			*error = Some(String::from("camera configuration changed"));
+		}
 		worker.task.abort();
 	}
 }
@@ -681,6 +760,17 @@ mod tests {
 			Some("http://camera/media")
 		);
 		assert_eq!(profile_tokens(xml).unwrap(), vec!["main", "sub"]);
+	}
+
+	#[test]
+	fn reads_onvif_profile_resolutions() {
+		let xml = r#"<trt:GetProfilesResponse xmlns:trt="media" xmlns:tt="schema"><trt:Profiles token="main"><tt:Name>Main stream</tt:Name><tt:VideoEncoderConfiguration><tt:Resolution><tt:Width>1920</tt:Width><tt:Height>1080</tt:Height></tt:Resolution></tt:VideoEncoderConfiguration></trt:Profiles><trt:Profiles token="sub"><tt:Name>Sub stream</tt:Name><tt:VideoEncoderConfiguration><tt:Resolution><tt:Width>640</tt:Width><tt:Height>360</tt:Height></tt:Resolution></tt:VideoEncoderConfiguration></trt:Profiles></trt:GetProfilesResponse>"#;
+		let profiles = profile_details(xml).unwrap();
+		assert_eq!(profiles.len(), 2);
+		assert_eq!(profiles[0].token, "main");
+		assert_eq!(profiles[0].name, "Main stream");
+		assert_eq!((profiles[0].width, profiles[0].height), (1920, 1080));
+		assert_eq!((profiles[1].width, profiles[1].height), (640, 360));
 	}
 
 	#[test]

@@ -6,6 +6,7 @@ use crate::db::{
 	load_discovered_peers, load_peers, load_user, load_users, lookup_session_username, open_db,
 	run_migrations, save_session, save_user,
 };
+use crate::node_id::NodeId as PeerId;
 use crate::p2p::{
 	AudioCapability, AudioDevice, CpuInfo, DesktopInput, DirEntry, DiskInfo, InterfaceInfo,
 	LiveSearchArgs, MediaCapability, MediaFrame, MediaSource, OnvifCamera, OnvifCameraConfig,
@@ -19,7 +20,6 @@ use crate::version;
 use anyhow::{Result, anyhow, bail};
 use chrono::Utc;
 use futures::executor::block_on;
-use libp2p::PeerId;
 use rusqlite::{Connection as SqliteConnection, params};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -121,7 +121,7 @@ impl PuppyNet {
 		}
 	}
 
-	fn local_peer_id(&self) -> Result<PeerId, String> {
+	pub(crate) fn local_peer_id(&self) -> Result<PeerId, String> {
 		let (tx, rx) = oneshot::channel();
 		self.cmd_tx
 			.send(Command::GetLocalPeerId { tx })
@@ -129,11 +129,7 @@ impl PuppyNet {
 		block_on(rx).map_err(|e| format!("GetLocalPeerId response channel closed: {e}"))
 	}
 
-	pub fn inject_discovered_peer(
-		&self,
-		peer: PeerId,
-		addr: libp2p::Multiaddr,
-	) -> Result<(), String> {
+	pub fn inject_discovered_peer(&self, peer: PeerId, addr: String) -> Result<(), String> {
 		let (tx, rx) = oneshot::channel();
 		self.cmd_tx
 			.send(Command::InjectDiscoveredPeer { peer, addr, tx })
@@ -739,13 +735,17 @@ impl PuppyNet {
 				.insert(search_id, tx.clone());
 
 			let forward_tx = events_tx.clone();
+			let event_peer = peer.clone();
 			std::thread::spawn(move || {
 				while let Ok(event) = rx.recv() {
 					let terminal = matches!(
 						event,
 						SearchEvent::Finished { .. } | SearchEvent::Failed { .. }
 					);
-					let _ = forward_tx.send(LiveSearchPeerEvent { peer, event });
+					let _ = forward_tx.send(LiveSearchPeerEvent {
+						peer: event_peer.clone(),
+						event,
+					});
 					if terminal {
 						break;
 					}
@@ -845,7 +845,7 @@ impl PuppyNet {
 
 	pub async fn read_file(
 		&self,
-		peer: libp2p::PeerId,
+		peer: crate::node_id::NodeId,
 		path: impl Into<String>,
 		offset: u64,
 		length: Option<u64>,
@@ -867,7 +867,7 @@ impl PuppyNet {
 
 	pub async fn get_thumbnail(
 		&self,
-		peer: libp2p::PeerId,
+		peer: crate::node_id::NodeId,
 		path: impl Into<String>,
 		max_width: u32,
 		max_height: u32,

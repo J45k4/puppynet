@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
 use puppynet_core::{
-	FLAG_READ, FLAG_SEARCH, FLAG_WRITE, FolderRule, PeerId, Permission, PuppyNet, Rule, updater,
+	FLAG_READ, FLAG_SEARCH, FLAG_WRITE, FolderRule, NodeId, Permission, PuppyNet, Rule, updater,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -148,7 +148,7 @@ fn grant_permissions(all: bool, read: Vec<String>, write: Vec<String>) -> Result
 async fn handle_request(peer: &PuppyNet, request: ControlRequest) -> ControlResponse {
 	match request {
 		ControlRequest::CreateUser { username, password } => {
-			match peer.create_user(username.clone(), password) {
+			match peer.create_user_async(username.clone(), password).await {
 				Ok(()) => ok(format!("user {username} created")),
 				Err(err) => error_response(format!("failed to create user {username}: {err:?}")),
 			}
@@ -158,16 +158,18 @@ async fn handle_request(peer: &PuppyNet, request: ControlRequest) -> ControlResp
 			all,
 			read,
 			write,
-		} => match peer_id.parse::<PeerId>() {
+		} => match peer_id.parse::<NodeId>() {
 			Ok(peer_id) => {
 				let permissions = grant_permissions(all, read, write);
 				match permissions {
-					Ok(permissions) => match peer.set_peer_permissions(peer_id, permissions) {
-						Ok(()) => ok(format!("granted access to peer {peer_id}")),
-						Err(err) => error_response(format!(
-							"failed to grant access to peer {peer_id}: {err:?}"
-						)),
-					},
+					Ok(permissions) => {
+						match peer.set_peer_permissions(peer_id.clone(), permissions) {
+							Ok(()) => ok(format!("granted access to peer {peer_id}")),
+							Err(err) => error_response(format!(
+								"failed to grant access to peer {peer_id}: {err:?}"
+							)),
+						}
+					}
 					Err(err) => {
 						error_response(format!("invalid grant for peer {peer_id}: {err:?}"))
 					}

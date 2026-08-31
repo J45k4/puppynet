@@ -1,5 +1,7 @@
+use anyhow::Context;
 use args::Command;
 use clap::Parser;
+use std::path::Path;
 
 mod args;
 mod installer;
@@ -8,6 +10,7 @@ mod utility;
 
 fn daemon_config(args: &args::Args) -> puppynet_daemon::Config {
 	puppynet_daemon::Config {
+		peers: args.peer.clone(),
 		read: args.read.clone(),
 		write: args.write.clone(),
 		ui_bind: args.ui_bind.clone(),
@@ -22,9 +25,25 @@ async fn run_daemon(args: &args::Args) {
 	}
 }
 
-#[tokio::main]
-async fn main() {
-	let args = args::Args::parse();
+fn set_env_if_missing(name: &str, value: &Path) {
+	if std::env::var_os(name).is_none() {
+		// SAFETY: This runs before the Tokio runtime or any application threads are created.
+		unsafe { std::env::set_var(name, value) };
+	}
+}
+
+fn configure_local_state() -> anyhow::Result<()> {
+	let state_dir = std::env::current_dir()
+		.context("failed to find current directory")?
+		.join(".puppynet-dev");
+	std::fs::create_dir_all(&state_dir).context("failed to create local state directory")?;
+	set_env_if_missing("DB", &state_dir.join("puppynet.db"));
+	set_env_if_missing("KEYPAIR", &state_dir.join("peer_keypair.bin"));
+	set_env_if_missing("PUPPYNET_CONTROL_SOCKET", &state_dir.join("puppynet.sock"));
+	Ok(())
+}
+
+async fn async_main(args: args::Args) {
 	simple_logger::init_with_level(log::Level::Info).unwrap();
 
 	let version_label = utility::get_version_label();
@@ -147,4 +166,21 @@ async fn main() {
 			return;
 		}
 	}
+}
+
+fn main() {
+	let args = args::Args::parse();
+	if args.command.is_none()
+		&& let Err(err) = configure_local_state()
+	{
+		eprintln!("failed to configure local PuppyNet state: {err:?}");
+		std::process::exit(1);
+	}
+
+	let runtime = tokio::runtime::Builder::new_multi_thread()
+		.enable_all()
+		.worker_threads(2)
+		.build()
+		.expect("failed to create Tokio runtime");
+	runtime.block_on(async_main(args));
 }

@@ -19,6 +19,8 @@ use tokio::time::{Duration, timeout};
 #[cfg(target_os = "linux")]
 use v4l::buffer::Type;
 #[cfg(target_os = "linux")]
+use v4l::framesize::FrameSizeEnum;
+#[cfg(target_os = "linux")]
 use v4l::io::traits::CaptureStream;
 #[cfg(target_os = "linux")]
 use v4l::prelude::*;
@@ -589,6 +591,14 @@ fn v4l2_devices() -> Vec<WebcamDevice> {
 		})
 		.collect::<Vec<_>>();
 	devices.sort_by(|a, b| a.id.cmp(&b.id));
+	let mut physical_devices = std::collections::HashSet::new();
+	devices.retain(|device| {
+		let key = Device::with_path(&device.id)
+			.and_then(|device| device.query_caps())
+			.map(|capabilities| format!("{}@{}", capabilities.driver, capabilities.bus))
+			.unwrap_or_else(|_| device.id.clone());
+		physical_devices.insert(key)
+	});
 	if devices.is_empty() {
 		fallback_video_devices()
 	} else {
@@ -597,7 +607,59 @@ fn v4l2_devices() -> Vec<WebcamDevice> {
 }
 
 #[cfg(target_os = "linux")]
+static V4L2_RESOLUTIONS: OnceLock<Mutex<HashMap<String, Vec<(u32, u32)>>>> = OnceLock::new();
+
+#[cfg(target_os = "linux")]
+pub(crate) fn webcam_resolutions(device_id: &str) -> Vec<(u32, u32)> {
+	let cache = V4L2_RESOLUTIONS.get_or_init(|| Mutex::new(HashMap::new()));
+	if let Some(resolutions) = cache
+		.lock()
+		.ok()
+		.and_then(|resolutions| resolutions.get(device_id).cloned())
+	{
+		return resolutions;
+	}
+	let Ok(device) = Device::with_path(device_id) else {
+		return Vec::new();
+	};
+	let current = device.format().ok().map(|format| (format.width, format.height));
+	let mut resolutions = device
+		.enum_framesizes(FourCC::new(b"MJPG"))
+		.unwrap_or_default()
+		.into_iter()
+		.flat_map(|size| match size.size {
+			FrameSizeEnum::Discrete(size) => vec![(size.width, size.height)],
+			FrameSizeEnum::Stepwise(size) => vec![
+				(size.min_width, size.min_height),
+				(size.max_width, size.max_height),
+			],
+		})
+		.collect::<Vec<_>>();
+	resolutions.sort_unstable_by_key(|(width, height)| width * height);
+	resolutions.dedup();
+	if let Some(current) = current
+		&& let Some(index) = resolutions.iter().position(|resolution| *resolution == current)
+	{
+		resolutions.swap(0, index);
+	}
+	if !resolutions.is_empty()
+		&& let Ok(mut cache) = cache.lock()
+	{
+		cache.insert(device_id.to_string(), resolutions.clone());
+	}
+	resolutions
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn webcam_resolutions(_device_id: &str) -> Vec<(u32, u32)> {
+	Vec::new()
+}
+
+#[cfg(target_os = "linux")]
 fn device_supports_mjpeg(device_id: &str) -> bool {
+	if !webcam_resolutions(device_id).is_empty() {
+		return true;
+	}
 	let Ok(device) = Device::with_path(device_id) else {
 		return false;
 	};
@@ -629,10 +691,20 @@ struct V4l2CaptureWorker {
 }
 
 #[cfg(target_os = "linux")]
-fn open_v4l2_mjpeg_stream(device_id: &str) -> Result<(Device, v4l::Format)> {
+fn open_v4l2_mjpeg_stream(
+	device_id: &str,
+	width: u32,
+	height: u32,
+	fps: u32,
+) -> Result<(Device, v4l::Format)> {
+	let _ = webcam_resolutions(device_id);
 	let device = Device::with_path(device_id)?;
 	let mut format = device.format()?;
 	format.fourcc = FourCC::new(b"MJPG");
+	if width > 0 && height > 0 {
+		format.width = width;
+		format.height = height;
+	}
 	let actual = device.set_format(&format)?;
 	if actual.fourcc != FourCC::new(b"MJPG") {
 		bail!(
@@ -640,25 +712,35 @@ fn open_v4l2_mjpeg_stream(device_id: &str) -> Result<(Device, v4l::Format)> {
 			actual.fourcc
 		);
 	}
+	if fps > 0 {
+		device.set_params(&v4l::video::capture::Parameters::with_fps(fps))?;
+	}
 	Ok((device, actual))
 }
 
 #[cfg(target_os = "linux")]
 fn capture_v4l2_stream_frame(stream: &mut MmapStream<'_>) -> Result<Vec<u8>> {
-	let (buffer, _) = stream.next()?;
-	if buffer.is_empty() {
+	let (buffer, metadata) = stream.next()?;
+	let bytes_used = metadata.bytesused as usize;
+	if bytes_used == 0 {
 		bail!("webcam capture returned no image data");
 	}
-	Ok(buffer.to_vec())
+	if bytes_used > buffer.len() {
+		bail!("webcam capture reported an invalid image size");
+	}
+	Ok(buffer[..bytes_used].to_vec())
 }
 
 #[cfg(target_os = "linux")]
 fn run_v4l2_capture_worker(
 	device_id: String,
+	width: u32,
+	height: u32,
+	fps: u32,
 	requests: mpsc::Receiver<V4l2FrameRequest>,
 	ready: mpsc::Sender<Result<(), String>>,
 ) {
-	let Ok((device, _format)) = open_v4l2_mjpeg_stream(&device_id) else {
+	let Ok((device, _format)) = open_v4l2_mjpeg_stream(&device_id, width, height, fps) else {
 		let _ = ready.send(Err(format!("failed to open webcam stream for {device_id}")));
 		return;
 	};
@@ -685,12 +767,17 @@ fn run_v4l2_capture_worker(
 }
 
 #[cfg(target_os = "linux")]
-fn start_v4l2_capture_worker(device_id: String) -> Result<Arc<V4l2CaptureWorker>> {
+fn start_v4l2_capture_worker(
+	device_id: String,
+	width: u32,
+	height: u32,
+	fps: u32,
+) -> Result<Arc<V4l2CaptureWorker>> {
 	let (request_tx, request_rx) = mpsc::channel();
 	let (ready_tx, ready_rx) = mpsc::channel();
 	thread::Builder::new()
 		.name(format!("puppynet-v4l2-{}", device_id.replace('/', "_")))
-		.spawn(move || run_v4l2_capture_worker(device_id, request_rx, ready_tx))?;
+		.spawn(move || run_v4l2_capture_worker(device_id, width, height, fps, request_rx, ready_tx))?;
 	match ready_rx.recv_timeout(StdDuration::from_secs(8)) {
 		Ok(Ok(())) => Ok(Arc::new(V4l2CaptureWorker { tx: request_tx })),
 		Ok(Err(err)) => bail!("{err}"),
@@ -699,16 +786,22 @@ fn start_v4l2_capture_worker(device_id: String) -> Result<Arc<V4l2CaptureWorker>
 }
 
 #[cfg(target_os = "linux")]
-fn v4l2_capture_worker(device_id: &str) -> Result<Arc<V4l2CaptureWorker>> {
+fn v4l2_capture_worker(
+	device_id: &str,
+	width: u32,
+	height: u32,
+	fps: u32,
+) -> Result<Arc<V4l2CaptureWorker>> {
 	let workers = V4L2_CAPTURE_WORKERS.get_or_init(|| Mutex::new(HashMap::new()));
+	let key = format!("{device_id}@{width}x{height}@{fps}");
 	let mut workers = workers
 		.lock()
 		.map_err(|_| anyhow!("webcam capture worker registry was poisoned"))?;
-	if let Some(worker) = workers.get(device_id) {
+	if let Some(worker) = workers.get(&key) {
 		return Ok(Arc::clone(worker));
 	}
-	let worker = start_v4l2_capture_worker(device_id.to_string())?;
-	workers.insert(device_id.to_string(), Arc::clone(&worker));
+	let worker = start_v4l2_capture_worker(device_id.to_string(), width, height, fps)?;
+	workers.insert(key, Arc::clone(&worker));
 	Ok(worker)
 }
 
@@ -717,7 +810,7 @@ fn remove_v4l2_capture_worker(device_id: &str) {
 	if let Some(workers) = V4L2_CAPTURE_WORKERS.get()
 		&& let Ok(mut workers) = workers.lock()
 	{
-		workers.remove(device_id);
+		workers.retain(|key, _| !key.starts_with(&format!("{device_id}@")));
 	}
 }
 
@@ -736,13 +829,13 @@ fn request_v4l2_frame(worker: &V4l2CaptureWorker) -> Result<Vec<u8>> {
 }
 
 #[cfg(target_os = "linux")]
-fn capture_v4l2_mjpeg(device_id: &str) -> Result<Vec<u8>> {
-	let worker = v4l2_capture_worker(device_id)?;
+fn capture_v4l2_mjpeg(device_id: &str, width: u32, height: u32, fps: u32) -> Result<Vec<u8>> {
+	let worker = v4l2_capture_worker(device_id, width, height, fps)?;
 	match request_v4l2_frame(&worker) {
 		Ok(data) => Ok(data),
 		Err(err) => {
 			remove_v4l2_capture_worker(device_id);
-			let retry_worker = v4l2_capture_worker(device_id)
+			let retry_worker = v4l2_capture_worker(device_id, width, height, fps)
 				.map_err(|retry_err| anyhow!("{err}; retry failed: {retry_err}"))?;
 			request_v4l2_frame(&retry_worker)
 				.map_err(|retry_err| anyhow!("{err}; retry failed: {retry_err}"))
@@ -910,6 +1003,29 @@ pub(crate) async fn capture_media_frame(source_id: String) -> Result<MediaFrame>
 	backend.capture_frame(source_id).await
 }
 
+pub(crate) async fn capture_media_frame_configured(
+	source_id: String,
+	width: u32,
+	height: u32,
+	fps: u32,
+) -> Result<MediaFrame> {
+	#[cfg(target_os = "linux")]
+	if source_id.starts_with("/dev/video") && width > 0 && height > 0 {
+		validate_device_id(&source_id)?;
+		let data = timeout(
+			Duration::from_secs(8),
+			task::spawn_blocking(move || capture_v4l2_mjpeg(&source_id, width, height, fps)),
+		)
+		.await
+		.map_err(|_| anyhow!("timed out capturing webcam frame"))???;
+		return Ok(MediaFrame {
+			mime: String::from("image/jpeg"),
+			data,
+		});
+	}
+	capture_media_frame(source_id).await
+}
+
 #[cfg(target_os = "linux")]
 struct LinuxV4l2Backend;
 
@@ -935,14 +1051,19 @@ impl WebcamBackend for LinuxV4l2Backend {
 	}
 
 	async fn list_sources(&self) -> Result<Vec<MediaSource>> {
-		Ok(webcam_sources(v4l2_devices()))
+		Ok(webcam_sources(
+			v4l2_devices()
+				.into_iter()
+				.filter(|device| device_supports_mjpeg(&device.id))
+				.collect(),
+		))
 	}
 
 	async fn capture_frame(&self, source_id: String) -> Result<MediaFrame> {
 		validate_device_id(&source_id)?;
 		let data = timeout(
 			Duration::from_secs(8),
-			task::spawn_blocking(move || capture_v4l2_mjpeg(&source_id)),
+			task::spawn_blocking(move || capture_v4l2_mjpeg(&source_id, 0, 0, 0)),
 		)
 		.await
 		.map_err(|_| anyhow!("timed out capturing webcam frame"))???;

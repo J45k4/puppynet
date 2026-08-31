@@ -42,9 +42,10 @@ const SCREEN_BITRATE: u32 = 1_000_000;
 const SCREEN_FPS: u32 = 5;
 const VIDEO_BITRATE: u32 = 1_200_000;
 const VIDEO_FPS: u32 = 15;
-const VIDEO_MAX_HEIGHT: u32 = 540;
-const VIDEO_MAX_WIDTH: u32 = 960;
-const VIDEO_RTCP_TIMEOUT: Duration = Duration::from_secs(60);
+const VIDEO_FPS_MAX: u32 = 30;
+const VIDEO_FPS_MIN: u32 = 5;
+const VIDEO_MAX_HEIGHT: u32 = 1080;
+const VIDEO_MAX_WIDTH: u32 = 1920;
 
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct SessionDescription {
@@ -54,7 +55,10 @@ pub(crate) struct SessionDescription {
 
 #[derive(Deserialize)]
 pub(crate) struct CreateMediaSession {
+	pub(crate) fps: Option<u32>,
+	pub(crate) height: Option<u32>,
 	pub(crate) source_id: String,
+	pub(crate) width: Option<u32>,
 	pub(crate) offer: SessionDescription,
 }
 
@@ -66,14 +70,14 @@ pub(crate) struct CreatedMediaSession {
 
 struct MediaSession {
 	peer_connection: Arc<RTCPeerConnection>,
-	source_id: String,
+	producer_key: String,
 }
 
 struct MediaProducer {
 	force_keyframe: Arc<AtomicBool>,
 	last_rtcp: Arc<AtomicU64>,
 	stop: Arc<AtomicBool>,
-	subscribers: usize,
+	watchers: usize,
 	track: Arc<TrackLocalStaticSample>,
 }
 
@@ -295,11 +299,15 @@ fn encode_video_frame(
 	Ok(encoder.encode(&yuv)?.to_vec())
 }
 
-fn video_encoder(kind: &MediaSourceKind) -> Result<(Encoder, u32)> {
+fn video_encoder(kind: &MediaSourceKind, requested_fps: u32) -> Result<(Encoder, u32)> {
 	let (bitrate, fps, usage) = if kind == &MediaSourceKind::Screen {
 		(SCREEN_BITRATE, SCREEN_FPS, UsageType::ScreenContentRealTime)
 	} else {
-		(VIDEO_BITRATE, VIDEO_FPS, UsageType::CameraVideoRealTime)
+		(
+			VIDEO_BITRATE,
+			requested_fps.clamp(VIDEO_FPS_MIN, VIDEO_FPS_MAX),
+			UsageType::CameraVideoRealTime,
+		)
 	};
 	let config = EncoderConfig::new()
 		.bitrate(BitRate::from_bps(bitrate))
@@ -317,9 +325,12 @@ async fn run_video_producer(
 	track: Arc<TrackLocalStaticSample>,
 	stop: Arc<AtomicBool>,
 	force_keyframe: Arc<AtomicBool>,
-	last_rtcp: Arc<AtomicU64>,
+	_last_rtcp: Arc<AtomicU64>,
+	fps: u32,
+	width: u32,
+	height: u32,
 ) {
-	let (encoder, fps) = match video_encoder(&kind) {
+	let (encoder, fps) = match video_encoder(&kind, fps) {
 		Ok(result) => result,
 		Err(error) => {
 			log::warn!("failed to initialize H.264 encoder: {error}");
@@ -329,14 +340,8 @@ async fn run_video_producer(
 	let encoder = Arc::new(std::sync::Mutex::new(encoder));
 	let frame_duration = Duration::from_secs_f64(1.0 / fps as f64);
 	while !stop.load(Ordering::Relaxed) {
-		let elapsed = epoch_millis().saturating_sub(last_rtcp.load(Ordering::Relaxed));
-		if Duration::from_millis(elapsed) > VIDEO_RTCP_TIMEOUT {
-			log::info!("video WebRTC producer stopping: no receiver RTCP for {elapsed}ms");
-			stop.store(true, Ordering::Relaxed);
-			break;
-		}
 		let started = tokio::time::Instant::now();
-		match webcam::capture_media_frame(source_id.clone()).await {
+		match webcam::capture_media_frame_configured(source_id.clone(), width, height, fps).await {
 			Ok(frame) => {
 				let encoder = Arc::clone(&encoder);
 				let force_keyframe = Arc::clone(&force_keyframe);
@@ -380,6 +385,9 @@ fn start_video_producer(
 	stop: Arc<AtomicBool>,
 	force_keyframe: Arc<AtomicBool>,
 	last_rtcp: Arc<AtomicU64>,
+	fps: u32,
+	width: u32,
+	height: u32,
 ) {
 	tokio::spawn(run_video_producer(
 		source_id,
@@ -388,10 +396,19 @@ fn start_video_producer(
 		stop,
 		force_keyframe,
 		last_rtcp,
+		fps,
+		width,
+		height,
 	));
 }
 
-async fn producer_for_source(source_id: &str, kind: &MediaSourceKind) -> Result<MediaProducer> {
+async fn producer_for_source(
+	source_id: &str,
+	kind: &MediaSourceKind,
+	fps: u32,
+	width: u32,
+	height: u32,
+) -> Result<MediaProducer> {
 	let track = media_track(source_id, kind);
 	let stop = Arc::new(AtomicBool::new(false));
 	let force_keyframe = Arc::new(AtomicBool::new(true));
@@ -407,6 +424,9 @@ async fn producer_for_source(source_id: &str, kind: &MediaSourceKind) -> Result<
 			Arc::clone(&stop),
 			Arc::clone(&force_keyframe),
 			Arc::clone(&last_rtcp),
+			fps,
+			width,
+			height,
 		);
 	} else {
 		bail!("unsupported WebRTC media source");
@@ -415,7 +435,7 @@ async fn producer_for_source(source_id: &str, kind: &MediaSourceKind) -> Result<
 		force_keyframe,
 		last_rtcp,
 		stop,
-		subscribers: 1,
+		watchers: 1,
 		track,
 	})
 }
@@ -438,12 +458,16 @@ impl MediaSessionManager {
 
 	async fn acquire_producer(
 		&self,
+		producer_key: &str,
 		source_id: &str,
 		kind: &MediaSourceKind,
+		fps: u32,
+		width: u32,
+		height: u32,
 	) -> Result<(Arc<TrackLocalStaticSample>, Arc<AtomicBool>, Arc<AtomicU64>)> {
 		let mut producers = self.producers.lock().await;
-		if let Some(producer) = producers.get_mut(source_id) {
-			producer.subscribers += 1;
+		if let Some(producer) = producers.get_mut(producer_key) {
+			producer.watchers += 1;
 			producer.force_keyframe.store(true, Ordering::Relaxed);
 			producer.last_rtcp.store(epoch_millis(), Ordering::Relaxed);
 			return Ok((
@@ -452,26 +476,26 @@ impl MediaSessionManager {
 				Arc::clone(&producer.last_rtcp),
 			));
 		}
-		let producer = producer_for_source(source_id, kind).await?;
+		let producer = producer_for_source(source_id, kind, fps, width, height).await?;
 		let result = (
 			Arc::clone(&producer.track),
 			Arc::clone(&producer.force_keyframe),
 			Arc::clone(&producer.last_rtcp),
 		);
-		producers.insert(source_id.to_string(), producer);
+		producers.insert(producer_key.to_string(), producer);
 		Ok(result)
 	}
 
-	async fn release_producer(&self, source_id: &str) {
+	async fn release_producer(&self, producer_key: &str) {
 		let mut producers = self.producers.lock().await;
 		let remove = producers
-			.get_mut(source_id)
+			.get_mut(producer_key)
 			.map(|producer| {
-				producer.subscribers = producer.subscribers.saturating_sub(1);
-				producer.subscribers == 0
+				producer.watchers = producer.watchers.saturating_sub(1);
+				producer.watchers == 0
 			})
 			.unwrap_or(false);
-		if remove && let Some(producer) = producers.remove(source_id) {
+		if remove && let Some(producer) = producers.remove(producer_key) {
 			producer.stop.store(true, Ordering::Relaxed);
 		}
 	}
@@ -559,7 +583,7 @@ impl MediaSessionManager {
 		if let Err(error) = session.peer_connection.close().await {
 			log::warn!("failed to close WebRTC media session {session_id}: {error}");
 		}
-		self.release_producer(&session.source_id).await;
+		self.release_producer(&session.producer_key).await;
 		true
 	}
 
@@ -611,15 +635,34 @@ impl MediaSessionManager {
 		request: CreateMediaSession,
 	) -> Result<CreatedMediaSession> {
 		let kind = Self::source_kind(&request.source_id).await?;
+		let fps = request
+			.fps
+			.unwrap_or(VIDEO_FPS)
+			.clamp(VIDEO_FPS_MIN, VIDEO_FPS_MAX);
+		let width = request.width.unwrap_or_default();
+		let height = request.height.unwrap_or_default();
+		let producer_key = if kind == MediaSourceKind::Webcam {
+			format!("{}@{width}x{height}@{fps}", request.source_id)
+		} else {
+			request.source_id.clone()
+		};
 		let (track, force_keyframe, last_rtcp) =
-			self.acquire_producer(&request.source_id, &kind).await?;
+			self.acquire_producer(
+				&producer_key,
+				&request.source_id,
+				&kind,
+				fps,
+				width,
+				height,
+			)
+			.await?;
 		let negotiated = self
 			.negotiate(track, force_keyframe, last_rtcp, &kind, &request.offer)
 			.await;
 		let (peer_connection, answer) = match negotiated {
 			Ok(negotiated) => negotiated,
 			Err(error) => {
-				self.release_producer(&request.source_id).await;
+				self.release_producer(&producer_key).await;
 				return Err(error);
 			}
 		};
@@ -628,7 +671,7 @@ impl MediaSessionManager {
 			session_id.clone(),
 			MediaSession {
 				peer_connection: Arc::clone(&peer_connection),
-				source_id: request.source_id,
+				producer_key,
 			},
 		);
 		self.set_connection_cleanup(&peer_connection, session_id.clone())
@@ -652,7 +695,7 @@ mod tests {
 
 	#[test]
 	fn scales_video_to_even_bounded_dimensions() {
-		assert_eq!(scaled_dimensions(1920, 1080), (960, 540));
+		assert_eq!(scaled_dimensions(1920, 1080), (1920, 1080));
 		assert_eq!(scaled_dimensions(641, 481), (640, 480));
 		assert_eq!(scaled_dimensions(320, 240), (320, 240));
 	}
@@ -688,7 +731,7 @@ mod tests {
 		image
 			.write_to(&mut encoded_image, image::ImageFormat::Png)
 			.unwrap();
-		let (mut encoder, _) = video_encoder(&MediaSourceKind::Webcam).unwrap();
+		let (mut encoder, _) = video_encoder(&MediaSourceKind::Webcam, VIDEO_FPS).unwrap();
 		let force_keyframe = AtomicBool::new(true);
 		let encoded =
 			encode_video_frame(&mut encoder, &force_keyframe, &encoded_image.into_inner()).unwrap();

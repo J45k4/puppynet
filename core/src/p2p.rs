@@ -1,31 +1,9 @@
-use anyhow::Result;
 use blake3::Hasher;
 use chrono::{DateTime, Utc};
-use libp2p::identity::Keypair;
-use libp2p::multiaddr::Protocol;
-use libp2p::request_response::{
-	self, Config as RequestResponseConfig, Event as RequestResponseEvent,
-	Message as RequestResponseMessage, ProtocolSupport,
-};
-use libp2p::{
-	Multiaddr, PeerId, StreamProtocol, Swarm, SwarmBuilder, identity, noise,
-	swarm::{NetworkBehaviour, SwarmEvent},
-	tcp, yamux,
-};
-use libp2p::{mdns, ping};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::net::{IpAddr, UdpSocket};
-use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use sysinfo::{Disks, Networks, System};
-use tokio::sync::Mutex;
-use tokio::time::{Duration, interval};
-use uuid::Uuid;
 
 use crate::db::FileEntry;
 use crate::scan::{ScanEvent, ScanResult};
@@ -34,8 +12,6 @@ use crate::types::FileChunk;
 use crate::updater::UpdateProgress;
 use crate::wait_group::WaitGroupGuard;
 
-const PUPPYNET_PROTOCOL: &str = "/puppynet/0.0.1";
-const MAX_FILE_CHUNK: u64 = 4 * 1024 * 1024; // 4 MiB per transfer chunk
 const OWNER_ROLE: &str = "owner";
 const VIEWER_ROLE: &str = "viewer";
 const DEFAULT_SESSION_TTL: u64 = 60 * 60; // 1 hour sessions for credential auth
@@ -458,6 +434,8 @@ pub struct OnvifCameraConfig {
 	pub password: String,
 	pub profile_token: String,
 	pub enabled: bool,
+	#[serde(default = "default_camera_idle_timeout_seconds")]
+	pub idle_timeout_seconds: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -465,8 +443,22 @@ pub struct OnvifCamera {
 	pub id: String,
 	pub name: String,
 	pub device_service_url: String,
+	pub username: String,
 	pub profile_token: String,
 	pub enabled: bool,
+	pub idle_timeout_seconds: u32,
+}
+
+fn default_camera_idle_timeout_seconds() -> u32 {
+	5
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnvifProfile {
+	pub token: String,
+	pub name: String,
+	pub width: u32,
+	pub height: u32,
 }
 
 impl From<&OnvifCameraConfig> for OnvifCamera {
@@ -475,8 +467,10 @@ impl From<&OnvifCameraConfig> for OnvifCamera {
 			id: config.id.clone(),
 			name: config.name.clone(),
 			device_service_url: config.device_service_url.clone(),
+			username: config.username.clone(),
 			profile_token: config.profile_token.clone(),
 			enabled: config.enabled,
+			idle_timeout_seconds: config.idle_timeout_seconds,
 		}
 	}
 }
@@ -485,6 +479,8 @@ impl From<&OnvifCameraConfig> for OnvifCamera {
 pub struct OnvifCameraMutation {
 	pub camera: OnvifCamera,
 	pub message: String,
+	#[serde(default)]
+	pub profiles: Vec<OnvifProfile>,
 }
 
 mod base64_bytes {
@@ -566,114 +562,6 @@ pub struct TokenInfo {
 	pub revoked: bool,
 	pub issued_at: u64,
 	pub issued_by: String,
-}
-
-type PuppyNetBehaviour = request_response::json::Behaviour<PeerReq, PeerRes>;
-
-#[derive(NetworkBehaviour)]
-#[behaviour(to_swarm = "AgentEvent", event_process = false)]
-pub struct AgentBehaviour {
-	ping: ping::Behaviour,
-	pub puppynet: PuppyNetBehaviour,
-	pub mdns: mdns::tokio::Behaviour,
-}
-
-#[derive(Debug)]
-pub enum AgentEvent {
-	Ping(ping::Event),
-	PuppyNet(RequestResponseEvent<PeerReq, PeerRes>),
-	Mdns(mdns::Event),
-}
-
-impl From<ping::Event> for AgentEvent {
-	fn from(event: ping::Event) -> Self {
-		AgentEvent::Ping(event)
-	}
-}
-
-impl From<RequestResponseEvent<PeerReq, PeerRes>> for AgentEvent {
-	fn from(event: RequestResponseEvent<PeerReq, PeerRes>) -> Self {
-		AgentEvent::PuppyNet(event)
-	}
-}
-
-impl From<mdns::Event> for AgentEvent {
-	fn from(event: mdns::Event) -> Self {
-		AgentEvent::Mdns(event)
-	}
-}
-
-impl AgentBehaviour {
-	fn new(local_peer_id: PeerId) -> Self {
-		let puppynet_protocol = std::iter::once((
-			StreamProtocol::new(PUPPYNET_PROTOCOL),
-			ProtocolSupport::Full,
-		));
-		let puppynet: request_response::Behaviour<
-			request_response::json::codec::Codec<PeerReq, PeerRes>,
-		> = request_response::json::Behaviour::new(
-			puppynet_protocol,
-			RequestResponseConfig::default(),
-		);
-		let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)
-			.expect("mDNS init failed");
-		Self {
-			ping: ping::Behaviour::default(),
-			puppynet,
-			mdns,
-		}
-	}
-}
-
-fn read_file_chunk(path: &str, offset: u64, length: Option<u64>) -> Result<FileChunk, String> {
-	let mut file = File::open(path).map_err(|err| err.to_string())?;
-	let metadata = file.metadata().map_err(|err| err.to_string())?;
-	if metadata.is_dir() {
-		return Err("Cannot read directory".to_string());
-	}
-
-	file.seek(SeekFrom::Start(offset))
-		.map_err(|err| err.to_string())?;
-
-	let mut buffer = Vec::new();
-	let max_len = length.unwrap_or(MAX_FILE_CHUNK).min(MAX_FILE_CHUNK) as usize;
-	buffer.resize(max_len, 0);
-	let bytes_read = file.read(&mut buffer).map_err(|err| err.to_string())?;
-	buffer.truncate(bytes_read);
-
-	let eof = file.stream_position().map_err(|err| err.to_string())? >= metadata.len();
-
-	Ok(FileChunk {
-		offset,
-		data: buffer,
-		eof,
-	})
-}
-
-fn write_file_range(path: &str, offset: u64, data: &[u8]) -> Result<FileWriteAck, String> {
-	let mut file = OpenOptions::new()
-		.write(true)
-		.create(true)
-		.read(true)
-		.open(path)
-		.map_err(|err| err.to_string())?;
-
-	let current_len = file.metadata().map_err(|err| err.to_string())?.len();
-	let required_len = offset
-		.checked_add(data.len() as u64)
-		.ok_or_else(|| "Write would overflow file length".to_string())?;
-
-	if required_len > current_len {
-		file.set_len(required_len).map_err(|err| err.to_string())?;
-	}
-
-	file.seek(SeekFrom::Start(offset))
-		.map_err(|err| err.to_string())?;
-	file.write_all(data).map_err(|err| err.to_string())?;
-
-	Ok(FileWriteAck {
-		bytes_written: data.len() as u64,
-	})
 }
 
 #[derive(Debug, Clone)]
@@ -836,60 +724,6 @@ pub(crate) fn grant_from_permission(permission: &Permission) -> Option<Permissio
 	}
 }
 
-/// Load or generate an Ed25519 keypair and persist it to disk.
-pub fn load_or_generate_keypair(path: &Path) -> Result<identity::Keypair> {
-	// Ensure parent directory exists if a directory component was provided.
-	if let Some(parent) = path.parent() {
-		if !parent.as_os_str().is_empty() && !parent.exists() {
-			std::fs::create_dir_all(parent)?;
-			log::info!("created key directory {}", parent.display());
-		}
-	}
-	if path.exists() {
-		let bytes = fs::read(path)?;
-		let key = Keypair::from_protobuf_encoding(&bytes)?;
-		Ok(key.into())
-	} else {
-		let key = identity::Keypair::generate_ed25519();
-		let bytes = key.to_protobuf_encoding()?;
-		fs::write(path, &bytes)?;
-		Ok(key.into())
-	}
-}
-
-fn libp2p_multiaddr(address: &Multiaddr, local_ip: IpAddr, peer_id: &PeerId) -> Multiaddr {
-	let mut reachable = Multiaddr::empty();
-	for protocol in address.iter() {
-		match protocol {
-			Protocol::Ip4(ip) if ip.is_unspecified() => match local_ip {
-				IpAddr::V4(local) => reachable.push(Protocol::Ip4(local)),
-				IpAddr::V6(_) => reachable.push(protocol.clone()),
-			},
-			Protocol::Ip6(ip) if ip.is_unspecified() => match local_ip {
-				IpAddr::V6(local) => reachable.push(Protocol::Ip6(local)),
-				IpAddr::V4(_) => reachable.push(protocol.clone()),
-			},
-			_ => reachable.push(protocol.clone()),
-		}
-	}
-	reachable.push(Protocol::P2p(peer_id.clone().into()));
-	reachable
-}
-
-pub fn build_swarm(id_keys: identity::Keypair, peer_id: PeerId) -> Result<Swarm<AgentBehaviour>> {
-	let swarm = SwarmBuilder::with_existing_identity(id_keys)
-		.with_tokio()
-		.with_tcp(
-			tcp::Config::default(),
-			noise::Config::new,
-			yamux::Config::default,
-		)?
-		.with_behaviour(|_| AgentBehaviour::new(peer_id))?
-		.with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(u64::MAX)))
-		.build();
-	Ok(swarm)
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -920,5 +754,22 @@ mod tests {
 
 		assert_eq!(decoded.mime, "image/jpeg");
 		assert_eq!(decoded.data, vec![1, 2, 3, 255]);
+	}
+
+	#[test]
+	fn legacy_onvif_camera_config_gets_default_idle_timeout() {
+		let json = serde_json::json!({
+			"id": "front-door",
+			"name": "Front door",
+			"device_service_url": "http://camera/onvif/device_service",
+			"username": "viewer",
+			"password": "secret",
+			"profile_token": "main",
+			"enabled": true,
+		});
+
+		let config: OnvifCameraConfig = serde_json::from_value(json).unwrap();
+
+		assert_eq!(config.idle_timeout_seconds, 5);
 	}
 }

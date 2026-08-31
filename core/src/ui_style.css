@@ -229,16 +229,15 @@ span {
 	max-width: 100%;
 }
 
-img[alt^="Puppy Eye camera:"] {
+img[alt^="Eye camera:"] {
 	cursor: pointer;
 }
 
-img[alt^="Puppy Eye fullscreen:"] {
-	flex: 1 1 0;
-	height: 100% !important;
-	max-height: 100% !important;
+img[alt^="Eye fullscreen:"] {
+	flex: 0 0 auto;
+	height: auto !important;
+	max-height: none !important;
 	max-width: 100% !important;
-	min-height: 0;
 	object-fit: contain;
 	width: 100% !important;
 }

@@ -5,13 +5,13 @@ use std::str::FromStr;
 use anyhow::{anyhow, bail};
 use chrono::DateTime;
 use chrono::Utc;
-use libp2p::PeerId;
 use rusqlite::Connection;
 use rusqlite::ToSql;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+use crate::node_id::NodeId;
 use crate::p2p::OnvifCameraConfig;
 use crate::scan::FileHash;
 use crate::scan::FileLocation;
@@ -199,6 +199,11 @@ const MIGRATIONS: &[Migration] = &[
 				enabled bool not null default true
 			);
 		",
+	},
+	Migration {
+		id: 20260831,
+		name: "onvif_camera_idle_timeout",
+		sql: "alter table onvif_cameras add column idle_timeout_seconds integer not null default 5;",
 	},
 ];
 
@@ -953,8 +958,12 @@ pub fn load_peers(conn: &Connection) -> anyhow::Result<Vec<Peer>> {
 	let mut stmt = conn.prepare("SELECT peer_id, name FROM peers")?;
 	let rows = stmt.query_map([], |row| {
 		let id_str: String = row.get(0)?;
-		let id = libp2p::PeerId::from_str(&id_str).map_err(|e| {
-			rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+		let id = NodeId::from_str(&id_str).map_err(|e| {
+			rusqlite::Error::FromSqlConversionFailure(
+				0,
+				rusqlite::types::Type::Text,
+				Box::new(std::io::Error::other(e.to_string())),
+			)
 		})?;
 		Ok(Peer {
 			id,
@@ -973,7 +982,7 @@ pub fn save_discovered_peer(conn: &Connection, peer: &DiscoveredPeer) -> anyhow:
 	conn.execute(
 		"INSERT INTO discovered_peers (peer_id, multiaddr) VALUES (?1, ?2)
 		 ON CONFLICT(peer_id, multiaddr) DO NOTHING",
-		params![peer.peer_id.to_string(), peer.multiaddr.to_string()],
+		params![peer.peer_id.to_string(), peer.endpoint],
 	)?;
 	Ok(())
 }
@@ -981,12 +990,12 @@ pub fn save_discovered_peer(conn: &Connection, peer: &DiscoveredPeer) -> anyhow:
 /// Remove a discovered peer entry.
 pub fn remove_discovered_peer(
 	conn: &Connection,
-	peer_id: &libp2p::PeerId,
-	multiaddr: &libp2p::Multiaddr,
+	peer_id: &NodeId,
+	endpoint: &str,
 ) -> anyhow::Result<()> {
 	conn.execute(
 		"DELETE FROM discovered_peers WHERE peer_id = ?1 AND multiaddr = ?2",
-		params![peer_id.to_string(), multiaddr.to_string()],
+		params![peer_id.to_string(), endpoint],
 	)?;
 	Ok(())
 }
@@ -997,13 +1006,17 @@ pub fn load_discovered_peers(conn: &Connection) -> anyhow::Result<Vec<Discovered
 	let rows = stmt.query_map([], |row| {
 		let id_str: String = row.get(0)?;
 		let addr_str: String = row.get(1)?;
-		let peer_id = libp2p::PeerId::from_str(&id_str).map_err(|e| {
-			rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+		let peer_id = NodeId::from_str(&id_str).map_err(|e| {
+			rusqlite::Error::FromSqlConversionFailure(
+				0,
+				rusqlite::types::Type::Text,
+				Box::new(std::io::Error::other(e.to_string())),
+			)
 		})?;
-		let multiaddr = addr_str.parse().map_err(|e| {
-			rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e))
-		})?;
-		Ok(DiscoveredPeer { peer_id, multiaddr })
+		Ok(DiscoveredPeer {
+			peer_id,
+			endpoint: legacy_multiaddr_endpoint(&addr_str),
+		})
 	})?;
 	let mut peers = Vec::new();
 	for row in rows {
@@ -1017,8 +1030,8 @@ const RULE_TYPE_FOLDER: i64 = 1;
 
 pub fn save_peer_permissions(
 	conn: &mut Connection,
-	src_peer: &PeerId,
-	target_peer: &PeerId,
+	src_peer: &NodeId,
+	target_peer: &NodeId,
 	permissions: &[Permission],
 ) -> anyhow::Result<()> {
 	let src_bytes = src_peer.to_bytes();
@@ -1055,17 +1068,17 @@ pub fn save_peer_permissions(
 
 pub fn load_peer_permissions(
 	conn: &Connection,
-	src_peer: &PeerId,
-) -> anyhow::Result<Vec<(PeerId, Vec<Permission>)>> {
+	src_peer: &NodeId,
+) -> anyhow::Result<Vec<(NodeId, Vec<Permission>)>> {
 	let src_bytes = src_peer.to_bytes();
 	let mut stmt = conn.prepare(
 		"SELECT target_peer, rule_type, path, flags, expires_at FROM peer_permissions WHERE src_peer = ?1 ORDER BY id ASC",
 	)?;
 	let mut rows = stmt.query(params![&src_bytes])?;
-	let mut results: Vec<(PeerId, Vec<Permission>)> = Vec::new();
+	let mut results: Vec<(NodeId, Vec<Permission>)> = Vec::new();
 	while let Some(row) = rows.next()? {
 		let target_bytes: Vec<u8> = row.get(0)?;
-		let target_peer = PeerId::from_bytes(&target_bytes)
+		let target_peer = NodeId::from_bytes(&target_bytes)
 			.map_err(|err| anyhow!("invalid peer id from database: {err}"))?;
 		let rule_type: i64 = row.get(1)?;
 		let permission = match rule_type {
@@ -1087,6 +1100,20 @@ pub fn load_peer_permissions(
 		}
 	}
 	Ok(results)
+}
+
+fn legacy_multiaddr_endpoint(value: &str) -> String {
+	if value.starts_with("ws://") || value.starts_with("wss://") {
+		return value.to_string();
+	}
+	let parts: Vec<_> = value.split('/').filter(|part| !part.is_empty()).collect();
+	if let ["ip4", host, "tcp", port, ..] = parts.as_slice() {
+		return format!("ws://{host}:{port}/peer/v1");
+	}
+	if let ["ip6", host, "tcp", port, ..] = parts.as_slice() {
+		return format!("ws://[{host}]:{port}/peer/v1");
+	}
+	value.to_string()
 }
 
 pub fn save_shared_folder(conn: &Connection, rule: &FolderRule) -> anyhow::Result<()> {
@@ -1221,7 +1248,7 @@ pub fn delete_session(conn: &Connection, token_hash: &[u8]) -> anyhow::Result<()
 
 pub fn load_onvif_camera(conn: &Connection, id: &str) -> anyhow::Result<Option<OnvifCameraConfig>> {
 	let mut stmt = conn.prepare(
-		"SELECT id, name, device_service_url, username, password, profile_token, enabled \
+		"SELECT id, name, device_service_url, username, password, profile_token, enabled, idle_timeout_seconds \
 		 FROM onvif_cameras WHERE id = ?1",
 	)?;
 	let mut rows = stmt.query_map(params![id], |row| {
@@ -1233,6 +1260,7 @@ pub fn load_onvif_camera(conn: &Connection, id: &str) -> anyhow::Result<Option<O
 			password: row.get(4)?,
 			profile_token: row.get(5)?,
 			enabled: row.get(6)?,
+			idle_timeout_seconds: row.get(7)?,
 		})
 	})?;
 	rows.next().transpose().map_err(Into::into)
@@ -1240,7 +1268,7 @@ pub fn load_onvif_camera(conn: &Connection, id: &str) -> anyhow::Result<Option<O
 
 pub fn load_onvif_cameras(conn: &Connection) -> anyhow::Result<Vec<OnvifCameraConfig>> {
 	let mut stmt = conn.prepare(
-		"SELECT id, name, device_service_url, username, password, profile_token, enabled \
+		"SELECT id, name, device_service_url, username, password, profile_token, enabled, idle_timeout_seconds \
 		 FROM onvif_cameras ORDER BY name COLLATE NOCASE, id",
 	)?;
 	let rows = stmt.query_map((), |row| {
@@ -1252,6 +1280,7 @@ pub fn load_onvif_cameras(conn: &Connection) -> anyhow::Result<Vec<OnvifCameraCo
 			password: row.get(4)?,
 			profile_token: row.get(5)?,
 			enabled: row.get(6)?,
+			idle_timeout_seconds: row.get(7)?,
 		})
 	})?;
 	rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -1263,15 +1292,16 @@ pub fn save_onvif_camera(
 ) -> anyhow::Result<OnvifCameraConfig> {
 	conn.execute(
 		"INSERT INTO onvif_cameras \
-		 (id, name, device_service_url, username, password, profile_token, enabled) \
-		 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+		 (id, name, device_service_url, username, password, profile_token, enabled, idle_timeout_seconds) \
+		 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
 		 ON CONFLICT(id) DO UPDATE SET \
 		 name = excluded.name, \
 		 device_service_url = excluded.device_service_url, \
 		 username = excluded.username, \
 		 password = CASE WHEN excluded.password = '' THEN onvif_cameras.password ELSE excluded.password END, \
 		 profile_token = excluded.profile_token, \
-		 enabled = excluded.enabled",
+		 enabled = excluded.enabled, \
+		 idle_timeout_seconds = excluded.idle_timeout_seconds",
 		params![
 			config.id,
 			config.name,
@@ -1280,6 +1310,7 @@ pub fn save_onvif_camera(
 			config.password,
 			config.profile_token,
 			config.enabled,
+			config.idle_timeout_seconds,
 		],
 	)?;
 	load_onvif_camera(conn, &config.id)?.ok_or_else(|| anyhow!("saved ONVIF camera was not found"))
@@ -1385,6 +1416,7 @@ mod tests {
 			password: String::from("secret"),
 			profile_token: String::from("main"),
 			enabled: true,
+			idle_timeout_seconds: 5,
 		};
 		save_onvif_camera(&conn, &config).unwrap();
 		config.name = String::from("Front entrance");
@@ -1393,6 +1425,7 @@ mod tests {
 
 		assert_eq!(saved.name, "Front entrance");
 		assert_eq!(saved.password, "secret");
+		assert_eq!(saved.idle_timeout_seconds, 5);
 		assert_eq!(load_onvif_cameras(&conn).unwrap().len(), 1);
 		assert!(delete_onvif_camera(&conn, "front-door").unwrap());
 	}

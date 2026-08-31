@@ -3,7 +3,6 @@ const css = `
 	display: grid;
 	gap: 8px;
 	width: 100%;
-	max-width: 960px;
 	font: 13px system-ui, sans-serif;
 	color: #d6eee9;
 }
@@ -77,21 +76,56 @@ const css = `
 	min-height: 18px;
 	color: #9fbdb6;
 }
+.media-receiver-stats {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 12px;
+	color: #9fbdb6;
+}
+.media-receiver-resolution {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+.media-receiver-resolution select {
+	border: 1px solid #2d6258;
+	background: #020807;
+	color: #d6eee9;
+	font: inherit;
+}
+.media-receiver-fps {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+.media-receiver-fps select {
+	border: 1px solid #2d6258;
+	background: #020807;
+	color: #d6eee9;
+	font: inherit;
+}
 .media-receiver-error {
 	color: #ff8f8f;
 }
 `;
 
 export default class MediaReceiver {
-	constructor(element) {
+	constructor(element, context) {
 		this.element = element;
+		this.context = context;
 		this.endpoint = "";
 		this.sourceId = "";
 		this.kind = "video";
 		this.autoStart = false;
+		this.revision = "";
+		this.fps = 15;
+		this.resolution = "";
+		this.resolutionMode = "";
 		this.peerConnection = null;
 		this.sessionId = "";
 		this.starting = false;
+		this.videoFrameCallback = 0;
 	}
 
 	mount(props) {
@@ -107,7 +141,9 @@ export default class MediaReceiver {
 		this.controls.append(this.startButton, this.stopButton);
 		this.status = document.createElement("div");
 		this.status.className = "media-receiver-status";
-		this.root.append(this.controls, this.status);
+		this.stats = document.createElement("div");
+		this.stats.className = "media-receiver-stats";
+		this.root.append(this.controls, this.stats, this.status);
 		this.element.append(this.style, this.root);
 		this.startButton.addEventListener("click", () => this.start());
 		this.stopButton.addEventListener("click", () => this.stop("Media stream stopped.", false));
@@ -119,15 +155,21 @@ export default class MediaReceiver {
 		const sourceId = String(props?.source_id ?? "");
 		const kind = props?.media_kind === "audio" ? "audio" : "video";
 		const autoStart = Boolean(props?.auto_start);
-		const changed = endpoint !== this.endpoint || sourceId !== this.sourceId || kind !== this.kind;
+		const revision = String(props?.revision ?? "");
+		this.resolutionOptions = Array.isArray(props?.resolution_options) ? props.resolution_options : [];
+		this.resolutionSelectable = Boolean(props?.resolution_selectable);
+		this.resolutionMode = String(props?.resolution_mode ?? "");
+		const changed = endpoint !== this.endpoint || sourceId !== this.sourceId || kind !== this.kind || revision !== this.revision;
 		this.endpoint = endpoint;
 		this.sourceId = sourceId;
 		this.kind = kind;
 		this.autoStart = autoStart;
+		this.revision = revision;
 		if (changed) {
 			this.stop("", false);
 			this.createMediaElement();
 		}
+		this.updateResolutionSelect();
 		this.setButtons();
 		if (!this.endpoint || !this.sourceId) {
 			this.setStatus("Media stream is not available.", false);
@@ -148,6 +190,27 @@ export default class MediaReceiver {
 		button.type = "button";
 		button.textContent = label;
 		return button;
+	}
+
+	updateResolutionSelect() {
+		if (!this.resolutionSelect) {
+			return;
+		}
+		const options = this.resolutionOptions.length > 0
+			? this.resolutionOptions
+			: [{ value: this.revision, name: "Loading resolutions..." }];
+		this.resolutionSelect.replaceChildren(...options.map((option) => {
+			const element = document.createElement("option");
+			element.value = String(option.value ?? "");
+			element.textContent = String(option.name ?? option.value ?? "");
+			return element;
+		}));
+		const selected = this.resolutionMode === "profile" ? this.revision : this.resolution;
+		if (selected) this.resolutionSelect.value = selected;
+		if (!this.resolutionSelect.value && options.length > 0) {
+			this.resolutionSelect.value = String(options[0].value ?? "");
+		}
+		if (this.resolutionMode === "capture") this.resolution = this.resolutionSelect.value;
 	}
 
 	createMediaElement() {
@@ -176,9 +239,14 @@ export default class MediaReceiver {
 			this.levelLabel = null;
 		}
 		this.stopLevelMeter();
+		this.stopVideoStats();
 		this.media = document.createElement(this.kind);
 		this.media.autoplay = true;
 		this.media.playsInline = true;
+		this.media.addEventListener("playing", () => {
+			this.setStatus("Media stream playing.", false);
+			this.startVideoStats();
+		});
 		if (this.kind === "video") {
 			this.media.muted = true;
 			this.frame = document.createElement("div");
@@ -188,7 +256,51 @@ export default class MediaReceiver {
 			this.fullscreenButton = this.button("Fullscreen");
 			this.fullscreenButton.addEventListener("click", () => this.frame.requestFullscreen?.());
 			this.controls.append(this.fullscreenButton);
+			if (this.resolutionSelectable) {
+				this.resolutionStat = document.createElement("label");
+				this.resolutionStat.className = "media-receiver-resolution";
+				this.resolutionStat.textContent = "Resolution:";
+				this.resolutionSelect = document.createElement("select");
+				this.resolutionSelect.addEventListener("change", () => {
+					if (this.resolutionMode === "profile") {
+						this.context?.emit("resolutionChange", this.resolutionSelect.value);
+						return;
+					}
+					this.resolution = this.resolutionSelect.value;
+					const restart = Boolean(this.peerConnection || this.starting);
+					this.stop("", false);
+					if (restart) setTimeout(() => this.start(), 2500);
+				});
+				this.resolutionStat.append(this.resolutionSelect);
+			} else {
+				this.resolutionStat = document.createElement("span");
+				this.resolutionStat.textContent = "Resolution: --";
+				this.resolutionSelect = null;
+			}
+			this.fpsStat = document.createElement("span");
+			this.fpsStat.className = "media-receiver-fps";
+			this.fpsStat.textContent = "FPS:";
+			this.fpsSelect = document.createElement("select");
+			for (const fps of [5, 10, 15, 30]) {
+				const option = document.createElement("option");
+				option.value = String(fps);
+				option.textContent = String(fps);
+				this.fpsSelect.append(option);
+			}
+			this.fpsSelect.value = String(this.fps);
+			this.fpsSelect.addEventListener("change", () => {
+				this.fps = Number(this.fpsSelect.value);
+				const restart = Boolean(this.peerConnection || this.starting);
+				this.stop("", false);
+				if (restart) setTimeout(() => this.start(), 2500);
+			});
+			this.fpsActual = document.createElement("span");
+			this.fpsActual.textContent = "actual --";
+			this.fpsStat.append(this.fpsSelect, this.fpsActual);
+			this.stats.replaceChildren(this.resolutionStat, this.fpsStat);
+			this.updateResolutionSelect();
 		} else {
+			this.stats.replaceChildren();
 			this.frame = null;
 			this.media.className = "media-receiver-audio";
 			this.root.insertBefore(this.media, this.status);
@@ -273,12 +385,15 @@ export default class MediaReceiver {
 		};
 		peerConnection.onconnectionstatechange = () => {
 			if (peerConnection.connectionState === "connected") {
-				this.setStatus("Media stream connected.", false);
+				this.setStatus("Media connection established. Waiting for media...", false);
 			} else if (["failed", "closed"].includes(peerConnection.connectionState)) {
 				this.stop(`Media connection ${peerConnection.connectionState}.`, true);
 			}
 		};
 		try {
+			const [width, height] = this.resolutionMode === "capture"
+				? this.resolution.split("x").map(Number)
+				: [0, 0];
 			const offer = await peerConnection.createOffer();
 			await peerConnection.setLocalDescription(offer);
 			await this.waitForIceGathering(peerConnection);
@@ -287,8 +402,11 @@ export default class MediaReceiver {
 				credentials: "include",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({
+					fps: this.fps,
+					height,
 					source_id: this.sourceId,
 					offer: peerConnection.localDescription,
+					width,
 				}),
 			});
 			if (!response.ok) {
@@ -320,6 +438,7 @@ export default class MediaReceiver {
 			this.media.srcObject = null;
 		}
 		this.stopLevelMeter();
+		this.stopVideoStats();
 		if (sessionId) {
 			fetch(`/api/media/sessions/${encodeURIComponent(sessionId)}`, {
 				method: "DELETE",
@@ -330,6 +449,44 @@ export default class MediaReceiver {
 		this.setButtons();
 		if (message) {
 			this.setStatus(message, error);
+		}
+	}
+
+	startVideoStats() {
+		this.stopVideoStats();
+		if (this.kind !== "video" || !this.media?.requestVideoFrameCallback) {
+			return;
+		}
+		let frames = 0;
+		let startedAt = performance.now();
+		const update = now => {
+			frames += 1;
+			if (!this.resolutionSelect && this.resolutionStat && this.media.videoWidth && this.media.videoHeight) {
+				this.resolutionStat.textContent = `Resolution: ${this.media.videoWidth} × ${this.media.videoHeight}`;
+			}
+			const elapsed = now - startedAt;
+			if (elapsed >= 1000) {
+				if (this.fpsActual) {
+					this.fpsActual.textContent = `actual ${(frames * 1000 / elapsed).toFixed(1)}`;
+				}
+				frames = 0;
+				startedAt = now;
+			}
+			this.videoFrameCallback = this.media.requestVideoFrameCallback(update);
+		};
+		this.videoFrameCallback = this.media.requestVideoFrameCallback(update);
+	}
+
+	stopVideoStats() {
+		if (this.videoFrameCallback && this.media?.cancelVideoFrameCallback) {
+			this.media.cancelVideoFrameCallback(this.videoFrameCallback);
+		}
+		this.videoFrameCallback = 0;
+		if (!this.resolutionSelect && this.resolutionStat) {
+			this.resolutionStat.textContent = "Resolution: --";
+		}
+		if (this.fpsActual) {
+			this.fpsActual.textContent = "actual --";
 		}
 	}
 

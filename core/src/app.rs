@@ -1,6 +1,7 @@
 use crate::audio;
 use crate::auth;
 use crate::desktop_input;
+use crate::node_id::{NodeId, NodeKeypair};
 use crate::onvif;
 use crate::p2p::{
 	AudioCapability, AudioDevice, AuthMethod, CpuInfo, DesktopInput, DirEntry, DiskInfo,
@@ -21,7 +22,6 @@ use crate::{
 		save_discovered_peer, save_interface, save_node, save_onvif_camera, save_peer,
 		save_shared_folder, save_user,
 	},
-	p2p::{AgentBehaviour, AgentEvent, build_swarm, load_or_generate_keypair},
 	scan::{self, ScanEvent},
 	state::{
 		Connection, DiscoveredPeer, FLAG_READ, FLAG_SEARCH, FLAG_WRITE, FolderRule, Peer,
@@ -30,8 +30,6 @@ use crate::{
 };
 use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Utc};
-use futures::StreamExt;
-use libp2p::{Multiaddr, PeerId, Swarm, core::connection::ConnectedPoint, mdns, swarm::SwarmEvent};
 use rusqlite::{Connection as SqliteConnection, params};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, mpsc};
@@ -53,12 +51,17 @@ use tokio::{
 	},
 	task::JoinHandle,
 };
+use tokio_tungstenite::{accept_async_with_config, connect_async};
 use walkdir::WalkDir;
 
-use libp2p::request_response::{OutboundRequestId, ResponseChannel};
+use crate::transport::{
+	HandshakeRole, MessageStream, PeerSession, Wire, handshake, peer_ws_config,
+};
+
+type PeerId = NodeId;
 
 pub struct ReadFileCmd {
-	pub(crate) peer_id: libp2p::PeerId,
+	pub(crate) peer_id: NodeId,
 	pub(crate) path: String,
 	pub(crate) offset: u64,
 	pub(crate) length: Option<u64>,
@@ -71,11 +74,11 @@ pub enum Command {
 		peer_id: PeerId,
 	},
 	Connect {
-		peer_id: libp2p::PeerId,
-		addr: libp2p::Multiaddr,
+		peer_id: NodeId,
+		addr: String,
 	},
 	ListDir {
-		peer: libp2p::PeerId,
+		peer: NodeId,
 		path: String,
 		tx: oneshot::Sender<Result<Vec<DirEntry>>>,
 	},
@@ -199,7 +202,7 @@ pub enum Command {
 	},
 	InjectDiscoveredPeer {
 		peer: PeerId,
-		addr: libp2p::Multiaddr,
+		addr: String,
 		tx: oneshot::Sender<()>,
 	},
 	GetState {
@@ -917,9 +920,32 @@ impl<T: ResponseDecoder> PendingResponseHandler for Pending<T> {
 }
 
 enum InternalCommand {
-	SendPeerResponse {
-		channel: ResponseChannel<PeerRes>,
+	Connected {
+		peer: NodeId,
+		endpoint: Option<String>,
+		sender: UnboundedSender<Wire>,
+	},
+	Disconnected {
+		peer: NodeId,
+		sender: UnboundedSender<Wire>,
+	},
+	ConnectionFailed {
+		peer: NodeId,
+		error: String,
+	},
+	IncomingRequest {
+		peer: NodeId,
+		id: u64,
+		request: PeerReq,
+		sender: UnboundedSender<Wire>,
+	},
+	IncomingResponse {
+		id: u64,
 		response: PeerRes,
+	},
+	RequestFailed {
+		id: u64,
+		error: String,
 	},
 	SendScanEvent {
 		target: PeerId,
@@ -940,13 +966,56 @@ enum InternalCommand {
 
 type PendingRequest = Box<dyn PendingResponseHandler>;
 
+async fn run_peer_session<S: MessageStream + 'static>(
+	mut session: PeerSession<S>,
+	internal_tx: UnboundedSender<InternalCommand>,
+	endpoint: Option<String>,
+) {
+	let peer = session.remote_id().clone();
+	let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+	let _ = internal_tx.send(InternalCommand::Connected {
+		peer: peer.clone(),
+		endpoint,
+		sender: sender.clone(),
+	});
+	loop {
+		tokio::select! {
+			wire = receiver.recv() => match wire {
+				Some(wire) => {
+					let Ok(payload) = serde_json::to_vec(&wire) else { continue };
+					if let Err(error) = session.send(&payload).await {
+						log::warn!("peer {peer} send failed: {error}");
+						break;
+					}
+				}
+				None => break,
+			},
+			payload = session.recv() => {
+				let Ok(payload) = payload else { break };
+				let Ok(wire) = serde_json::from_slice::<Wire>(&payload) else { continue };
+				match wire {
+					Wire::Req { id, body } => {
+						let _ = internal_tx.send(InternalCommand::IncomingRequest { peer: peer.clone(), id, request: body, sender: sender.clone() });
+					}
+					Wire::Res { id, body } => { let _ = internal_tx.send(InternalCommand::IncomingResponse { id, response: body }); }
+					Wire::Ping { id } => { let _ = sender.send(Wire::Pong { id }); }
+					Wire::Pong { .. } => {}
+				}
+			}
+		}
+	}
+	let _ = internal_tx.send(InternalCommand::Disconnected { peer, sender });
+}
+
 pub struct App {
 	state: State,
-	swarm: Swarm<AgentBehaviour>,
+	keypair: Arc<NodeKeypair>,
+	connections: HashMap<NodeId, UnboundedSender<Wire>>,
+	next_request_id: u64,
 	rx: UnboundedReceiver<Command>,
 	internal_rx: tokio::sync::mpsc::UnboundedReceiver<InternalCommand>,
 	internal_tx: tokio::sync::mpsc::UnboundedSender<InternalCommand>,
-	pending_requests: HashMap<OutboundRequestId, PendingRequest>,
+	pending_requests: HashMap<u64, PendingRequest>,
 	system: System,
 	db: Arc<Mutex<SqliteConnection>>,
 	remote_scans: Arc<Mutex<HashMap<u64, mpsc::Sender<ScanEvent>>>>,
@@ -993,21 +1062,21 @@ impl App {
 		Ok(())
 	}
 
-	fn record_peer_address(&mut self, peer: &PeerId, addr: &Multiaddr) {
-		let peer_id = *peer;
-		let multiaddr = addr.clone();
-		self.state.peer_discovered(peer_id, multiaddr.clone());
+	fn record_peer_address(&mut self, peer: &PeerId, endpoint: String) {
+		let peer_id = peer.clone();
+		self.state
+			.peer_discovered(peer_id.clone(), endpoint.clone());
 		if let Ok(mut conn) = self.db.lock() {
-			let _ = save_discovered_peer(&mut *conn, &DiscoveredPeer { peer_id, multiaddr });
+			let _ = save_discovered_peer(&mut *conn, &DiscoveredPeer { peer_id, endpoint });
 		}
 	}
 
-	fn known_peer_addresses(&self, peer: &PeerId) -> Vec<Multiaddr> {
+	fn known_peer_addresses(&self, peer: &PeerId) -> Vec<String> {
 		self.state
 			.discovered_peers
 			.iter()
 			.filter(|entry| entry.peer_id == *peer)
-			.map(|entry| entry.multiaddr.clone())
+			.map(|entry| entry.endpoint.clone())
 			.collect()
 	}
 
@@ -1090,16 +1159,15 @@ impl App {
 				key_path.display()
 			);
 		}
-		let id_keys = load_or_generate_keypair(key_path).unwrap_or_else(|err| {
+		let keypair = NodeKeypair::load_or_generate(key_path).unwrap_or_else(|err| {
 			log::warn!(
 				"failed to load persisted keypair at {}: {err}; using ephemeral keypair",
 				key_path.display()
 			);
-			libp2p::identity::Keypair::generate_ed25519()
+			NodeKeypair::generate()
 		});
-		let peer_id = PeerId::from(id_keys.public());
-
-		let mut swarm = build_swarm(id_keys, peer_id).unwrap();
+		let peer_id = keypair.node_id();
+		let keypair = Arc::new(keypair);
 		let stored_permissions = {
 			let conn = db.lock().unwrap();
 			match load_peer_permissions(&conn, &peer_id) {
@@ -1147,11 +1215,39 @@ impl App {
 		let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 		let (internal_tx, internal_rx) = tokio::sync::mpsc::unbounded_channel();
 
-		let listen_addr = "/ip4/0.0.0.0/tcp/0".parse().unwrap();
-		if let Err(err) = swarm.listen_on(listen_addr) {
-			log::warn!("failed to start swarm listener: {err}");
-		}
-		state.me = peer_id;
+		let listener_keypair = Arc::clone(&keypair);
+		let listener_tx = internal_tx.clone();
+		tokio::spawn(async move {
+			let listener = match tokio::net::TcpListener::bind("0.0.0.0:8833").await {
+				Ok(listener) => listener,
+				Err(error) => {
+					log::error!("failed to bind peer listener: {error}");
+					return;
+				}
+			};
+			loop {
+				let Ok((stream, address)) = listener.accept().await else {
+					continue;
+				};
+				let keypair = Arc::clone(&listener_keypair);
+				let tx = listener_tx.clone();
+				tokio::spawn(async move {
+					let result = async {
+						let ws = accept_async_with_config(stream, Some(peer_ws_config())).await?;
+						handshake(ws, &keypair, HandshakeRole::Responder, None).await
+					}
+					.await;
+					match result {
+						Ok(session) => {
+							run_peer_session(session, tx, Some(format!("ws://{address}/peer/v1")))
+								.await
+						}
+						Err(error) => log::warn!("incoming peer handshake failed: {error}"),
+					}
+				});
+			}
+		});
+		state.me = peer_id.clone();
 		state.users = stored_users;
 		state.peers = stored_peers;
 		state.discovered_peers = stored_discovered;
@@ -1163,7 +1259,9 @@ impl App {
 		}
 		let mut app = App {
 			state,
-			swarm,
+			keypair,
+			connections: HashMap::new(),
+			next_request_id: 1,
 			rx,
 			internal_rx,
 			internal_tx,
@@ -1206,7 +1304,7 @@ impl App {
 			PeerReq::TestOnvifCamera { .. }
 				| PeerReq::SaveOnvifCamera { .. }
 				| PeerReq::DeleteOnvifCamera { .. }
-		) && !self.state.has_owner_access(peer)
+		) && !self.state.has_owner_access(peer.clone())
 		{
 			return Ok(PeerRes::Error(String::from(
 				"owner access is required to configure ONVIF cameras",
@@ -1223,7 +1321,7 @@ impl App {
 						return Ok(PeerRes::Error(format!("Failed to access directory: {err}")));
 					}
 				};
-				if !self.can_access(peer, &canonical, FLAG_READ | FLAG_SEARCH) {
+				if !self.can_access(peer.clone(), &canonical, FLAG_READ | FLAG_SEARCH) {
 					log::warn!(
 						"peer {} denied directory listing for {}",
 						peer,
@@ -1243,7 +1341,7 @@ impl App {
 						return Ok(PeerRes::Error(format!("Failed to access file: {err}")));
 					}
 				};
-				if !self.can_access(peer, &canonical, FLAG_READ | FLAG_SEARCH) {
+				if !self.can_access(peer.clone(), &canonical, FLAG_READ | FLAG_SEARCH) {
 					log::warn!("peer {} denied stat for {}", peer, canonical.display());
 					return Ok(PeerRes::Error("Access denied".into()));
 				}
@@ -1301,7 +1399,7 @@ impl App {
 						return Ok(PeerRes::Error(format!("Failed to access file: {err}")));
 					}
 				};
-				if !self.can_access(peer, &canonical, FLAG_READ | FLAG_SEARCH) {
+				if !self.can_access(peer.clone(), &canonical, FLAG_READ | FLAG_SEARCH) {
 					log::warn!("peer {} denied read for {}", peer, canonical.display());
 					return Ok(PeerRes::Error("Access denied".into()));
 				}
@@ -1357,7 +1455,11 @@ impl App {
 						}
 					}
 				};
-				if !self.can_access(peer, &canonical, FLAG_WRITE | FLAG_READ | FLAG_SEARCH) {
+				if !self.can_access(
+					peer.clone(),
+					&canonical,
+					FLAG_WRITE | FLAG_READ | FLAG_SEARCH,
+				) {
 					log::warn!("peer {} denied write for {}", peer, canonical.display());
 					return Ok(PeerRes::Error("Access denied".into()));
 				}
@@ -1418,15 +1520,56 @@ impl App {
 				}
 			}
 			PeerReq::TestOnvifCamera { mut config } => {
+				if !config.id.is_empty() && config.device_service_url.is_empty() {
+					let stored = self
+						.db
+						.lock()
+						.map_err(|_| anyhow!("database lock was poisoned"))
+						.and_then(|conn| crate::db::load_onvif_camera(&conn, &config.id));
+					return Ok(match stored {
+						Ok(Some(stored)) => match onvif::profiles(&stored).await {
+							Ok(profiles) => PeerRes::OnvifCameraMutation(OnvifCameraMutation {
+								camera: OnvifCamera::from(&stored),
+								message: String::from("Profiles loaded"),
+								profiles,
+							}),
+							Err(error) => PeerRes::Error(error.to_string()),
+						},
+						Ok(None) => PeerRes::Error(String::from("ONVIF camera was not found")),
+						Err(error) => PeerRes::Error(error.to_string()),
+					});
+				}
 				match onvif::test_camera(&mut config).await {
-					Ok(message) => PeerRes::OnvifCameraMutation(OnvifCameraMutation {
-						camera: OnvifCamera::from(&config),
-						message,
-					}),
+					Ok(message) => {
+						let profiles = onvif::profiles(&config).await.unwrap_or_default();
+						PeerRes::OnvifCameraMutation(OnvifCameraMutation {
+							camera: OnvifCamera::from(&config),
+							message,
+							profiles,
+						})
+					}
 					Err(error) => PeerRes::Error(error.to_string()),
 				}
 			}
 			PeerReq::SaveOnvifCamera { mut config } => {
+				if !config.id.is_empty() && config.device_service_url.is_empty() {
+					match self
+						.db
+						.lock()
+						.map_err(|_| anyhow!("database lock was poisoned"))
+						.and_then(|conn| crate::db::load_onvif_camera(&conn, &config.id))
+					{
+						Ok(Some(mut stored)) => {
+							stored.profile_token = config.profile_token;
+							stored.idle_timeout_seconds = config.idle_timeout_seconds;
+							config = stored;
+						}
+						Ok(None) => {
+							return Ok(PeerRes::Error(String::from("ONVIF camera was not found")));
+						}
+						Err(error) => return Ok(PeerRes::Error(error.to_string())),
+					}
+				}
 				if config.id.trim().is_empty() {
 					config.id = uuid::Uuid::new_v4().to_string();
 				}
@@ -1446,6 +1589,7 @@ impl App {
 								PeerRes::OnvifCameraMutation(OnvifCameraMutation {
 									camera: OnvifCamera::from(&saved),
 									message: format!("Camera saved. {message}"),
+									profiles: Vec::new(),
 								})
 							}
 							Err(error) => PeerRes::Error(error.to_string()),
@@ -1473,6 +1617,7 @@ impl App {
 						PeerRes::OnvifCameraMutation(OnvifCameraMutation {
 							camera: OnvifCamera::from(&camera),
 							message: String::from("Camera deleted"),
+							profiles: Vec::new(),
 						})
 					}
 					Err(error) => PeerRes::Error(error.to_string()),
@@ -1498,7 +1643,7 @@ impl App {
 						))));
 					}
 				};
-				if !self.can_access(peer, &canonical, FLAG_READ | FLAG_SEARCH) {
+				if !self.can_access(peer.clone(), &canonical, FLAG_READ | FLAG_SEARCH) {
 					return Ok(PeerRes::ScanStarted(Err(String::from("Access denied"))));
 				}
 				let node_id = match self.local_node_id() {
@@ -1521,7 +1666,7 @@ impl App {
 						async move {
 							while let Some(event) = progress_rx.recv().await {
 								let _ = internal_tx.send(InternalCommand::SendScanEvent {
-									target,
+									target: target.clone(),
 									scan_id: id,
 									event,
 								});
@@ -1561,7 +1706,7 @@ impl App {
 				tokio::task::spawn_blocking(move || {
 					if roots.is_empty() {
 						let _ = internal_tx.send(InternalCommand::SendSearchEvent {
-							target,
+							target: target.clone(),
 							search_id: id,
 							event: SearchEvent::Finished {
 								total: 0,
@@ -1572,7 +1717,7 @@ impl App {
 					}
 					live_search_roots(roots, args, |event| {
 						let _ = internal_tx.send(InternalCommand::SendSearchEvent {
-							target,
+							target: target.clone(),
 							search_id: id,
 							event,
 						});
@@ -1691,8 +1836,9 @@ impl App {
 					existing.extend(mapped);
 					mapped = existing;
 				}
-				let me = self.state.me;
-				self.state.set_peer_permissions(peer, mapped.clone());
+				let me = self.state.me.clone();
+				self.state
+					.set_peer_permissions(peer.clone(), mapped.clone());
 				match self.db.lock() {
 					Ok(mut conn) => {
 						if let Err(err) =
@@ -1739,7 +1885,7 @@ impl App {
 						return Ok(PeerRes::Error(format!("Failed to access file: {err}")));
 					}
 				};
-				if !self.can_access(peer, &canonical, FLAG_READ | FLAG_SEARCH) {
+				if !self.can_access(peer.clone(), &canonical, FLAG_READ | FLAG_SEARCH) {
 					log::warn!(
 						"peer {} denied thumbnail access for {}",
 						peer,
@@ -1765,13 +1911,14 @@ impl App {
 				let version_clone = version.clone();
 
 				let internal_tx_for_error = internal_tx.clone();
+				let progress_target = target.clone();
 				tokio::spawn(async move {
 					let result = updater::update_with_progress(
 						version_clone.as_deref(),
 						current_version,
 						move |progress| {
 							let _ = internal_tx.send(InternalCommand::SendUpdateEvent {
-								target,
+								target: progress_target.clone(),
 								update_id: id,
 								event: progress,
 							});
@@ -1783,7 +1930,7 @@ impl App {
 					// send a failure event
 					if let Err(err) = result {
 						let _ = internal_tx_for_error.send(InternalCommand::SendUpdateEvent {
-							target,
+							target: target.clone(),
 							update_id: id,
 							event: UpdateProgress::Failed {
 								error: err.to_string(),
@@ -2063,7 +2210,7 @@ impl App {
 	}
 
 	fn local_node_id(&self) -> Option<NodeID> {
-		match peer_to_node_id(&self.state.me) {
+		match peer_to_node_id(&self.state.me.clone()) {
 			Some(id) => Some(id),
 			None => {
 				log::warn!("local peer id too short to derive node id; skipping persistence");
@@ -2155,207 +2302,53 @@ impl App {
 		Ok(entries)
 	}
 
-	async fn handle_agent_event(&mut self, event: AgentEvent) {
-		match event {
-			AgentEvent::Ping(event) => {
-				log::info!("Ping event: {:?}", event);
-			}
-			AgentEvent::PuppyNet(event) => match event {
-				libp2p::request_response::Event::Message {
-					peer,
-					connection_id: _,
-					message,
-				} => match message {
-					libp2p::request_response::Message::Request {
-						request_id: _,
-						request,
-						channel,
-					} => {
-						if let PeerReq::GetMediaFrame { source_id } = request {
-							let internal_tx = self.internal_tx.clone();
-							tokio::spawn(async move {
-								let response = match webcam::capture_media_frame(source_id).await {
-									Ok(frame) => PeerRes::MediaFrame(frame),
-									Err(err) => PeerRes::Error(err.to_string()),
-								};
-								let _ = internal_tx
-									.send(InternalCommand::SendPeerResponse { channel, response });
-							});
-							return;
-						}
-						if let Ok(res) = self.handle_puppy_peer_req(peer, request).await {
-							let _ = self
-								.swarm
-								.behaviour_mut()
-								.puppynet
-								.send_response(channel, res);
-						} else {
-							let _ = self
-								.swarm
-								.behaviour_mut()
-								.puppynet
-								.send_response(channel, PeerRes::Error("Internal error".into()));
-						}
-					}
-					libp2p::request_response::Message::Response {
-						request_id,
-						response,
-					} => {
-						if let Some(pending) = self.pending_requests.remove(&request_id) {
-							pending.complete(response);
-						}
-					}
-				},
-				libp2p::request_response::Event::OutboundFailure {
-					peer,
-					connection_id: _,
-					request_id,
-					error,
-				} => {
-					log::warn!("outbound request to {} failed: {error}", peer);
-					if let Some(pending) = self.pending_requests.remove(&request_id) {
-						pending.fail(anyhow!("request failed: {error}"));
-					}
-				}
-				libp2p::request_response::Event::InboundFailure {
-					peer,
-					connection_id: _,
-					request_id: _,
-					error,
-				} => {
-					log::warn!("inbound failure from {}: {error}", peer);
-				}
-				libp2p::request_response::Event::ResponseSent {
-					peer,
-					connection_id: _,
-					request_id: _,
-				} => {
-					log::debug!("response sent to {}", peer);
-				}
-			},
-			AgentEvent::Mdns(event) => match event {
-				mdns::Event::Discovered(items) => {
-					for (peer_id, multiaddr) in items {
-						log::info!("mDNS discovered peer {} at {}", peer_id, multiaddr);
-						self.state.peer_discovered(peer_id, multiaddr.clone());
-						if let Ok(mut conn) = self.db.lock() {
-							let _ = save_discovered_peer(
-								&mut *conn,
-								&DiscoveredPeer {
-									peer_id,
-									multiaddr: multiaddr.clone(),
-								},
-							);
-						}
-						self.swarm.dial(multiaddr).unwrap();
-					}
-				}
-				mdns::Event::Expired(items) => {
-					for (peer_id, multiaddr) in items {
-						log::info!("mDNS expired peer {} at {}", peer_id, multiaddr);
-						self.state.peer_expired(peer_id, multiaddr.clone());
-						if let Ok(mut conn) = self.db.lock() {
-							let _ = remove_discovered_peer(&mut *conn, &peer_id, &multiaddr);
-						}
-					}
-				}
-			},
+	fn send_peer_request(&mut self, peer: &PeerId, request: PeerReq) -> u64 {
+		let id = self.next_request_id;
+		self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
+		let error = match self.connections.get(peer) {
+			Some(sender) => sender
+				.send(Wire::Req { id, body: request })
+				.err()
+				.map(|_| String::from("peer connection closed")),
+			None => Some(String::from("peer is not connected")),
+		};
+		let internal_tx = self.internal_tx.clone();
+		if let Some(error) = error {
+			tokio::spawn(async move {
+				tokio::time::sleep(Duration::from_millis(1)).await;
+				let _ = internal_tx.send(InternalCommand::RequestFailed { id, error });
+			});
+		} else {
+			tokio::spawn(async move {
+				tokio::time::sleep(Duration::from_secs(30)).await;
+				let _ = internal_tx.send(InternalCommand::RequestFailed {
+					id,
+					error: String::from("peer request timed out"),
+				});
+			});
 		}
+		id
 	}
 
-	async fn handle_swarm_event(&mut self, event: SwarmEvent<AgentEvent>) {
-		match event {
-			SwarmEvent::Behaviour(b) => self.handle_agent_event(b).await,
-			SwarmEvent::ConnectionEstablished {
-				peer_id,
-				connection_id,
-				endpoint,
-				num_established: _,
-				concurrent_dial_errors: _,
-				established_in: _,
-			} => {
-				log::info!("Connected to peer {}", peer_id);
-				self.state.connections.push(Connection {
-					peer_id: peer_id.clone(),
-					connection_id,
-				});
-				if let Some(addr) = match endpoint {
-					ConnectedPoint::Dialer { address, .. } => Some(address.clone()),
-					ConnectedPoint::Listener { send_back_addr, .. } => Some(send_back_addr.clone()),
-				} {
-					self.record_peer_address(&peer_id, &addr);
-				}
-				if let Ok(mut conn) = self.db.lock() {
-					let _ = save_peer(
-						&mut *conn,
-						&Peer {
-							id: peer_id,
-							name: None,
-						},
-					);
+	fn dial_peer(&self, peer: NodeId, endpoint: String) {
+		let keypair = Arc::clone(&self.keypair);
+		let internal_tx = self.internal_tx.clone();
+		tokio::spawn(async move {
+			let result = async {
+				let (ws, _) = connect_async(&endpoint).await?;
+				handshake(ws, &keypair, HandshakeRole::Initiator, Some(peer.clone())).await
+			}
+			.await;
+			match result {
+				Ok(session) => run_peer_session(session, internal_tx, Some(endpoint)).await,
+				Err(error) => {
+					let _ = internal_tx.send(InternalCommand::ConnectionFailed {
+						peer,
+						error: error.to_string(),
+					});
 				}
 			}
-			SwarmEvent::ConnectionClosed {
-				peer_id,
-				connection_id,
-				endpoint: _,
-				num_established: _,
-				cause: _,
-			} => {
-				log::info!("Disconnected from peer {}", peer_id);
-				self.state
-					.connections
-					.retain(|c| c.connection_id != connection_id);
-			}
-			SwarmEvent::IncomingConnection {
-				connection_id: _,
-				local_addr: _,
-				send_back_addr: _,
-			} => {}
-			SwarmEvent::IncomingConnectionError {
-				connection_id: _,
-				local_addr: _,
-				send_back_addr: _,
-				error: _,
-				peer_id: _,
-			} => {}
-			SwarmEvent::OutgoingConnectionError {
-				connection_id: _,
-				peer_id: _,
-				error: _,
-			} => {}
-			SwarmEvent::Dialing {
-				peer_id: _,
-				connection_id: _,
-			} => {}
-			SwarmEvent::NewExternalAddrCandidate { address: _ } => {}
-			SwarmEvent::ExternalAddrConfirmed { address: _ } => {}
-			SwarmEvent::ExternalAddrExpired { address: _ } => {}
-			SwarmEvent::NewExternalAddrOfPeer {
-				peer_id: _,
-				address: _,
-			} => {}
-			SwarmEvent::NewListenAddr {
-				listener_id: _,
-				address,
-			} => {
-				log::info!("listener address added: {:?}", address);
-			}
-			SwarmEvent::ExpiredListenAddr {
-				listener_id: _,
-				address: _,
-			} => {}
-			SwarmEvent::ListenerClosed {
-				listener_id: _,
-				addresses: _,
-				reason: _,
-			} => {}
-			SwarmEvent::ListenerError {
-				listener_id: _,
-				error: _,
-			} => {}
-			_ => {}
-		}
+		});
 	}
 
 	async fn handle_cmd(&mut self, cmd: Command) {
@@ -2365,25 +2358,19 @@ impl App {
 					let _ = tx.send(Ok(Self::local_peer_info()));
 					return;
 				}
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request(&peer_id, PeerReq::PeerInfo);
+				let request_id = self.send_peer_request(&peer_id, PeerReq::PeerInfo);
 				self.pending_requests
 					.insert(request_id, Pending::<PeerInfo>::new(tx));
 			}
-			Command::Connect { peer_id: _, addr } => {
-				if let Err(err) = self.swarm.dial(addr) {
-					log::error!("dial failed: {err}");
-				}
+			Command::Connect { peer_id, addr } => {
+				self.dial_peer(peer_id, addr);
 			}
 			Command::ListDir { peer, path, tx } => {
 				let is_self = self.state.me == peer;
 				if is_self {
 					let result = match fs::canonicalize(&path).await {
 						Ok(canonical) => {
-							if self.can_access(peer, &canonical, FLAG_READ | FLAG_SEARCH) {
+							if self.can_access(peer.clone(), &canonical, FLAG_READ | FLAG_SEARCH) {
 								Self::collect_dir_entries(&canonical).await
 							} else {
 								Err(anyhow!("Access denied"))
@@ -2394,11 +2381,8 @@ impl App {
 					let _ = tx.send(result);
 					return;
 				}
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request(&peer, PeerReq::ListDir { path: path.clone() });
+				let request_id =
+					self.send_peer_request(&peer, PeerReq::ListDir { path: path.clone() });
 				if let Some(prev) = self
 					.pending_requests
 					.insert(request_id, Pending::<Vec<DirEntry>>::new(tx))
@@ -2412,11 +2396,7 @@ impl App {
 					let _ = tx.send(Ok(cpus));
 					return;
 				}
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request(&peer_id, PeerReq::ListCpus);
+				let request_id = self.send_peer_request(&peer_id, PeerReq::ListCpus);
 				self.pending_requests
 					.insert(request_id, Pending::<Vec<CpuInfo>>::new(tx));
 			}
@@ -2426,11 +2406,7 @@ impl App {
 					let _ = tx.send(Ok(disks));
 					return;
 				}
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request(&peer_id, PeerReq::ListDisks);
+				let request_id = self.send_peer_request(&peer_id, PeerReq::ListDisks);
 				self.pending_requests
 					.insert(request_id, Pending::<Vec<DiskInfo>>::new(tx));
 			}
@@ -2440,11 +2416,7 @@ impl App {
 					let _ = tx.send(Ok(interfaces));
 					return;
 				}
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request(&peer_id, PeerReq::ListInterfaces);
+				let request_id = self.send_peer_request(&peer_id, PeerReq::ListInterfaces);
 				self.pending_requests
 					.insert(request_id, Pending::<Vec<InterfaceInfo>>::new(tx));
 			}
@@ -2453,11 +2425,7 @@ impl App {
 					let _ = tx.send(Ok(audio::audio_capability().await));
 					return;
 				}
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request(&peer_id, PeerReq::AudioCapability);
+				let request_id = self.send_peer_request(&peer_id, PeerReq::AudioCapability);
 				self.pending_requests
 					.insert(request_id, Pending::<AudioCapability>::new(tx));
 			}
@@ -2467,11 +2435,7 @@ impl App {
 					let _ = tx.send(result);
 					return;
 				}
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request(&peer_id, PeerReq::ListAudioDevices);
+				let request_id = self.send_peer_request(&peer_id, PeerReq::ListAudioDevices);
 				self.pending_requests
 					.insert(request_id, Pending::<Vec<AudioDevice>>::new(tx));
 			}
@@ -2486,11 +2450,8 @@ impl App {
 					let _ = tx.send(result);
 					return;
 				}
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request(&peer_id, PeerReq::SetAudioMuted { device_id, muted });
+				let request_id =
+					self.send_peer_request(&peer_id, PeerReq::SetAudioMuted { device_id, muted });
 				self.pending_requests
 					.insert(request_id, Pending::<Vec<AudioDevice>>::new(tx));
 			}
@@ -2505,11 +2466,8 @@ impl App {
 					let _ = tx.send(result);
 					return;
 				}
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request(&peer_id, PeerReq::SetAudioVolume { device_id, volume });
+				let request_id =
+					self.send_peer_request(&peer_id, PeerReq::SetAudioVolume { device_id, volume });
 				self.pending_requests
 					.insert(request_id, Pending::<Vec<AudioDevice>>::new(tx));
 			}
@@ -2523,11 +2481,8 @@ impl App {
 					let _ = tx.send(result);
 					return;
 				}
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request(&peer_id, PeerReq::SetDefaultAudioDevice { device_id });
+				let request_id =
+					self.send_peer_request(&peer_id, PeerReq::SetDefaultAudioDevice { device_id });
 				self.pending_requests
 					.insert(request_id, Pending::<Vec<AudioDevice>>::new(tx));
 			}
@@ -2536,11 +2491,7 @@ impl App {
 					let _ = tx.send(Ok(webcam::media_capability().await));
 					return;
 				}
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request(&peer_id, PeerReq::MediaCapability);
+				let request_id = self.send_peer_request(&peer_id, PeerReq::MediaCapability);
 				self.pending_requests
 					.insert(request_id, Pending::<MediaCapability>::new(tx));
 			}
@@ -2550,11 +2501,7 @@ impl App {
 					let _ = tx.send(result);
 					return;
 				}
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request(&peer_id, PeerReq::ListMediaSources);
+				let request_id = self.send_peer_request(&peer_id, PeerReq::ListMediaSources);
 				self.pending_requests
 					.insert(request_id, Pending::<Vec<MediaSource>>::new(tx));
 			}
@@ -2570,11 +2517,8 @@ impl App {
 					});
 					return;
 				}
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request(&peer_id, PeerReq::GetMediaFrame { source_id });
+				let request_id =
+					self.send_peer_request(&peer_id, PeerReq::GetMediaFrame { source_id });
 				self.pending_requests
 					.insert(request_id, Pending::<MediaFrame>::new(tx));
 			}
@@ -2587,11 +2531,7 @@ impl App {
 					let _ = tx.send(result);
 					return;
 				}
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request(&peer_id, PeerReq::ListOnvifCameras);
+				let request_id = self.send_peer_request(&peer_id, PeerReq::ListOnvifCameras);
 				self.pending_requests
 					.insert(request_id, Pending::<Vec<OnvifCamera>>::new(tx));
 			}
@@ -2609,11 +2549,7 @@ impl App {
 					let _ = tx.send(result);
 					return;
 				}
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request(&peer_id, request);
+				let request_id = self.send_peer_request(&peer_id, request);
 				self.pending_requests
 					.insert(request_id, Pending::<OnvifCameraMutation>::new(tx));
 			}
@@ -2631,11 +2567,7 @@ impl App {
 					let _ = tx.send(result);
 					return;
 				}
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request(&peer_id, request);
+				let request_id = self.send_peer_request(&peer_id, request);
 				self.pending_requests
 					.insert(request_id, Pending::<OnvifCameraMutation>::new(tx));
 			}
@@ -2649,11 +2581,7 @@ impl App {
 					let _ = tx.send(result);
 					return;
 				}
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request(&peer_id, request);
+				let request_id = self.send_peer_request(&peer_id, request);
 				self.pending_requests
 					.insert(request_id, Pending::<OnvifCameraMutation>::new(tx));
 			}
@@ -2670,11 +2598,8 @@ impl App {
 					let _ = tx.send(result);
 					return;
 				}
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request(&peer, PeerReq::FileEntries { offset, limit });
+				let request_id =
+					self.send_peer_request(&peer, PeerReq::FileEntries { offset, limit });
 				self.pending_requests
 					.insert(request_id, Pending::<Vec<FileEntry>>::new(tx));
 			}
@@ -2688,11 +2613,7 @@ impl App {
 					let _ = tx.send(Ok(permissions));
 					return;
 				}
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request(&peer, PeerReq::ListPermissions);
+				let request_id = self.send_peer_request(&peer, PeerReq::ListPermissions);
 				if let Some(prev) = self
 					.pending_requests
 					.insert(request_id, Pending::<Vec<Permission>>::new(tx))
@@ -2707,7 +2628,7 @@ impl App {
 				merge,
 				tx,
 			} => {
-				let request_id = self.swarm.behaviour_mut().puppynet.send_request(
+				let request_id = self.send_peer_request(
 					&peer,
 					PeerReq::GrantAccess {
 						username,
@@ -2737,7 +2658,7 @@ impl App {
 					let _ = req.tx.send(chunk);
 					return;
 				}
-				let request_id = self.swarm.behaviour_mut().puppynet.send_request(
+				let request_id = self.send_peer_request(
 					&req.peer_id,
 					PeerReq::ReadFile {
 						path: req.path.clone(),
@@ -2762,7 +2683,7 @@ impl App {
 						return;
 					}
 				};
-				if !self.can_access(self.state.me, &canonical, FLAG_READ | FLAG_SEARCH) {
+				if !self.can_access(self.state.me.clone(), &canonical, FLAG_READ | FLAG_SEARCH) {
 					let _ = tx.send(ScanEvent::Finished(Err(String::from("Access denied"))));
 					return;
 				}
@@ -2824,7 +2745,7 @@ impl App {
 					}
 					return;
 				}
-				let request_id = self.swarm.behaviour_mut().puppynet.send_request(
+				let request_id = self.send_peer_request(
 					&peer,
 					PeerReq::StartSearch {
 						id: search_id,
@@ -2841,11 +2762,8 @@ impl App {
 				path,
 				scan_id,
 			} => {
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request(&peer, PeerReq::StartScan { id: scan_id, path });
+				let request_id =
+					self.send_peer_request(&peer, PeerReq::StartScan { id: scan_id, path });
 				self.pending_requests.insert(
 					request_id,
 					PendingRemoteScanStart::new(scan_id, Arc::clone(&self.remote_scans)),
@@ -2866,7 +2784,7 @@ impl App {
 				if is_self {
 					let result = match fs::canonicalize(&path).await {
 						Ok(canonical) => {
-							if self.can_access(peer, &canonical, FLAG_READ | FLAG_SEARCH) {
+							if self.can_access(peer.clone(), &canonical, FLAG_READ | FLAG_SEARCH) {
 								generate_thumbnail(&canonical, max_width, max_height).await
 							} else {
 								Err(anyhow!("Access denied"))
@@ -2877,7 +2795,7 @@ impl App {
 					let _ = tx.send(result);
 					return;
 				}
-				let request_id = self.swarm.behaviour_mut().puppynet.send_request(
+				let request_id = self.send_peer_request(
 					&peer,
 					PeerReq::GetThumbnail {
 						path,
@@ -2893,7 +2811,7 @@ impl App {
 				version,
 				update_id,
 			} => {
-				let request_id = self.swarm.behaviour_mut().puppynet.send_request(
+				let request_id = self.send_peer_request(
 					&peer,
 					PeerReq::UpdateSelf {
 						id: update_id,
@@ -2906,7 +2824,8 @@ impl App {
 				);
 			}
 			Command::InjectDiscoveredPeer { peer, addr, tx } => {
-				self.state.peer_discovered(peer, addr);
+				self.record_peer_address(&peer, addr.clone());
+				self.dial_peer(peer, addr);
 				let _ = tx.send(());
 			}
 			Command::GetState { tx } => {
@@ -2973,8 +2892,9 @@ impl App {
 				tx,
 			} => {
 				let result = (|| -> anyhow::Result<()> {
-					let me = self.state.me;
-					self.state.set_peer_permissions(peer, permissions.clone());
+					let me = self.state.me.clone();
+					self.state
+						.set_peer_permissions(peer.clone(), permissions.clone());
 					let mut conn = self.db.lock().map_err(|_| anyhow!("db lock poisoned"))?;
 					crate::db::save_peer_permissions(&mut *conn, &me, &peer, &permissions)
 						.map_err(|err| anyhow!(err))?;
@@ -2987,7 +2907,7 @@ impl App {
 				let _ = tx.send(result);
 			}
 			Command::GetLocalPeerId { tx } => {
-				let _ = tx.send(self.state.me);
+				let _ = tx.send(self.state.me.clone());
 			}
 			Command::StartShell {
 				peer,
@@ -3002,16 +2922,8 @@ impl App {
 					let _ = tx.send(result);
 					return;
 				}
-				let addresses = self.known_peer_addresses(&peer);
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request_with_addresses(
-						&peer,
-						PeerReq::StartShell { id: session_id },
-						addresses,
-					);
+				let request_id =
+					self.send_peer_request(&peer, PeerReq::StartShell { id: session_id });
 				self.pending_requests
 					.insert(request_id, Pending::<u64>::new(tx));
 			}
@@ -3030,19 +2942,13 @@ impl App {
 					let _ = tx.send(result);
 					return;
 				}
-				let addresses = self.known_peer_addresses(&peer);
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request_with_addresses(
-						&peer,
-						PeerReq::ShellInput {
-							id: session_id,
-							data,
-						},
-						addresses,
-					);
+				let request_id = self.send_peer_request(
+					&peer,
+					PeerReq::ShellInput {
+						id: session_id,
+						data,
+					},
+				);
 				self.pending_requests
 					.insert(request_id, Pending::<Vec<u8>>::new(tx));
 			}
@@ -3052,12 +2958,7 @@ impl App {
 					let _ = tx.send(result);
 					return;
 				}
-				let addresses = self.known_peer_addresses(&peer);
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request_with_addresses(&peer, PeerReq::DesktopInput { input }, addresses);
+				let request_id = self.send_peer_request(&peer, PeerReq::DesktopInput { input });
 				self.pending_requests
 					.insert(request_id, Pending::<()>::new(tx));
 			}
@@ -3066,9 +2967,6 @@ impl App {
 
 	pub async fn run(&mut self) {
 		tokio::select! {
-			event = self.swarm.select_next_some() => {
-				self.handle_swarm_event(event).await;
-			}
 			cmd = self.rx.recv() => {
 				if let Some(cmd) = cmd {
 					self.handle_cmd(cmd).await;
@@ -3076,31 +2974,93 @@ impl App {
 			}
 			internal = self.internal_rx.recv() => {
 				if let Some(cmd) = internal {
-					self.handle_internal_cmd(cmd);
+					self.handle_internal_cmd(cmd).await;
 				}
 			}
 		}
 	}
 
-	fn handle_internal_cmd(&mut self, cmd: InternalCommand) {
+	async fn handle_internal_cmd(&mut self, cmd: InternalCommand) {
 		match cmd {
-			InternalCommand::SendPeerResponse { channel, response } => {
-				let _ = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_response(channel, response);
+			InternalCommand::Connected {
+				peer,
+				endpoint,
+				sender,
+			} => {
+				self.connections.insert(peer.clone(), sender);
+				self.state
+					.connections
+					.retain(|connection| connection.peer_id != peer);
+				self.state.connections.push(Connection {
+					peer_id: peer.clone(),
+				});
+				if let Some(endpoint) = endpoint {
+					self.record_peer_address(&peer, endpoint);
+				}
+				if let Ok(conn) = self.db.lock() {
+					let _ = save_peer(
+						&conn,
+						&Peer {
+							id: peer,
+							name: None,
+						},
+					);
+				}
+			}
+			InternalCommand::ConnectionFailed { peer, error } => {
+				log::warn!("connection to {peer} failed: {error}");
+			}
+			InternalCommand::Disconnected { peer, sender } => {
+				if self
+					.connections
+					.get(&peer)
+					.is_some_and(|current| current.same_channel(&sender))
+				{
+					self.connections.remove(&peer);
+					self.state
+						.connections
+						.retain(|connection| connection.peer_id != peer);
+				}
+			}
+			InternalCommand::IncomingResponse { id, response } => {
+				if let Some(pending) = self.pending_requests.remove(&id) {
+					pending.complete(response);
+				}
+			}
+			InternalCommand::RequestFailed { id, error } => {
+				if let Some(pending) = self.pending_requests.remove(&id) {
+					pending.fail(anyhow!(error));
+				}
+			}
+			InternalCommand::IncomingRequest {
+				peer,
+				id,
+				request,
+				sender,
+			} => {
+				if let PeerReq::GetMediaFrame { source_id } = request {
+					tokio::spawn(async move {
+						let body = webcam::capture_media_frame(source_id)
+							.await
+							.map(PeerRes::MediaFrame)
+							.unwrap_or_else(|error| PeerRes::Error(error.to_string()));
+						let _ = sender.send(Wire::Res { id, body });
+					});
+				} else {
+					let body = self
+						.handle_puppy_peer_req(peer, request)
+						.await
+						.unwrap_or_else(|error| PeerRes::Error(error.to_string()));
+					let _ = sender.send(Wire::Res { id, body });
+				}
 			}
 			InternalCommand::SendScanEvent {
 				target,
 				scan_id,
 				event,
 			} => {
-				let request_id = self
-					.swarm
-					.behaviour_mut()
-					.puppynet
-					.send_request(&target, PeerReq::ScanEvent { id: scan_id, event });
+				let request_id =
+					self.send_peer_request(&target, PeerReq::ScanEvent { id: scan_id, event });
 				self.pending_requests
 					.insert(request_id, PendingScanEventAck::new());
 			}
@@ -3109,7 +3069,7 @@ impl App {
 				search_id,
 				event,
 			} => {
-				let request_id = self.swarm.behaviour_mut().puppynet.send_request(
+				let request_id = self.send_peer_request(
 					&target,
 					PeerReq::SearchEvent {
 						id: search_id,
@@ -3124,7 +3084,7 @@ impl App {
 				update_id,
 				event,
 			} => {
-				let request_id = self.swarm.behaviour_mut().puppynet.send_request(
+				let request_id = self.send_peer_request(
 					&target,
 					PeerReq::UpdateEvent {
 						id: update_id,

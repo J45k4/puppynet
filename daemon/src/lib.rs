@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use puppynet_core::{PuppyNet, http_api, ui};
+use puppynet_core::{NodeId, PuppyNet, http_api, ui};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -7,6 +7,7 @@ pub mod control;
 
 #[derive(Debug, Clone)]
 pub struct Config {
+	pub peers: Vec<String>,
 	pub read: Vec<String>,
 	pub write: Vec<String>,
 	pub ui_bind: String,
@@ -21,6 +22,23 @@ fn register_shared_folders(peer: &PuppyNet, config: &Config) -> Result<()> {
 	for path in &config.write {
 		peer.share_read_write_folder(path)
 			.with_context(|| format!("failed to share {path} for read/write"))?;
+	}
+	Ok(())
+}
+
+fn connect_configured_peers(peer: &PuppyNet, config: &Config) -> Result<()> {
+	for value in &config.peers {
+		let (node_id, endpoint) = value
+			.split_once('@')
+			.with_context(|| format!("invalid --peer {value}; expected <node-id>@<ws-url>"))?;
+		let node_id = node_id
+			.parse::<NodeId>()
+			.with_context(|| format!("invalid peer node id {node_id}"))?;
+		if !endpoint.starts_with("ws://") && !endpoint.starts_with("wss://") {
+			anyhow::bail!("invalid peer endpoint {endpoint}; expected ws:// or wss:// URL");
+		}
+		peer.inject_discovered_peer(node_id, endpoint.to_string())
+			.map_err(|error| anyhow::anyhow!(error))?;
 	}
 	Ok(())
 }
@@ -100,6 +118,7 @@ async fn wait_for_peer(peer: Arc<PuppyNet>) {
 pub async fn run(config: Config) -> Result<()> {
 	let peer = Arc::new(PuppyNet::new());
 	register_shared_folders(&peer, &config)?;
+	connect_configured_peers(&peer, &config)?;
 
 	let ui_addr = parse_socket_addr("--ui-bind", &config.ui_bind)?;
 	let ui_task = spawn_ui(Arc::clone(&peer), ui_addr);

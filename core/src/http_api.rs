@@ -1,4 +1,5 @@
 use crate::auth;
+use crate::node_id::NodeId as PeerId;
 use crate::puppynet::PuppyNet;
 use crate::scan::ScanEvent;
 use crate::updater::UpdateProgress;
@@ -13,7 +14,6 @@ use hyper::header::{
 };
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
-use libp2p::PeerId;
 use log::warn;
 use mime_guess::from_path;
 use rand::RngCore;
@@ -718,7 +718,7 @@ async fn handle_request(
 				.into_iter()
 				.map(|d| DiscoveredSummary {
 					peer_id: d.peer_id.to_string(),
-					multiaddr: d.multiaddr.to_string(),
+					multiaddr: d.endpoint,
 				})
 				.collect();
 			let users = state
@@ -895,7 +895,7 @@ async fn handle_request(
 					.to_string();
 				let range_header = req.headers().get(RANGE).cloned();
 				let (chunk, status, content_range) = if let Some(range_value) = range_header {
-					let total_len = infer_peer_file_size(&state, peer, path).await;
+					let total_len = infer_peer_file_size(&state, peer.clone(), path).await;
 					let header_value = match range_value.to_str() {
 						Ok(value) => value,
 						Err(_) => {

@@ -1,6 +1,6 @@
 use crate::auth;
+use crate::node_id::NodeId;
 use anyhow::bail;
-use libp2p::{Multiaddr, PeerId, swarm::ConnectionId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -97,8 +97,8 @@ impl Permission {
 
 #[derive(Clone, Debug)]
 pub struct Relationship {
-	src: PeerId,
-	target: PeerId,
+	src: NodeId,
+	target: NodeId,
 	rules: Vec<Permission>,
 }
 
@@ -121,19 +121,18 @@ pub struct Auth {
 
 #[derive(Clone, Debug)]
 pub struct Connection {
-	pub peer_id: PeerId,
-	pub connection_id: ConnectionId,
+	pub peer_id: NodeId,
 }
 
 #[derive(Clone, Debug)]
 pub struct DiscoveredPeer {
-	pub peer_id: PeerId,
-	pub multiaddr: Multiaddr,
+	pub peer_id: NodeId,
+	pub endpoint: String,
 }
 
 #[derive(Clone, Debug)]
 pub struct Peer {
-	pub id: PeerId,
+	pub id: NodeId,
 	pub name: Option<String>,
 }
 
@@ -145,7 +144,7 @@ pub struct User {
 
 #[derive(Clone, Debug)]
 pub struct State {
-	pub me: PeerId,
+	pub me: NodeId,
 	pub relationships: Vec<Relationship>,
 	pub auths: Vec<Auth>,
 	pub connections: Vec<Connection>,
@@ -153,13 +152,13 @@ pub struct State {
 	pub peers: Vec<Peer>,
 	pub users: Vec<User>,
 	pub shared_folders: Vec<FolderRule>,
-	dirty_permission_targets: HashSet<PeerId>,
+	dirty_permission_targets: HashSet<NodeId>,
 }
 
 impl Default for State {
 	fn default() -> Self {
 		Self {
-			me: PeerId::random(),
+			me: NodeId::random(),
 			relationships: Vec::new(),
 			auths: Vec::new(),
 			connections: Vec::new(),
@@ -173,7 +172,7 @@ impl Default for State {
 }
 
 impl State {
-	pub fn authenticate(&mut self, peer_id: PeerId, method: AuthMethod) {}
+	pub fn authenticate(&mut self, peer_id: NodeId, method: AuthMethod) {}
 
 	pub fn add_shared_folder(&mut self, rule: FolderRule) {
 		self.shared_folders
@@ -181,7 +180,7 @@ impl State {
 		self.shared_folders.push(rule);
 	}
 
-	pub fn permissions_for_peer(&self, peer_id: &PeerId) -> Vec<Permission> {
+	pub fn permissions_for_peer(&self, peer_id: &NodeId) -> Vec<Permission> {
 		let mut permissions: Vec<Permission> = self
 			.shared_folders
 			.iter()
@@ -198,7 +197,7 @@ impl State {
 		permissions
 	}
 
-	pub fn permissions_granted_to_peer(&self, peer_id: &PeerId) -> Vec<Permission> {
+	pub fn permissions_granted_to_peer(&self, peer_id: &NodeId) -> Vec<Permission> {
 		self.relationships
 			.iter()
 			.filter(|relationship| relationship.src == self.me && relationship.target == *peer_id)
@@ -214,7 +213,7 @@ impl State {
 			.collect()
 	}
 
-	pub fn search_roots_for_peer(&self, peer_id: &PeerId) -> Vec<PathBuf> {
+	pub fn search_roots_for_peer(&self, peer_id: &NodeId) -> Vec<PathBuf> {
 		let hard_roots = self.hard_roots_for_access(FLAG_SEARCH);
 		if *peer_id == self.me {
 			return hard_roots
@@ -244,7 +243,7 @@ impl State {
 		roots
 	}
 
-	pub fn has_fs_access(&self, src: PeerId, path: &Path, access: u8) -> bool {
+	pub fn has_fs_access(&self, src: NodeId, path: &Path, access: u8) -> bool {
 		let within_hard_root = self
 			.shared_folders
 			.iter()
@@ -276,7 +275,7 @@ impl State {
 		false
 	}
 
-	pub fn has_owner_access(&self, peer_id: PeerId) -> bool {
+	pub fn has_owner_access(&self, peer_id: NodeId) -> bool {
 		peer_id == self.me
 			|| self.relationships.iter().any(|relationship| {
 				(relationship.src == peer_id || relationship.target == peer_id)
@@ -287,9 +286,9 @@ impl State {
 			})
 	}
 
-	pub fn set_peer_permissions(&mut self, peer_id: PeerId, permissions: Vec<Permission>) {
-		let me = self.me;
-		self.dirty_permission_targets.insert(peer_id);
+	pub fn set_peer_permissions(&mut self, peer_id: NodeId, permissions: Vec<Permission>) {
+		let me = self.me.clone();
+		self.dirty_permission_targets.insert(peer_id.clone());
 		self.relationships.retain(|rel| {
 			!(rel.src == me && rel.target == peer_id) && !(rel.src == peer_id && rel.target == me)
 		});
@@ -305,10 +304,10 @@ impl State {
 
 	pub fn set_peer_permissions_from_storage(
 		&mut self,
-		peer_id: PeerId,
+		peer_id: NodeId,
 		permissions: Vec<Permission>,
 	) {
-		let me = self.me;
+		let me = self.me.clone();
 		self.relationships.retain(|rel| {
 			!(rel.src == me && rel.target == peer_id) && !(rel.src == peer_id && rel.target == me)
 		});
@@ -328,7 +327,7 @@ impl State {
 		}
 
 		let mut conn = crate::db::open_db();
-		let me = self.me;
+		let me = self.me.clone();
 
 		for peer_id in self.dirty_permission_targets.drain() {
 			let permissions = self
@@ -344,21 +343,21 @@ impl State {
 		Ok(())
 	}
 
-	pub fn peer_discovered(&mut self, peer_id: PeerId, multiaddr: Multiaddr) {
+	pub fn peer_discovered(&mut self, peer_id: NodeId, endpoint: String) {
 		if self
 			.discovered_peers
 			.iter()
-			.any(|p| p.peer_id == peer_id && p.multiaddr == multiaddr)
+			.any(|p| p.peer_id == peer_id && p.endpoint == endpoint)
 		{
 			return;
 		}
 		self.discovered_peers
-			.push(DiscoveredPeer { peer_id, multiaddr });
+			.push(DiscoveredPeer { peer_id, endpoint });
 	}
 
-	pub fn peer_expired(&mut self, peer_id: PeerId, multiaddr: Multiaddr) {
+	pub fn peer_expired(&mut self, peer_id: NodeId, endpoint: String) {
 		self.discovered_peers
-			.retain(|p| !(p.peer_id == peer_id && p.multiaddr == multiaddr));
+			.retain(|p| !(p.peer_id == peer_id && p.endpoint == endpoint));
 	}
 
 	pub fn create_user(&mut self, username: String, password: String) -> anyhow::Result<()> {
@@ -388,12 +387,12 @@ mod tests {
 		state.add_shared_folder(rule("/tmp/puppynet-allowed", FLAG_READ | FLAG_SEARCH));
 
 		assert!(state.has_fs_access(
-			state.me,
+			state.me.clone(),
 			Path::new("/tmp/puppynet-allowed/file.txt"),
 			FLAG_READ | FLAG_SEARCH
 		));
 		assert!(!state.has_fs_access(
-			state.me,
+			state.me.clone(),
 			Path::new("/tmp/puppynet-denied/file.txt"),
 			FLAG_READ | FLAG_SEARCH
 		));
@@ -402,10 +401,10 @@ mod tests {
 	#[test]
 	fn remote_search_roots_require_explicit_grant_inside_hard_root() {
 		let mut state = State::default();
-		let peer = PeerId::random();
+		let peer = NodeId::random();
 		state.add_shared_folder(rule("/tmp/puppynet-allowed", FLAG_READ | FLAG_SEARCH));
 		state.set_peer_permissions(
-			peer,
+			peer.clone(),
 			vec![Permission::new(Rule::Folder(rule(
 				"/tmp/puppynet-allowed/subdir",
 				FLAG_READ | FLAG_SEARCH,
@@ -417,12 +416,12 @@ mod tests {
 			vec![PathBuf::from("/tmp/puppynet-allowed/subdir")]
 		);
 		assert!(state.has_fs_access(
-			peer,
+			peer.clone(),
 			Path::new("/tmp/puppynet-allowed/subdir/file.txt"),
 			FLAG_READ | FLAG_SEARCH
 		));
 		assert!(!state.has_fs_access(
-			peer,
+			peer.clone(),
 			Path::new("/tmp/puppynet-allowed/other/file.txt"),
 			FLAG_READ | FLAG_SEARCH
 		));
@@ -431,10 +430,10 @@ mod tests {
 	#[test]
 	fn remote_search_roots_never_escape_hard_roots() {
 		let mut state = State::default();
-		let peer = PeerId::random();
+		let peer = NodeId::random();
 		state.add_shared_folder(rule("/tmp/puppynet-allowed", FLAG_READ | FLAG_SEARCH));
 		state.set_peer_permissions(
-			peer,
+			peer.clone(),
 			vec![Permission::new(Rule::Folder(rule(
 				"/tmp/puppynet-denied",
 				FLAG_READ | FLAG_SEARCH,
@@ -452,11 +451,11 @@ mod tests {
 	#[test]
 	fn owner_access_requires_an_owner_relationship() {
 		let mut state = State::default();
-		let owner = PeerId::random();
-		let viewer = PeerId::random();
-		state.set_peer_permissions(owner, vec![Permission::new(Rule::Owner)]);
+		let owner = NodeId::random();
+		let viewer = NodeId::random();
+		state.set_peer_permissions(owner.clone(), vec![Permission::new(Rule::Owner)]);
 
-		assert!(state.has_owner_access(state.me));
+		assert!(state.has_owner_access(state.me.clone()));
 		assert!(state.has_owner_access(owner));
 		assert!(!state.has_owner_access(viewer));
 	}
