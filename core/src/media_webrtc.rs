@@ -332,7 +332,7 @@ fn video_encoder(kind: &MediaSourceKind, requested_fps: u32) -> Result<(Encoder,
 	Ok((encoder, fps))
 }
 
-async fn run_onvif_h264_passthrough(
+async fn run_onvif_h264_stream(
 	source_id: &str,
 	track: &TrackLocalStaticSample,
 	stop: &AtomicBool,
@@ -355,9 +355,23 @@ async fn run_onvif_h264_passthrough(
 			"0:v:0",
 			"-an",
 			"-c:v",
-			"copy",
-			"-bsf:v",
-			"dump_extra=freq=keyframe",
+			"libx264",
+			"-preset",
+			"ultrafast",
+			"-tune",
+			"zerolatency",
+			"-profile:v",
+			"baseline",
+			"-level:v",
+			"4.0",
+			"-pix_fmt",
+			"yuv420p",
+			"-crf",
+			"26",
+			"-g",
+			"30",
+			"-bf",
+			"0",
 			"-f",
 			"rtp",
 			"-payload_type",
@@ -369,7 +383,7 @@ async fn run_onvif_h264_passthrough(
 		.stderr(Stdio::piped())
 		.kill_on_drop(true)
 		.spawn()
-		.context("failed to start ONVIF H.264 passthrough")?;
+		.context("failed to start ONVIF H.264 stream")?;
 	let mut stderr = child
 		.stderr
 		.take()
@@ -391,21 +405,22 @@ async fn run_onvif_h264_passthrough(
 		} else {
 			Duration::from_secs(8)
 		};
-		let size = match tokio::time::timeout(wait, socket.recv(&mut buffer)).await {
-			Ok(Ok(size)) => size,
-			Ok(Err(err)) => return Err(err.into()),
-			Err(_) => {
-				if let Some(status) = child.try_wait()? {
-					let mut error = String::new();
-					stderr.read_to_string(&mut error).await?;
-					let error = error.replace(&stream_uri, "[redacted RTSP URL]");
-					bail!(
-						"ONVIF H.264 passthrough exited with {status}: {}",
-						error.trim()
-					);
-				}
-				bail!("ONVIF H.264 passthrough produced no RTP packets");
+		let size = tokio::select! {
+			status = child.wait() => {
+				let status = status?;
+				let mut error = String::new();
+				stderr.read_to_string(&mut error).await?;
+				let error = error.replace(&stream_uri, "[redacted RTSP URL]");
+				bail!(
+					"ONVIF H.264 stream exited with {status}: {}",
+					error.trim()
+				);
 			}
+			result = tokio::time::timeout(wait, socket.recv(&mut buffer)) => match result {
+				Ok(Ok(size)) => size,
+				Ok(Err(err)) => return Err(err.into()),
+				Err(_) => bail!("ONVIF H.264 stream produced no RTP packets"),
+			},
 		};
 		let mut bytes = &buffer[..size];
 		let packet = RtpPacket::unmarshal(&mut bytes)?;
@@ -423,7 +438,7 @@ async fn run_onvif_h264_passthrough(
 				invalid_packets += 1;
 				frame.clear();
 				if invalid_packets >= 32 {
-					bail!("ONVIF stream is not compatible with H.264 RTP passthrough");
+					bail!("ONVIF stream produced incompatible H.264 RTP packets");
 				}
 				continue;
 			}
@@ -462,12 +477,23 @@ async fn run_video_producer(
 	height: u32,
 ) {
 	if source_id.starts_with("onvif:") {
-		match run_onvif_h264_passthrough(&source_id, &track, &stop).await {
-			Ok(()) => return,
-			Err(err) => {
-				log::warn!("ONVIF H.264 passthrough unavailable; using transcoding fallback: {err}")
+		crate::onvif::stop_capture_worker(&source_id).await;
+		let mut attempt = 1;
+		let stream_error = loop {
+			match run_onvif_h264_stream(&source_id, &track, &stop).await {
+				Ok(()) => return,
+				Err(error) if attempt >= 3 => break error,
+				Err(error) => {
+					log::warn!("ONVIF H.264 stream attempt {attempt} failed; retrying: {error}");
+					attempt += 1;
+					tokio::time::sleep(Duration::from_secs(5)).await;
+				}
 			}
-		}
+		};
+		log::warn!(
+			"ONVIF H.264 stream unavailable after 3 attempts; using legacy fallback: {}",
+			stream_error
+		);
 	}
 	let (encoder, fps) = match video_encoder(&kind, fps) {
 		Ok(result) => result,

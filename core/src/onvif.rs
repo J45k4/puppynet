@@ -614,6 +614,20 @@ pub(crate) async fn media_stream_uri(source_id: &str) -> Result<String> {
 	stream_uri(&config).await.map(|(uri, _)| uri)
 }
 
+pub(crate) async fn stop_capture_worker(source_id: &str) {
+	let Some(id) = source_id.strip_prefix(SOURCE_PREFIX) else {
+		return;
+	};
+	let worker = camera_workers()
+		.lock()
+		.ok()
+		.and_then(|mut workers| workers.remove(id));
+	if let Some(worker) = worker {
+		worker.task.abort();
+		let _ = worker.task.await;
+	}
+}
+
 pub(crate) fn configured_cameras() -> Result<Vec<OnvifCameraConfig>> {
 	load_onvif_cameras(&open_db())
 }

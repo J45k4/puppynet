@@ -4287,6 +4287,9 @@ impl UiServer {
 							let puppy = Arc::clone(&puppy);
 							let peer = peer.clone();
 							async move {
+								if source.id.starts_with("onvif:") {
+									return Some(source);
+								}
 								tokio::time::timeout(
 									std::time::Duration::from_secs(2),
 									puppy.get_media_frame(peer, source.id.clone()),
@@ -5332,7 +5335,7 @@ fn render_media_receiver(
 ) -> Item {
 	wgui::custom_component(
 		"media-receiver",
-		"/assets/media_receiver.js?v=7",
+		"/assets/media_receiver.js?v=8",
 		serde_json::json!({
 			"auto_start": props.auto_start,
 			"endpoint": props.endpoint,

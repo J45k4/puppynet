@@ -159,12 +159,13 @@ export default class MediaReceiver {
 		this.resolutionOptions = Array.isArray(props?.resolution_options) ? props.resolution_options : [];
 		this.resolutionSelectable = Boolean(props?.resolution_selectable);
 		this.resolutionMode = String(props?.resolution_mode ?? "");
-		const changed = endpoint !== this.endpoint || sourceId !== this.sourceId || kind !== this.kind || revision !== this.revision;
+		const revisionChanged = Boolean(revision && this.revision && revision !== this.revision);
+		const changed = endpoint !== this.endpoint || sourceId !== this.sourceId || kind !== this.kind || revisionChanged;
 		this.endpoint = endpoint;
 		this.sourceId = sourceId;
 		this.kind = kind;
 		this.autoStart = autoStart;
-		this.revision = revision;
+		if (revision) this.revision = revision;
 		if (changed) {
 			this.stop("", false);
 			this.createMediaElement();
