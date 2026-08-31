@@ -1,0 +1,18 @@
+[package]
+name = "puppynet-android"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+name = "puppynet_android"
+
+[dependencies]
+bs58 = "0.5"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+jni = "0.21"
+rand = "0.8"
+snow = "0.9"
+
+[workspace]

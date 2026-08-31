@@ -1,0 +1,8 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+	<style name="Theme.PuppyNet" parent="android:style/Theme.Material.Light.NoActionBar">
+		<item name="android:fontFamily">sans</item>
+		<item name="android:colorAccent">#2E5D8A</item>
+		<item name="android:navigationBarColor">#F7F8FA</item>
+		<item name="android:windowLightStatusBar">true</item>
+	</style>
+</resources>

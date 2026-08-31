@@ -1,4 +1,9 @@
 /target
+/.puppynet-dev
+/android/.gradle
+/android/app/build
+/android/app/src/main/jniLibs
+/android/native/target
 tmp
 serverdb
 workdir
