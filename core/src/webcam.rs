@@ -11,13 +11,15 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread;
-use std::time::Duration as StdDuration;
+use std::time::{Duration as StdDuration, Instant as StdInstant};
 use tokio::process::Command;
 use tokio::task;
 use tokio::time::{Duration, timeout};
 
 #[cfg(target_os = "linux")]
 use v4l::buffer::Type;
+#[cfg(target_os = "linux")]
+use v4l::control::{Control, Value};
 #[cfg(target_os = "linux")]
 use v4l::framesize::FrameSizeEnum;
 #[cfg(target_os = "linux")]
@@ -622,7 +624,10 @@ pub(crate) fn webcam_resolutions(device_id: &str) -> Vec<(u32, u32)> {
 	let Ok(device) = Device::with_path(device_id) else {
 		return Vec::new();
 	};
-	let current = device.format().ok().map(|format| (format.width, format.height));
+	let current = device
+		.format()
+		.ok()
+		.map(|format| (format.width, format.height));
 	let mut resolutions = device
 		.enum_framesizes(FourCC::new(b"MJPG"))
 		.unwrap_or_default()
@@ -638,7 +643,9 @@ pub(crate) fn webcam_resolutions(device_id: &str) -> Vec<(u32, u32)> {
 	resolutions.sort_unstable_by_key(|(width, height)| width * height);
 	resolutions.dedup();
 	if let Some(current) = current
-		&& let Some(index) = resolutions.iter().position(|resolution| *resolution == current)
+		&& let Some(index) = resolutions
+			.iter()
+			.position(|resolution| *resolution == current)
 	{
 		resolutions.swap(0, index);
 	}
@@ -691,6 +698,23 @@ struct V4l2CaptureWorker {
 }
 
 #[cfg(target_os = "linux")]
+fn disable_variable_frame_rate(device: &Device) {
+	let Some(control) = device.query_controls().ok().and_then(|controls| {
+		controls
+			.into_iter()
+			.find(|control| control.name.eq_ignore_ascii_case("Exposure, Auto Priority"))
+	}) else {
+		return;
+	};
+	if let Err(err) = device.set_control(Control {
+		id: control.id,
+		value: Value::Boolean(false),
+	}) {
+		log::debug!("failed to disable variable webcam frame rate: {err}");
+	}
+}
+
+#[cfg(target_os = "linux")]
 fn open_v4l2_mjpeg_stream(
 	device_id: &str,
 	width: u32,
@@ -712,8 +736,20 @@ fn open_v4l2_mjpeg_stream(
 			actual.fourcc
 		);
 	}
+	disable_variable_frame_rate(&device);
 	if fps > 0 {
-		device.set_params(&v4l::video::capture::Parameters::with_fps(fps))?;
+		let parameters = device.set_params(&v4l::video::capture::Parameters::with_fps(fps))?;
+		let interval = parameters.interval;
+		let actual_fps = if interval.numerator == 0 {
+			0.0
+		} else {
+			interval.denominator as f64 / interval.numerator as f64
+		};
+		log::info!(
+			"webcam {device_id} requested {fps} FPS at {}x{}; driver selected {actual_fps:.1} FPS",
+			actual.width,
+			actual.height
+		);
 	}
 	Ok((device, actual))
 }
@@ -752,14 +788,26 @@ fn run_v4l2_capture_worker(
 	};
 	let _ = capture_v4l2_stream_frame(&mut stream);
 	let _ = ready.send(Ok(()));
+	let mut last_request = StdInstant::now();
 	loop {
-		let request = match requests.recv_timeout(V4L2_CAPTURE_IDLE_TIMEOUT) {
-			Ok(request) => request,
-			Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => break,
-		};
 		let result = capture_v4l2_stream_frame(&mut stream).map_err(|err| err.to_string());
 		let should_stop = result.is_err();
-		let _ = request.tx.send(result);
+		let mut requested = false;
+		loop {
+			match requests.try_recv() {
+				Ok(request) => {
+					requested = true;
+					let _ = request.tx.send(result.clone());
+				}
+				Err(mpsc::TryRecvError::Empty) => break,
+				Err(mpsc::TryRecvError::Disconnected) => return,
+			}
+		}
+		if requested {
+			last_request = StdInstant::now();
+		} else if last_request.elapsed() >= V4L2_CAPTURE_IDLE_TIMEOUT {
+			break;
+		}
 		if should_stop {
 			break;
 		}
@@ -777,7 +825,9 @@ fn start_v4l2_capture_worker(
 	let (ready_tx, ready_rx) = mpsc::channel();
 	thread::Builder::new()
 		.name(format!("puppynet-v4l2-{}", device_id.replace('/', "_")))
-		.spawn(move || run_v4l2_capture_worker(device_id, width, height, fps, request_rx, ready_tx))?;
+		.spawn(move || {
+			run_v4l2_capture_worker(device_id, width, height, fps, request_rx, ready_tx)
+		})?;
 	match ready_rx.recv_timeout(StdDuration::from_secs(8)) {
 		Ok(Ok(())) => Ok(Arc::new(V4l2CaptureWorker { tx: request_tx })),
 		Ok(Err(err)) => bail!("{err}"),
@@ -793,15 +843,14 @@ fn v4l2_capture_worker(
 	fps: u32,
 ) -> Result<Arc<V4l2CaptureWorker>> {
 	let workers = V4L2_CAPTURE_WORKERS.get_or_init(|| Mutex::new(HashMap::new()));
-	let key = format!("{device_id}@{width}x{height}@{fps}");
 	let mut workers = workers
 		.lock()
 		.map_err(|_| anyhow!("webcam capture worker registry was poisoned"))?;
-	if let Some(worker) = workers.get(&key) {
+	if let Some(worker) = workers.get(device_id) {
 		return Ok(Arc::clone(worker));
 	}
 	let worker = start_v4l2_capture_worker(device_id.to_string(), width, height, fps)?;
-	workers.insert(key, Arc::clone(&worker));
+	workers.insert(device_id.to_string(), Arc::clone(&worker));
 	Ok(worker)
 }
 
@@ -810,7 +859,7 @@ fn remove_v4l2_capture_worker(device_id: &str) {
 	if let Some(workers) = V4L2_CAPTURE_WORKERS.get()
 		&& let Ok(mut workers) = workers.lock()
 	{
-		workers.retain(|key, _| !key.starts_with(&format!("{device_id}@")));
+		workers.remove(device_id);
 	}
 }
 

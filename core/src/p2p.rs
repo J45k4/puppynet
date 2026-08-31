@@ -459,6 +459,8 @@ pub struct OnvifProfile {
 	pub name: String,
 	pub width: u32,
 	pub height: u32,
+	#[serde(default)]
+	pub frame_rate_limit: u32,
 }
 
 impl From<&OnvifCameraConfig> for OnvifCamera {

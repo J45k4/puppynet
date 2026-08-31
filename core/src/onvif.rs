@@ -176,6 +176,7 @@ fn profile_details(xml: &str) -> Result<Vec<OnvifProfile>> {
 					name: String::new(),
 					width: 0,
 					height: 0,
+					frame_rate_limit: 0,
 				});
 			}
 			Event::Start(element) if current.is_some() => {
@@ -183,6 +184,7 @@ fn profile_details(xml: &str) -> Result<Vec<OnvifProfile>> {
 					b"Name" => Some("name"),
 					b"Width" => Some("width"),
 					b"Height" => Some("height"),
+					b"FrameRateLimit" => Some("frame_rate_limit"),
 					_ => None,
 				};
 			}
@@ -193,6 +195,9 @@ fn profile_details(xml: &str) -> Result<Vec<OnvifProfile>> {
 					"name" if profile.name.is_empty() => profile.name = value,
 					"width" if profile.width == 0 => profile.width = value.parse().unwrap_or(0),
 					"height" if profile.height == 0 => profile.height = value.parse().unwrap_or(0),
+					"frame_rate_limit" if profile.frame_rate_limit == 0 => {
+						profile.frame_rate_limit = value.parse().unwrap_or(0)
+					}
 					_ => {}
 				}
 			}
@@ -498,8 +503,6 @@ async fn decode_stream_once(config: &OnvifCameraConfig, state: &WorkerState) -> 
 			"-i",
 			&stream_uri,
 			"-an",
-			"-vf",
-			"fps=5",
 			"-f",
 			"image2pipe",
 			"-vcodec",
@@ -601,6 +604,14 @@ fn worker_state(config: OnvifCameraConfig) -> Result<Arc<WorkerState>> {
 fn configured_camera(id: &str) -> Result<OnvifCameraConfig> {
 	let conn = open_db();
 	load_onvif_camera(&conn, id)?.ok_or_else(|| anyhow!("ONVIF camera was not found"))
+}
+
+pub(crate) async fn media_stream_uri(source_id: &str) -> Result<String> {
+	let id = source_id
+		.strip_prefix(SOURCE_PREFIX)
+		.ok_or_else(|| anyhow!("invalid ONVIF source"))?;
+	let config = configured_camera(id)?;
+	stream_uri(&config).await.map(|(uri, _)| uri)
 }
 
 pub(crate) fn configured_cameras() -> Result<Vec<OnvifCameraConfig>> {
@@ -764,13 +775,15 @@ mod tests {
 
 	#[test]
 	fn reads_onvif_profile_resolutions() {
-		let xml = r#"<trt:GetProfilesResponse xmlns:trt="media" xmlns:tt="schema"><trt:Profiles token="main"><tt:Name>Main stream</tt:Name><tt:VideoEncoderConfiguration><tt:Resolution><tt:Width>1920</tt:Width><tt:Height>1080</tt:Height></tt:Resolution></tt:VideoEncoderConfiguration></trt:Profiles><trt:Profiles token="sub"><tt:Name>Sub stream</tt:Name><tt:VideoEncoderConfiguration><tt:Resolution><tt:Width>640</tt:Width><tt:Height>360</tt:Height></tt:Resolution></tt:VideoEncoderConfiguration></trt:Profiles></trt:GetProfilesResponse>"#;
+		let xml = r#"<trt:GetProfilesResponse xmlns:trt="media" xmlns:tt="schema"><trt:Profiles token="main"><tt:Name>Main stream</tt:Name><tt:VideoEncoderConfiguration><tt:Resolution><tt:Width>1920</tt:Width><tt:Height>1080</tt:Height></tt:Resolution><tt:RateControl><tt:FrameRateLimit>15</tt:FrameRateLimit></tt:RateControl></tt:VideoEncoderConfiguration></trt:Profiles><trt:Profiles token="sub"><tt:Name>Sub stream</tt:Name><tt:VideoEncoderConfiguration><tt:Resolution><tt:Width>640</tt:Width><tt:Height>360</tt:Height></tt:Resolution></tt:VideoEncoderConfiguration></trt:Profiles></trt:GetProfilesResponse>"#;
 		let profiles = profile_details(xml).unwrap();
 		assert_eq!(profiles.len(), 2);
 		assert_eq!(profiles[0].token, "main");
 		assert_eq!(profiles[0].name, "Main stream");
 		assert_eq!((profiles[0].width, profiles[0].height), (1920, 1080));
+		assert_eq!(profiles[0].frame_rate_limit, 15);
 		assert_eq!((profiles[1].width, profiles[1].height), (640, 360));
+		assert_eq!(profiles[1].frame_rate_limit, 0);
 	}
 
 	#[test]

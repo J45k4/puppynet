@@ -119,13 +119,13 @@ export default class MediaReceiver {
 		this.kind = "video";
 		this.autoStart = false;
 		this.revision = "";
-		this.fps = 15;
+		this.fps = 30;
 		this.resolution = "";
 		this.resolutionMode = "";
 		this.peerConnection = null;
 		this.sessionId = "";
 		this.starting = false;
-		this.videoFrameCallback = 0;
+		this.videoStatsTimer = 0;
 	}
 
 	mount(props) {
@@ -211,6 +211,13 @@ export default class MediaReceiver {
 			this.resolutionSelect.value = String(options[0].value ?? "");
 		}
 		if (this.resolutionMode === "capture") this.resolution = this.resolutionSelect.value;
+		if (this.resolutionMode === "profile" && this.fpsSelect) {
+			const match = this.resolutionSelect.selectedOptions[0]?.textContent.match(/@ (\d+) FPS/);
+			if (match) {
+				this.fps = Number(match[1]);
+				this.fpsSelect.value = match[1];
+			}
+		}
 	}
 
 	createMediaElement() {
@@ -454,34 +461,41 @@ export default class MediaReceiver {
 
 	startVideoStats() {
 		this.stopVideoStats();
-		if (this.kind !== "video" || !this.media?.requestVideoFrameCallback) {
+		if (this.kind !== "video" || !this.peerConnection) {
 			return;
 		}
-		let frames = 0;
-		let startedAt = performance.now();
-		const update = now => {
-			frames += 1;
+		let previousFrames;
+		let previousTimestamp;
+		const update = async () => {
 			if (!this.resolutionSelect && this.resolutionStat && this.media.videoWidth && this.media.videoHeight) {
 				this.resolutionStat.textContent = `Resolution: ${this.media.videoWidth} × ${this.media.videoHeight}`;
 			}
-			const elapsed = now - startedAt;
-			if (elapsed >= 1000) {
-				if (this.fpsActual) {
-					this.fpsActual.textContent = `actual ${(frames * 1000 / elapsed).toFixed(1)}`;
-				}
-				frames = 0;
-				startedAt = now;
+			const reports = await this.peerConnection?.getStats().catch(() => null);
+			if (!reports) {
+				return;
 			}
-			this.videoFrameCallback = this.media.requestVideoFrameCallback(update);
+			for (const report of reports.values()) {
+				if (report.type !== "inbound-rtp" || report.kind !== "video") {
+					continue;
+				}
+				if (previousFrames !== undefined && report.timestamp > previousTimestamp && this.fpsActual) {
+					const fps = (report.framesDecoded - previousFrames) * 1000 / (report.timestamp - previousTimestamp);
+					this.fpsActual.textContent = `actual ${fps.toFixed(1)}`;
+				}
+				previousFrames = report.framesDecoded;
+				previousTimestamp = report.timestamp;
+				break;
+			}
 		};
-		this.videoFrameCallback = this.media.requestVideoFrameCallback(update);
+		update();
+		this.videoStatsTimer = setInterval(update, 1000);
 	}
 
 	stopVideoStats() {
-		if (this.videoFrameCallback && this.media?.cancelVideoFrameCallback) {
-			this.media.cancelVideoFrameCallback(this.videoFrameCallback);
+		if (this.videoStatsTimer) {
+			clearInterval(this.videoStatsTimer);
 		}
-		this.videoFrameCallback = 0;
+		this.videoStatsTimer = 0;
 		if (!this.resolutionSelect && this.resolutionStat) {
 			this.resolutionStat.textContent = "Resolution: --";
 		}

@@ -2123,11 +2123,14 @@ impl UiClientActions<'_> {
 					.profiles
 					.into_iter()
 					.map(|profile| {
-						let resolution = if profile.width > 0 && profile.height > 0 {
+						let mut resolution = if profile.width > 0 && profile.height > 0 {
 							format!("{}x{}", profile.width, profile.height)
 						} else {
 							String::from("unknown resolution")
 						};
+						if profile.frame_rate_limit > 0 {
+							resolution.push_str(&format!(" @ {} FPS", profile.frame_rate_limit));
+						}
 						let name = if profile.name.is_empty() {
 							format!("{resolution} ({})", profile.token)
 						} else {
@@ -2260,9 +2263,19 @@ impl UiClientActions<'_> {
 				let options = result
 					.profiles
 					.into_iter()
-					.map(|profile| UiSelectOption {
-						value: profile.token,
-						name: format!("{}x{} — {}", profile.width, profile.height, profile.name),
+					.map(|profile| {
+						let fps = if profile.frame_rate_limit > 0 {
+							format!(" @ {} FPS", profile.frame_rate_limit)
+						} else {
+							String::new()
+						};
+						UiSelectOption {
+							value: profile.token,
+							name: format!(
+								"{}x{}{} — {}",
+								profile.width, profile.height, fps, profile.name
+							),
+						}
 					})
 					.collect::<Vec<_>>();
 				session.eye_profile_options = options.clone();
@@ -5319,7 +5332,7 @@ fn render_media_receiver(
 ) -> Item {
 	wgui::custom_component(
 		"media-receiver",
-		"/assets/media_receiver.js?v=4",
+		"/assets/media_receiver.js?v=7",
 		serde_json::json!({
 			"auto_start": props.auto_start,
 			"endpoint": props.endpoint,

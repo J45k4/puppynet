@@ -4,7 +4,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 use openh264::encoder::{
-	BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, Profile, UsageType,
+	BitRate, Complexity, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, Profile, UsageType,
 };
 use openh264::formats::{RgbSliceU8, YUVBuffer};
 use opus2::{Application, Bitrate, Channels};
@@ -12,9 +12,13 @@ use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Async, FixedAsync, PolynomialDegree, Resampler};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc as std_mpsc};
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
+use tokio::net::UdpSocket;
+use tokio::process::Command;
 use tokio::sync::{Mutex, oneshot};
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
@@ -27,9 +31,13 @@ use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+use webrtc::rtp::codecs::h264::H264Packet;
+use webrtc::rtp::packet::Packet as RtpPacket;
+use webrtc::rtp::packetizer::Depacketizer;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::track::track_local::TrackLocal;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
+use webrtc::util::Unmarshal;
 
 const AUDIO_BITRATE: i32 = 32_000;
 const AUDIO_CHANNELS: usize = 1;
@@ -41,7 +49,7 @@ const MAX_SDP_BYTES: usize = 1024 * 1024;
 const SCREEN_BITRATE: u32 = 1_000_000;
 const SCREEN_FPS: u32 = 5;
 const VIDEO_BITRATE: u32 = 1_200_000;
-const VIDEO_FPS: u32 = 15;
+const VIDEO_FPS: u32 = 30;
 const VIDEO_FPS_MAX: u32 = 30;
 const VIDEO_FPS_MIN: u32 = 5;
 const VIDEO_MAX_HEIGHT: u32 = 1080;
@@ -288,9 +296,13 @@ fn encode_video_frame(
 ) -> Result<Vec<u8>> {
 	let image = image::load_from_memory(data)?;
 	let (width, height) = scaled_dimensions(image.width(), image.height());
-	let image = image
-		.resize_exact(width, height, image::imageops::FilterType::Triangle)
-		.to_rgb8();
+	let image = if image.width() == width && image.height() == height {
+		image.to_rgb8()
+	} else {
+		image
+			.resize_exact(width, height, image::imageops::FilterType::Triangle)
+			.to_rgb8()
+	};
 	let rgb = RgbSliceU8::new(image.as_raw(), (width as usize, height as usize));
 	let yuv = YUVBuffer::from_rgb8_source(rgb);
 	if force_keyframe.swap(false, Ordering::Relaxed) {
@@ -314,9 +326,128 @@ fn video_encoder(kind: &MediaSourceKind, requested_fps: u32) -> Result<(Encoder,
 		.max_frame_rate(FrameRate::from_hz(fps as f32))
 		.intra_frame_period(IntraFramePeriod::from_num_frames(fps * 2))
 		.profile(Profile::Baseline)
+		.complexity(Complexity::Low)
 		.usage_type(usage);
 	let encoder = Encoder::with_api_config(openh264::OpenH264API::from_source(), config)?;
 	Ok((encoder, fps))
+}
+
+async fn run_onvif_h264_passthrough(
+	source_id: &str,
+	track: &TrackLocalStaticSample,
+	stop: &AtomicBool,
+) -> Result<()> {
+	let stream_uri = crate::onvif::media_stream_uri(source_id).await?;
+	let socket = UdpSocket::bind("127.0.0.1:0").await?;
+	let destination = format!("rtp://{}?pkt_size=1200", socket.local_addr()?);
+	let mut child = Command::new("ffmpeg")
+		.args([
+			"-hide_banner",
+			"-loglevel",
+			"error",
+			"-rtsp_transport",
+			"tcp",
+			"-timeout",
+			"5000000",
+			"-i",
+			&stream_uri,
+			"-map",
+			"0:v:0",
+			"-an",
+			"-c:v",
+			"copy",
+			"-bsf:v",
+			"dump_extra=freq=keyframe",
+			"-f",
+			"rtp",
+			"-payload_type",
+			"96",
+			&destination,
+		])
+		.stdin(Stdio::null())
+		.stdout(Stdio::null())
+		.stderr(Stdio::piped())
+		.kill_on_drop(true)
+		.spawn()
+		.context("failed to start ONVIF H.264 passthrough")?;
+	let mut stderr = child
+		.stderr
+		.take()
+		.ok_or_else(|| anyhow!("ffmpeg did not expose its error output"))?;
+	let mut buffer = [0u8; 2048];
+	let mut depacketizer = H264Packet::default();
+	let mut frame = Vec::new();
+	let mut frame_timestamp = None;
+	let mut previous_timestamp = None;
+	let mut invalid_packets = 0u32;
+	let mut received_frame = false;
+	loop {
+		if stop.load(Ordering::Relaxed) {
+			let _ = child.kill().await;
+			return Ok(());
+		}
+		let wait = if received_frame {
+			Duration::from_secs(3)
+		} else {
+			Duration::from_secs(8)
+		};
+		let size = match tokio::time::timeout(wait, socket.recv(&mut buffer)).await {
+			Ok(Ok(size)) => size,
+			Ok(Err(err)) => return Err(err.into()),
+			Err(_) => {
+				if let Some(status) = child.try_wait()? {
+					let mut error = String::new();
+					stderr.read_to_string(&mut error).await?;
+					let error = error.replace(&stream_uri, "[redacted RTSP URL]");
+					bail!(
+						"ONVIF H.264 passthrough exited with {status}: {}",
+						error.trim()
+					);
+				}
+				bail!("ONVIF H.264 passthrough produced no RTP packets");
+			}
+		};
+		let mut bytes = &buffer[..size];
+		let packet = RtpPacket::unmarshal(&mut bytes)?;
+		if frame_timestamp != Some(packet.header.timestamp) {
+			frame.clear();
+			depacketizer = H264Packet::default();
+			frame_timestamp = Some(packet.header.timestamp);
+		}
+		match depacketizer.depacketize(&packet.payload) {
+			Ok(payload) => {
+				invalid_packets = 0;
+				frame.extend_from_slice(&payload);
+			}
+			Err(_) => {
+				invalid_packets += 1;
+				frame.clear();
+				if invalid_packets >= 32 {
+					bail!("ONVIF stream is not compatible with H.264 RTP passthrough");
+				}
+				continue;
+			}
+		}
+		if !packet.header.marker || frame.is_empty() {
+			continue;
+		}
+		let timestamp = packet.header.timestamp;
+		let duration = previous_timestamp
+			.map(|previous: u32| {
+				Duration::from_secs_f64(timestamp.wrapping_sub(previous) as f64 / 90_000.0)
+			})
+			.filter(|duration| !duration.is_zero() && *duration <= Duration::from_secs(1))
+			.unwrap_or_else(|| Duration::from_secs_f64(1.0 / 30.0));
+		track
+			.write_sample(&MediaSample {
+				data: std::mem::take(&mut frame).into(),
+				duration,
+				..Default::default()
+			})
+			.await?;
+		previous_timestamp = Some(timestamp);
+		received_frame = true;
+	}
 }
 
 async fn run_video_producer(
@@ -330,6 +461,14 @@ async fn run_video_producer(
 	width: u32,
 	height: u32,
 ) {
+	if source_id.starts_with("onvif:") {
+		match run_onvif_h264_passthrough(&source_id, &track, &stop).await {
+			Ok(()) => return,
+			Err(err) => {
+				log::warn!("ONVIF H.264 passthrough unavailable; using transcoding fallback: {err}")
+			}
+		}
+	}
 	let (encoder, fps) = match video_encoder(&kind, fps) {
 		Ok(result) => result,
 		Err(error) => {
@@ -339,10 +478,39 @@ async fn run_video_producer(
 	};
 	let encoder = Arc::new(std::sync::Mutex::new(encoder));
 	let frame_duration = Duration::from_secs_f64(1.0 / fps as f64);
+	let mut previous_frame = Vec::new();
+	let mut next_webcam_frame = if kind == MediaSourceKind::Webcam {
+		let source_id = source_id.clone();
+		Some(tokio::spawn(async move {
+			webcam::capture_media_frame_configured(source_id, width, height, fps).await
+		}))
+	} else {
+		None
+	};
 	while !stop.load(Ordering::Relaxed) {
 		let started = tokio::time::Instant::now();
-		match webcam::capture_media_frame_configured(source_id.clone(), width, height, fps).await {
+		let frame = if let Some(capture) = next_webcam_frame.take() {
+			let result = capture
+				.await
+				.map_err(|err| anyhow!("webcam capture task failed: {err}"))
+				.and_then(|result| result);
+			let source_id = source_id.clone();
+			next_webcam_frame = Some(tokio::spawn(async move {
+				webcam::capture_media_frame_configured(source_id, width, height, fps).await
+			}));
+			result
+		} else {
+			webcam::capture_media_frame_configured(source_id.clone(), width, height, fps).await
+		};
+		match frame {
 			Ok(frame) => {
+				if frame.data == previous_frame {
+					if let Some(delay) = frame_duration.checked_sub(started.elapsed()) {
+						tokio::time::sleep(delay).await;
+					}
+					continue;
+				}
+				previous_frame.clone_from(&frame.data);
 				let encoder = Arc::clone(&encoder);
 				let force_keyframe = Arc::clone(&force_keyframe);
 				let encoded = tokio::task::spawn_blocking(move || {
@@ -641,20 +809,14 @@ impl MediaSessionManager {
 			.clamp(VIDEO_FPS_MIN, VIDEO_FPS_MAX);
 		let width = request.width.unwrap_or_default();
 		let height = request.height.unwrap_or_default();
-		let producer_key = if kind == MediaSourceKind::Webcam {
-			format!("{}@{width}x{height}@{fps}", request.source_id)
-		} else {
-			request.source_id.clone()
-		};
-		let (track, force_keyframe, last_rtcp) =
-			self.acquire_producer(
-				&producer_key,
-				&request.source_id,
-				&kind,
-				fps,
-				width,
-				height,
-			)
+		let producer_key =
+			if kind == MediaSourceKind::Webcam && !request.source_id.starts_with("onvif:") {
+				format!("{}@{width}x{height}@{fps}", request.source_id)
+			} else {
+				request.source_id.clone()
+			};
+		let (track, force_keyframe, last_rtcp) = self
+			.acquire_producer(&producer_key, &request.source_id, &kind, fps, width, height)
 			.await?;
 		let negotiated = self
 			.negotiate(track, force_keyframe, last_rtcp, &kind, &request.offer)
