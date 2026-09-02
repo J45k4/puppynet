@@ -14,6 +14,7 @@ fn daemon_config(args: &args::Args) -> puppynet_daemon::Config {
 		read: args.read.clone(),
 		write: args.write.clone(),
 		ui_bind: args.ui_bind.clone(),
+		local_no_auth: args.local_no_auth,
 		http: args.http.clone(),
 	}
 }

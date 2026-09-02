@@ -6,13 +6,13 @@ const css = `
 	font: 13px system-ui, sans-serif;
 	color: #d6eee9;
 }
-.media-receiver-controls {
+.media-receiver-controls, .media-receiver-stats {
 	display: flex;
 	flex-wrap: wrap;
 	gap: 8px;
 	align-items: center;
 }
-.media-receiver button {
+.media-receiver button, .media-receiver select {
 	min-height: 34px;
 	border: 1px solid #2d6258;
 	background: #020807;
@@ -32,83 +32,50 @@ const css = `
 	background: #020807;
 	overflow: hidden;
 }
-.media-receiver video {
+.media-receiver-video video, .media-receiver-video img {
 	display: block;
 	width: 100%;
 	height: 100%;
 	object-fit: contain;
-}
-.media-receiver-audio {
-	display: none;
-}
-.media-receiver-volume {
-	display: flex;
-	gap: 6px;
-	align-items: center;
-}
-.media-receiver-volume input {
-	width: 150px;
-}
-.media-receiver-level {
-	display: flex;
-	gap: 6px;
-	align-items: center;
-	width: 100%;
-}
-.media-receiver-level-label {
-	min-width: 44px;
-	text-align: right;
-	color: #9fbdb6;
-}
-.media-receiver-level-track {
-	flex: 1;
-	height: 10px;
-	border: 1px solid #2d6258;
-	background: #020807;
-	overflow: hidden;
-}
-.media-receiver-level-fill {
-	height: 100%;
-	width: 0%;
-	background: linear-gradient(90deg, #79f2c0, #f2f079, #ff8f8f);
-}
-.media-receiver-status {
-	min-height: 18px;
-	color: #9fbdb6;
-}
-.media-receiver-stats {
-	display: flex;
-	flex-wrap: wrap;
-	align-items: center;
-	gap: 12px;
-	color: #9fbdb6;
 }
 .media-receiver-resolution {
 	display: flex;
 	align-items: center;
 	gap: 6px;
 }
-.media-receiver-resolution select {
-	border: 1px solid #2d6258;
-	background: #020807;
-	color: #d6eee9;
-	font: inherit;
-}
 .media-receiver-fps {
-	display: flex;
-	align-items: center;
-	gap: 6px;
+	color: #9fbdb6;
 }
-.media-receiver-fps select {
-	border: 1px solid #2d6258;
-	background: #020807;
-	color: #d6eee9;
-	font: inherit;
+.media-receiver-status {
+	min-height: 18px;
+	color: #9fbdb6;
 }
 .media-receiver-error {
 	color: #ff8f8f;
 }
 `;
+
+function joinBytes(parts) {
+	const length = parts.reduce((total, part) => total + part.length, 0);
+	const joined = new Uint8Array(length);
+	let offset = 0;
+	for (const part of parts) {
+		joined.set(part, offset);
+		offset += part.length;
+	}
+	return joined;
+}
+
+function h264Codec(init) {
+	for (let index = 0; index + 8 <= init.length; index++) {
+		if (String.fromCharCode(...init.subarray(index, index + 4)) !== "avcC") continue;
+		const profile = init[index + 5]?.toString(16).padStart(2, "0");
+		const compatibility = init[index + 6]?.toString(16).padStart(2, "0");
+		const level = init[index + 7]?.toString(16).padStart(2, "0");
+		if (profile && compatibility && level) return `avc1.${profile}${compatibility}${level}`;
+	}
+	throw new Error("ONVIF stream did not provide H.264 codec settings");
+}
 
 export default class MediaReceiver {
 	constructor(element, context) {
@@ -117,15 +84,12 @@ export default class MediaReceiver {
 		this.endpoint = "";
 		this.sourceId = "";
 		this.kind = "video";
+		this.transport = "";
 		this.autoStart = false;
 		this.revision = "";
-		this.fps = 30;
-		this.resolution = "";
-		this.resolutionMode = "";
-		this.peerConnection = null;
-		this.sessionId = "";
+		this.running = false;
 		this.starting = false;
-		this.videoStatsTimer = 0;
+		this.videoFrameCallback = 0;
 	}
 
 	mount(props) {
@@ -139,10 +103,10 @@ export default class MediaReceiver {
 		this.startButton = this.button("Start");
 		this.stopButton = this.button("Stop");
 		this.controls.append(this.startButton, this.stopButton);
-		this.status = document.createElement("div");
-		this.status.className = "media-receiver-status";
 		this.stats = document.createElement("div");
 		this.stats.className = "media-receiver-stats";
+		this.status = document.createElement("div");
+		this.status.className = "media-receiver-status";
 		this.root.append(this.controls, this.stats, this.status);
 		this.element.append(this.style, this.root);
 		this.startButton.addEventListener("click", () => this.start());
@@ -154,17 +118,17 @@ export default class MediaReceiver {
 		const endpoint = String(props?.endpoint ?? "");
 		const sourceId = String(props?.source_id ?? "");
 		const kind = props?.media_kind === "audio" ? "audio" : "video";
-		const autoStart = Boolean(props?.auto_start);
+		const transport = String(props?.transport ?? "");
 		const revision = String(props?.revision ?? "");
+		this.autoStart = Boolean(props?.auto_start);
 		this.resolutionOptions = Array.isArray(props?.resolution_options) ? props.resolution_options : [];
 		this.resolutionSelectable = Boolean(props?.resolution_selectable);
-		this.resolutionMode = String(props?.resolution_mode ?? "");
-		const revisionChanged = Boolean(revision && this.revision && revision !== this.revision);
-		const changed = endpoint !== this.endpoint || sourceId !== this.sourceId || kind !== this.kind || revisionChanged;
+		const changed = endpoint !== this.endpoint || sourceId !== this.sourceId || kind !== this.kind
+			|| transport !== this.transport || Boolean(revision && this.revision && revision !== this.revision);
 		this.endpoint = endpoint;
 		this.sourceId = sourceId;
 		this.kind = kind;
-		this.autoStart = autoStart;
+		this.transport = transport;
 		if (revision) this.revision = revision;
 		if (changed) {
 			this.stop("", false);
@@ -174,11 +138,9 @@ export default class MediaReceiver {
 		this.setButtons();
 		if (!this.endpoint || !this.sourceId) {
 			this.setStatus("Media stream is not available.", false);
-		} else if (!this.peerConnection && !this.starting) {
+		} else if (!this.running && !this.starting) {
 			this.setStatus("Media stream is ready.", false);
-			if (this.autoStart) {
-				queueMicrotask(() => this.start());
-			}
+			if (this.autoStart) queueMicrotask(() => this.start());
 		}
 	}
 
@@ -193,10 +155,88 @@ export default class MediaReceiver {
 		return button;
 	}
 
-	updateResolutionSelect() {
-		if (!this.resolutionSelect) {
+	createMediaElement() {
+		this.media?.remove();
+		this.frame?.remove();
+		this.fullscreenButton?.remove();
+		this.volumeControls?.remove();
+		this.muteButton?.remove();
+		this.media = null;
+		this.frame = null;
+		this.fullscreenButton = null;
+		this.volumeControls = null;
+		this.muteButton = null;
+		this.configuredFps = "";
+		this.stopVideoStats();
+		this.stats.replaceChildren();
+		if (this.kind === "audio") {
+			this.createAudioControls();
 			return;
 		}
+		this.media = document.createElement(this.transport === "mjpeg" ? "img" : "video");
+		if (this.media instanceof HTMLVideoElement) {
+			this.media.autoplay = true;
+			this.media.playsInline = true;
+			this.media.muted = true;
+			this.media.addEventListener("playing", () => {
+				this.setStatus("Media stream playing.", false);
+				this.startVideoStats();
+			});
+		} else {
+			this.media.alt = "Live media stream";
+			this.media.addEventListener("load", () => this.recordMjpegFrame());
+			this.media.addEventListener("error", () => this.stop("Media stream failed.", true));
+		}
+		this.frame = document.createElement("div");
+		this.frame.className = "media-receiver-video";
+		this.frame.append(this.media);
+		this.root.insertBefore(this.frame, this.status);
+		this.fullscreenButton = this.button("Fullscreen");
+		this.fullscreenButton.addEventListener("click", () => this.frame.requestFullscreen?.());
+		this.controls.append(this.fullscreenButton);
+		if (this.resolutionSelectable) {
+			this.resolutionStat = document.createElement("label");
+			this.resolutionStat.className = "media-receiver-resolution";
+			this.resolutionStat.textContent = "Resolution:";
+			this.resolutionSelect = document.createElement("select");
+			this.resolutionSelect.addEventListener("change", () => {
+				this.context?.emit("resolutionChange", this.resolutionSelect.value);
+			});
+			this.resolutionStat.append(this.resolutionSelect);
+			this.stats.append(this.resolutionStat);
+		} else {
+			this.resolutionStat = document.createElement("span");
+			this.resolutionStat.textContent = "Resolution: --";
+			this.resolutionSelect = null;
+			this.stats.append(this.resolutionStat);
+		}
+		this.fpsStat = document.createElement("span");
+		this.fpsStat.className = "media-receiver-fps";
+		this.fpsStat.textContent = "FPS: --";
+		this.stats.append(this.fpsStat);
+	}
+
+	createAudioControls() {
+		this.volumeControls = document.createElement("label");
+		this.volumeControls.textContent = "Volume";
+		this.volume = document.createElement("input");
+		this.volume.type = "range";
+		this.volume.min = "0";
+		this.volume.max = "100";
+		this.volume.value = "100";
+		this.volume.addEventListener("input", () => this.setAudioVolume());
+		this.volumeControls.append(this.volume);
+		this.muteButton = this.button("Mute");
+		this.muteButton.addEventListener("click", () => {
+			this.muted = !this.muted;
+			this.muteButton.textContent = this.muted ? "Unmute" : "Mute";
+			this.setAudioVolume();
+		});
+		this.controls.append(this.volumeControls, this.muteButton);
+	}
+
+	updateResolutionSelect() {
+		if (!this.resolutionSelect) return;
 		const options = this.resolutionOptions.length > 0
 			? this.resolutionOptions
 			: [{ value: this.revision, name: "Loading resolutions..." }];
@@ -206,383 +246,371 @@ export default class MediaReceiver {
 			element.textContent = String(option.name ?? option.value ?? "");
 			return element;
 		}));
-		const selected = this.resolutionMode === "profile" ? this.revision : this.resolution;
-		if (selected) this.resolutionSelect.value = selected;
-		if (!this.resolutionSelect.value && options.length > 0) {
-			this.resolutionSelect.value = String(options[0].value ?? "");
-		}
-		if (this.resolutionMode === "capture") this.resolution = this.resolutionSelect.value;
-		if (this.resolutionMode === "profile" && this.fpsSelect) {
-			const match = this.resolutionSelect.selectedOptions[0]?.textContent.match(/@ (\d+) FPS/);
-			if (match) {
-				this.fps = Number(match[1]);
-				this.fpsSelect.value = match[1];
-			}
-		}
+		if (this.revision) this.resolutionSelect.value = this.revision;
+		this.updateConfiguredFps();
 	}
 
-	createMediaElement() {
-		if (this.media?.isConnected) {
-			this.media.remove();
-		}
-		if (this.fullscreenButton) {
-			this.fullscreenButton.remove();
-			this.fullscreenButton = null;
-		}
-		if (this.muteButton) {
-			this.muteButton.remove();
-			this.muteButton = null;
-		}
-		if (this.frame) {
-			this.frame.remove();
-		}
-		if (this.volumeControls) {
-			this.volumeControls.remove();
-			this.volumeControls = null;
-		}
-		if (this.levelMeter) {
-			this.levelMeter.remove();
-			this.levelMeter = null;
-			this.levelFill = null;
-			this.levelLabel = null;
-		}
-		this.stopLevelMeter();
-		this.stopVideoStats();
-		this.media = document.createElement(this.kind);
-		this.media.autoplay = true;
-		this.media.playsInline = true;
-		this.media.addEventListener("playing", () => {
-			this.setStatus("Media stream playing.", false);
-			this.startVideoStats();
-		});
-		if (this.kind === "video") {
-			this.media.muted = true;
-			this.frame = document.createElement("div");
-			this.frame.className = "media-receiver-video";
-			this.frame.append(this.media);
-			this.root.insertBefore(this.frame, this.status);
-			this.fullscreenButton = this.button("Fullscreen");
-			this.fullscreenButton.addEventListener("click", () => this.frame.requestFullscreen?.());
-			this.controls.append(this.fullscreenButton);
-			if (this.resolutionSelectable) {
-				this.resolutionStat = document.createElement("label");
-				this.resolutionStat.className = "media-receiver-resolution";
-				this.resolutionStat.textContent = "Resolution:";
-				this.resolutionSelect = document.createElement("select");
-				this.resolutionSelect.addEventListener("change", () => {
-					if (this.resolutionMode === "profile") {
-						this.context?.emit("resolutionChange", this.resolutionSelect.value);
-						return;
-					}
-					this.resolution = this.resolutionSelect.value;
-					const restart = Boolean(this.peerConnection || this.starting);
-					this.stop("", false);
-					if (restart) setTimeout(() => this.start(), 2500);
-				});
-				this.resolutionStat.append(this.resolutionSelect);
-			} else {
-				this.resolutionStat = document.createElement("span");
-				this.resolutionStat.textContent = "Resolution: --";
-				this.resolutionSelect = null;
-			}
-			this.fpsStat = document.createElement("span");
-			this.fpsStat.className = "media-receiver-fps";
-			this.fpsStat.textContent = "FPS:";
-			this.fpsSelect = document.createElement("select");
-			for (const fps of [5, 10, 15, 30]) {
-				const option = document.createElement("option");
-				option.value = String(fps);
-				option.textContent = String(fps);
-				this.fpsSelect.append(option);
-			}
-			this.fpsSelect.value = String(this.fps);
-			this.fpsSelect.addEventListener("change", () => {
-				this.fps = Number(this.fpsSelect.value);
-				const restart = Boolean(this.peerConnection || this.starting);
-				this.stop("", false);
-				if (restart) setTimeout(() => this.start(), 2500);
-			});
-			this.fpsActual = document.createElement("span");
-			this.fpsActual.textContent = "actual --";
-			this.fpsStat.append(this.fpsSelect, this.fpsActual);
-			this.stats.replaceChildren(this.resolutionStat, this.fpsStat);
-			this.updateResolutionSelect();
-		} else {
-			this.stats.replaceChildren();
-			this.frame = null;
-			this.media.className = "media-receiver-audio";
-			this.root.insertBefore(this.media, this.status);
-			this.levelMeter = document.createElement("div");
-			this.levelMeter.className = "media-receiver-level";
-			this.levelLabel = document.createElement("span");
-			this.levelLabel.className = "media-receiver-level-label";
-			this.levelLabel.textContent = "0%";
-			this.levelTrack = document.createElement("div");
-			this.levelTrack.className = "media-receiver-level-track";
-			this.levelFill = document.createElement("div");
-			this.levelFill.className = "media-receiver-level-fill";
-			this.levelTrack.append(this.levelFill);
-			this.levelMeter.append(this.levelLabel, this.levelTrack);
-			this.root.insertBefore(this.levelMeter, this.status);
-			this.volumeControls = document.createElement("label");
-			this.volumeControls.className = "media-receiver-volume";
-			this.volumeControls.textContent = "Volume";
-			this.volume = document.createElement("input");
-			this.volume.type = "range";
-			this.volume.min = "0";
-			this.volume.max = "100";
-			this.volume.value = "100";
-			this.volume.addEventListener("input", () => {
-				this.media.volume = Number(this.volume.value) / 100;
-			});
-			this.muteButton = this.button("Mute");
-			this.muteButton.addEventListener("click", () => {
-				this.media.muted = !this.media.muted;
-				this.muteButton.textContent = this.media.muted ? "Unmute" : "Mute";
-			});
-			this.volumeControls.append(this.volume);
-			this.controls.append(this.volumeControls, this.muteButton);
-		}
+	updateConfiguredFps() {
+		if (!this.fpsStat || !this.resolutionSelect) return;
+		const match = this.resolutionSelect.selectedOptions[0]?.textContent.match(/@ (\d+) FPS/);
+		this.configuredFps = match?.[1] ?? "";
+		this.setFpsText();
 	}
 
-	async waitForIceGathering(peerConnection) {
-		if (peerConnection.iceGatheringState === "complete") {
-			return;
-		}
-		await new Promise((resolve, reject) => {
-			const timeout = setTimeout(() => {
-				peerConnection.removeEventListener("icegatheringstatechange", checkState);
-				reject(new Error("timed out gathering WebRTC candidates"));
-			}, 10000);
-			const checkState = () => {
-				if (peerConnection.iceGatheringState === "complete") {
-					clearTimeout(timeout);
-					peerConnection.removeEventListener("icegatheringstatechange", checkState);
-					resolve();
-				}
-			};
-			peerConnection.addEventListener("icegatheringstatechange", checkState);
-		});
+	setFpsText(actual = "") {
+		if (!this.fpsStat) return;
+		const values = [];
+		if (this.configuredFps) values.push(`configured ${this.configuredFps}`);
+		if (actual) values.push(`actual ${actual}`);
+		this.fpsStat.textContent = `FPS: ${values.join(" · ") || "--"}`;
 	}
 
-	async responseError(response) {
-		try {
-			const body = await response.json();
-			return body.error || `request failed: ${response.status}`;
-		} catch (_) {
-			return `request failed: ${response.status}`;
-		}
+	streamUrl() {
+		return `${this.endpoint}${this.endpoint.includes("?") ? "&" : "?"}_=${Date.now()}`;
 	}
 
 	async start() {
-		if (this.starting || this.peerConnection || !this.endpoint || !this.sourceId) {
-			return;
-		}
+		if (this.starting || this.running || !this.endpoint || !this.sourceId) return;
+		this.cancelled = false;
 		this.starting = true;
 		this.setButtons();
 		this.setStatus("Connecting media stream...", false);
-		const peerConnection = new RTCPeerConnection({ iceServers: [] });
-		this.peerConnection = peerConnection;
-		peerConnection.addTransceiver(this.kind, { direction: "recvonly" });
-		peerConnection.ontrack = (event) => {
-			this.media.srcObject = event.streams[0] || new MediaStream([event.track]);
-			this.media.play().catch((error) => this.setStatus(`Playback failed: ${error}`, true));
-			if (this.kind === "audio") {
-				this.startLevelMeter(this.media.srcObject);
-			}
-		};
-		peerConnection.onconnectionstatechange = () => {
-			if (peerConnection.connectionState === "connected") {
-				this.setStatus("Media connection established. Waiting for media...", false);
-			} else if (["failed", "closed"].includes(peerConnection.connectionState)) {
-				this.stop(`Media connection ${peerConnection.connectionState}.`, true);
-			}
-		};
 		try {
-			const [width, height] = this.resolutionMode === "capture"
-				? this.resolution.split("x").map(Number)
-				: [0, 0];
-			const offer = await peerConnection.createOffer();
-			await peerConnection.setLocalDescription(offer);
-			await this.waitForIceGathering(peerConnection);
-			const response = await fetch(this.endpoint, {
-				method: "POST",
-				credentials: "include",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({
-					fps: this.fps,
-					height,
-					source_id: this.sourceId,
-					offer: peerConnection.localDescription,
-					width,
-				}),
-			});
-			if (!response.ok) {
-				throw new Error(await this.responseError(response));
+			this.running = true;
+			this.setButtons();
+			if (this.kind === "audio") {
+				await this.startPcm();
+			} else if (this.transport === "fmp4") {
+				await this.startFmp4();
+			} else if (this.transport === "mjpeg") {
+				await this.startMjpeg();
+			} else {
+				throw new Error("unsupported media transport");
 			}
-			const session = await response.json();
-			this.sessionId = String(session.session_id ?? "");
-			await peerConnection.setRemoteDescription(session.answer);
 		} catch (error) {
-			this.stop(`Media connection failed: ${error}`, true);
+			if (!this.cancelled) this.stop(`Media stream failed: ${error}`, true);
 		} finally {
 			this.starting = false;
 			this.setButtons();
 		}
 	}
 
-	stop(message, error) {
-		const sessionId = this.sessionId;
-		this.sessionId = "";
-		this.starting = false;
-		if (this.peerConnection) {
-			this.peerConnection.ontrack = null;
-			this.peerConnection.onconnectionstatechange = null;
-			this.peerConnection.close();
-			this.peerConnection = null;
+	async startMjpeg() {
+		let retryDelay = 1000;
+		while (!this.cancelled) {
+			try {
+				await this.startMjpegOnce();
+				if (this.cancelled) return;
+				throw new Error("media stream ended");
+			} catch (error) {
+				if (this.cancelled) return;
+				this.abortController?.abort();
+				this.abortController = null;
+				this.setStatus(`Media stream interrupted: ${error}. Reconnecting...`, false);
+				await this.waitForRetry(retryDelay);
+				retryDelay = Math.min(retryDelay * 2, 5000);
+			}
 		}
-		if (this.media) {
-			this.media.pause();
-			this.media.srcObject = null;
+	}
+
+	async startMjpegOnce() {
+		this.abortController = new AbortController();
+		const response = await fetch(this.streamUrl(), {
+			credentials: "include",
+			signal: this.abortController.signal,
+		});
+		if (!response.ok) throw new Error(`request failed: ${response.status}`);
+		if (!response.body) throw new Error("streaming response is unavailable");
+		const reader = response.body.getReader();
+		let pending = new Uint8Array();
+		while (!this.abortController.signal.aborted) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			pending = joinBytes([pending, value]);
+			while (true) {
+				const headerEnd = this.mjpegHeaderEnd(pending);
+				if (headerEnd < 0) break;
+				const header = new TextDecoder().decode(pending.subarray(0, headerEnd));
+				const length = Number(header.match(/content-length:\s*(\d+)/i)?.[1]);
+				if (!Number.isSafeInteger(length) || length < 1 || length > 16 * 1024 * 1024) {
+					throw new Error("invalid MJPEG frame length");
+				}
+				const dataStart = headerEnd + 4;
+				const dataEnd = dataStart + length;
+				if (pending.length < dataEnd + 2) break;
+				this.showMjpegFrame(pending.slice(dataStart, dataEnd));
+				pending = pending.slice(dataEnd + 2);
+			}
 		}
-		this.stopLevelMeter();
+	}
+
+	mjpegHeaderEnd(data) {
+		for (let index = 0; index + 4 <= data.length; index++) {
+			if (data[index] === 13 && data[index + 1] === 10
+				&& data[index + 2] === 13 && data[index + 3] === 10) return index;
+		}
+		return -1;
+	}
+
+	showMjpegFrame(data) {
+		if (!(this.media instanceof HTMLImageElement)) return;
+		const previousUrl = this.frameUrl;
+		this.frameUrl = URL.createObjectURL(new Blob([data], { type: "image/jpeg" }));
+		this.media.src = this.frameUrl;
+		if (previousUrl) URL.revokeObjectURL(previousUrl);
+	}
+
+	async startFmp4() {
+		let retryDelay = 1000;
+		while (!this.cancelled) {
+			try {
+				await this.startFmp4Once();
+				if (this.cancelled) return;
+				throw new Error("media stream ended");
+			} catch (error) {
+				if (this.cancelled) return;
+				const message = String(error);
+				if (message.includes("Media Source Extensions are unavailable")
+					|| message.includes("unsupported camera codec")
+					|| message.includes("did not provide H.264 codec settings")) {
+					throw error;
+				}
+				this.resetFmp4();
+				this.setStatus(`Media stream interrupted: ${error}. Reconnecting...`, false);
+				await this.waitForRetry(retryDelay);
+				retryDelay = Math.min(retryDelay * 2, 5000);
+			}
+		}
+	}
+
+	async startFmp4Once() {
+		if (!window.MediaSource) throw new Error("Media Source Extensions are unavailable");
+		this.abortController = new AbortController();
+		this.mediaSource = new MediaSource();
+		this.mediaUrl = URL.createObjectURL(this.mediaSource);
+		this.media.src = this.mediaUrl;
+		await new Promise((resolve, reject) => {
+			const timeout = setTimeout(() => reject(new Error("timed out opening media source")), 10000);
+			this.mediaSource.addEventListener("sourceopen", () => {
+				clearTimeout(timeout);
+				resolve();
+			}, { once: true });
+		});
+		const response = await fetch(this.streamUrl(), { credentials: "include", signal: this.abortController.signal });
+		if (!response.ok) throw new Error(`request failed: ${response.status}`);
+		if (!response.body) throw new Error("streaming response is unavailable");
+		const reader = response.body.getReader();
+		let pending = new Uint8Array();
+		let init = [];
+		let fragment = [];
+		while (!this.abortController.signal.aborted) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			pending = joinBytes([pending, value]);
+			while (pending.length >= 8) {
+				const size = new DataView(pending.buffer, pending.byteOffset).getUint32(0);
+				if (size < 8 || size > pending.length) break;
+				const box = pending.slice(0, size);
+				pending = pending.slice(size);
+				const type = String.fromCharCode(...box.subarray(4, 8));
+				if (type === "ftyp" || type === "moov") {
+					init.push(box);
+					if (type === "moov") {
+						const data = joinBytes(init);
+						const mime = `video/mp4; codecs="${h264Codec(data)}"`;
+						if (!MediaSource.isTypeSupported(mime)) throw new Error(`unsupported camera codec: ${mime}`);
+						this.sourceBuffer = this.mediaSource.addSourceBuffer(mime);
+						this.appendQueue = [data];
+						this.sourceBuffer.addEventListener("updateend", () => this.flushMseQueue());
+						this.flushMseQueue();
+					}
+				} else if (type === "moof") {
+					fragment = [box];
+				} else if (type === "mdat" && fragment.length > 0) {
+					fragment.push(box);
+					this.queueMseAppend(joinBytes(fragment));
+					fragment = [];
+				}
+			}
+		}
+	}
+
+	waitForRetry(delay) {
+		return new Promise((resolve) => {
+			this.retryResolve = resolve;
+			this.retryTimer = setTimeout(() => {
+				this.retryTimer = 0;
+				this.retryResolve = null;
+				resolve();
+			}, delay);
+		});
+	}
+
+	resetFmp4() {
+		this.abortController?.abort();
+		this.abortController = null;
 		this.stopVideoStats();
-		if (sessionId) {
-			fetch(`/api/media/sessions/${encodeURIComponent(sessionId)}`, {
-				method: "DELETE",
-				credentials: "include",
-				keepalive: true,
-			}).catch(() => {});
+		if (this.media instanceof HTMLVideoElement) {
+			this.media.pause();
+			this.media.removeAttribute("src");
+			this.media.load();
 		}
-		this.setButtons();
-		if (message) {
-			this.setStatus(message, error);
-		}
+		if (this.mediaUrl) URL.revokeObjectURL(this.mediaUrl);
+		this.mediaUrl = null;
+		this.sourceBuffer = null;
+		this.appendQueue = [];
+		this.mediaSource = null;
 	}
 
 	startVideoStats() {
 		this.stopVideoStats();
-		if (this.kind !== "video" || !this.peerConnection) {
-			return;
-		}
+		if (!(this.media instanceof HTMLVideoElement)) return;
 		let previousFrames;
-		let previousTimestamp;
-		const update = async () => {
-			if (!this.resolutionSelect && this.resolutionStat && this.media.videoWidth && this.media.videoHeight) {
-				this.resolutionStat.textContent = `Resolution: ${this.media.videoWidth} × ${this.media.videoHeight}`;
-			}
-			const reports = await this.peerConnection?.getStats().catch(() => null);
-			if (!reports) {
-				return;
-			}
-			for (const report of reports.values()) {
-				if (report.type !== "inbound-rtp" || report.kind !== "video") {
-					continue;
+		let previousTime;
+		const update = (time, metadata) => {
+			if (!this.running) return;
+			if (this.resolutionStat && this.media.videoWidth && this.media.videoHeight) {
+				if (!this.resolutionSelect) {
+					this.resolutionStat.textContent = `Resolution: ${this.media.videoWidth} × ${this.media.videoHeight}`;
 				}
-				if (previousFrames !== undefined && report.timestamp > previousTimestamp && this.fpsActual) {
-					const fps = (report.framesDecoded - previousFrames) * 1000 / (report.timestamp - previousTimestamp);
-					this.fpsActual.textContent = `actual ${fps.toFixed(1)}`;
-				}
-				previousFrames = report.framesDecoded;
-				previousTimestamp = report.timestamp;
-				break;
 			}
+			if (previousFrames !== undefined && time > previousTime) {
+				const fps = (metadata.presentedFrames - previousFrames) * 1000 / (time - previousTime);
+				this.setFpsText(fps.toFixed(1));
+			}
+			previousFrames = metadata.presentedFrames;
+			previousTime = time;
+			this.videoFrameCallback = this.media.requestVideoFrameCallback(update);
 		};
-		update();
-		this.videoStatsTimer = setInterval(update, 1000);
+		if (this.media.requestVideoFrameCallback) {
+			this.videoFrameCallback = this.media.requestVideoFrameCallback(update);
+		} else if (this.media.videoWidth && this.media.videoHeight && !this.resolutionSelect) {
+			this.resolutionStat.textContent = `Resolution: ${this.media.videoWidth} × ${this.media.videoHeight}`;
+		}
+	}
+
+	recordMjpegFrame() {
+		if (!(this.media instanceof HTMLImageElement)) return;
+		this.setStatus("Media stream playing.", false);
+		if (this.resolutionStat && this.media.naturalWidth && this.media.naturalHeight) {
+			this.resolutionStat.textContent = `Resolution: ${this.media.naturalWidth} × ${this.media.naturalHeight}`;
+		}
+		const now = performance.now();
+		if (!this.mjpegFpsStarted) {
+			this.mjpegFpsStarted = now;
+			this.mjpegFrames = 0;
+		}
+		this.mjpegFrames++;
+		const elapsed = now - this.mjpegFpsStarted;
+		if (elapsed >= 500) {
+			this.setFpsText((this.mjpegFrames * 1000 / elapsed).toFixed(1));
+			this.mjpegFpsStarted = now;
+			this.mjpegFrames = 0;
+		}
 	}
 
 	stopVideoStats() {
-		if (this.videoStatsTimer) {
-			clearInterval(this.videoStatsTimer);
+		if (this.videoFrameCallback && this.media?.cancelVideoFrameCallback) {
+			this.media.cancelVideoFrameCallback(this.videoFrameCallback);
 		}
-		this.videoStatsTimer = 0;
-		if (!this.resolutionSelect && this.resolutionStat) {
-			this.resolutionStat.textContent = "Resolution: --";
-		}
-		if (this.fpsActual) {
-			this.fpsActual.textContent = "actual --";
-		}
+		this.videoFrameCallback = 0;
+		this.mjpegFpsStarted = 0;
+		this.mjpegFrames = 0;
+		this.setFpsText();
+		if (this.resolutionStat && !this.resolutionSelect) this.resolutionStat.textContent = "Resolution: --";
 	}
 
-	startLevelMeter(stream) {
-		this.stopLevelMeter();
-		if (!stream) {
-			return;
-		}
+	queueMseAppend(data) {
+		if (!this.sourceBuffer) return;
+		this.appendQueue.push(data);
+		this.flushMseQueue();
+	}
+
+	flushMseQueue() {
+		if (!this.sourceBuffer || this.sourceBuffer.updating || this.appendQueue.length === 0) return;
+		this.sourceBuffer.appendBuffer(this.appendQueue.shift());
+	}
+
+	async startPcm() {
+		this.abortController = new AbortController();
+		const response = await fetch(this.streamUrl(), { credentials: "include", signal: this.abortController.signal });
+		if (!response.ok) throw new Error(`request failed: ${response.status}`);
+		if (!response.body) throw new Error("streaming response is unavailable");
 		const AudioContext = window.AudioContext || window.webkitAudioContext;
-		if (!AudioContext) {
-			return;
+		if (!AudioContext) throw new Error("Web Audio is unavailable");
+		this.audioContext = new AudioContext();
+		this.audioGain = this.audioContext.createGain();
+		this.audioGain.connect(this.audioContext.destination);
+		this.setAudioVolume();
+		const sampleRate = Number(response.headers.get("x-audio-sample-rate"));
+		const channels = Number(response.headers.get("x-audio-channels"));
+		if (!Number.isFinite(sampleRate) || !Number.isFinite(channels) || channels < 1) {
+			throw new Error("invalid microphone stream format");
 		}
-		try {
-			this.audioContext = new AudioContext();
-			if (this.audioContext.state === "suspended") {
-				this.audioContext.resume().catch(() => {});
-			}
-			const analyser = this.audioContext.createAnalyser();
-			analyser.fftSize = 1024;
-			this.analyser = analyser;
-			this.audioSource = this.audioContext.createMediaStreamSource(stream);
-			this.audioSource.connect(analyser);
-			this.levelData = new Uint8Array(analyser.frequencyBinCount);
-			const update = () => {
-				if (!this.analyser) {
-					return;
-				}
-				this.analyser.getByteTimeDomainData(this.levelData);
-				let sum = 0;
-				for (let i = 0; i < this.levelData.length; i++) {
-					const sample = (this.levelData[i] - 128) / 128;
-					sum += sample * sample;
-				}
-				const rms = Math.sqrt(sum / this.levelData.length);
-				const level = Math.min(1, rms * 1.5);
-				const percent = Math.round(level * 100);
-				if (this.levelFill) {
-					this.levelFill.style.width = `${percent}%`;
-				}
-				if (this.levelLabel) {
-					this.levelLabel.textContent = `${percent}%`;
-				}
-				this.levelFrame = requestAnimationFrame(update);
-			};
-			this.levelFrame = requestAnimationFrame(update);
-		} catch (_) {
-			this.stopLevelMeter();
+		const reader = response.body.getReader();
+		let pending = new Uint8Array();
+		this.audioNextTime = this.audioContext.currentTime + 0.12;
+		while (!this.abortController.signal.aborted) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			pending = joinBytes([pending, value]);
+			const bytesPerFrame = channels * 2;
+			const length = pending.length - pending.length % bytesPerFrame;
+			if (!length) continue;
+			this.playPcm(pending.subarray(0, length), sampleRate, channels);
+			pending = pending.slice(length);
 		}
+		if (!this.abortController.signal.aborted) throw new Error("microphone stream ended");
 	}
 
-	stopLevelMeter() {
-		if (this.levelFrame) {
-			cancelAnimationFrame(this.levelFrame);
-			this.levelFrame = 0;
+	playPcm(data, sampleRate, channels) {
+		const frames = data.length / (channels * 2);
+		const buffer = this.audioContext.createBuffer(channels, frames, sampleRate);
+		for (let channel = 0; channel < channels; channel++) {
+			const output = buffer.getChannelData(channel);
+			for (let frame = 0; frame < frames; frame++) {
+				const offset = (frame * channels + channel) * 2;
+				const value = data[offset] | data[offset + 1] << 8;
+				output[frame] = (value & 0x8000 ? value - 0x10000 : value) / 0x8000;
+			}
 		}
-		if (this.audioSource) {
-			try {
-				this.audioSource.disconnect();
-			} catch (_) {}
-			this.audioSource = null;
-		}
-		this.analyser = null;
-		if (this.audioContext) {
-			this.audioContext.close().catch(() => {});
-			this.audioContext = null;
-		}
-		if (this.levelFill) {
-			this.levelFill.style.width = "0%";
-		}
-		if (this.levelLabel) {
-			this.levelLabel.textContent = "0%";
-		}
+		const source = this.audioContext.createBufferSource();
+		source.buffer = buffer;
+		source.connect(this.audioGain);
+		this.audioNextTime = Math.max(this.audioNextTime, this.audioContext.currentTime + 0.08);
+		source.start(this.audioNextTime);
+		this.audioNextTime += buffer.duration;
+	}
+
+	setAudioVolume() {
+		if (this.audioGain) this.audioGain.gain.value = this.muted ? 0 : Number(this.volume?.value ?? 100) / 100;
+	}
+
+	stop(message, error) {
+		this.cancelled = true;
+		if (this.retryTimer) clearTimeout(this.retryTimer);
+		this.retryTimer = 0;
+		this.retryResolve?.();
+		this.retryResolve = null;
+		this.stopVideoStats();
+		if (this.media instanceof HTMLImageElement) this.media.removeAttribute("src");
+		if (this.frameUrl) URL.revokeObjectURL(this.frameUrl);
+		this.frameUrl = null;
+		this.resetFmp4();
+		this.audioContext?.close().catch(() => {});
+		this.audioContext = null;
+		this.audioGain = null;
+		this.running = false;
+		this.starting = false;
+		this.setButtons();
+		if (message) this.setStatus(message, error);
 	}
 
 	setButtons() {
 		const available = Boolean(this.endpoint && this.sourceId);
-		this.startButton.disabled = !available || this.starting || Boolean(this.peerConnection);
-		this.stopButton.disabled = !this.starting && !this.peerConnection;
-		if (this.fullscreenButton) {
-			this.fullscreenButton.disabled = !this.peerConnection;
-		}
+		this.startButton.disabled = !available || this.starting || this.running;
+		this.stopButton.disabled = !this.starting && !this.running;
+		if (this.fullscreenButton) this.fullscreenButton.disabled = !this.running;
 	}
 
 	setStatus(text, error) {

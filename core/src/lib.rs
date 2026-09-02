@@ -6,7 +6,6 @@ mod cosmic_capture;
 mod db;
 mod desktop_input;
 pub mod http_api;
-mod media_webrtc;
 pub mod node_id;
 mod onvif;
 pub mod p2p;

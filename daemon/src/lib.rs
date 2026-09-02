@@ -11,6 +11,7 @@ pub struct Config {
 	pub read: Vec<String>,
 	pub write: Vec<String>,
 	pub ui_bind: String,
+	pub local_no_auth: bool,
 	pub http: Option<String>,
 }
 
@@ -49,9 +50,20 @@ fn parse_socket_addr(label: &str, value: &str) -> Result<SocketAddr> {
 		.with_context(|| format!("invalid {label} address {value}"))
 }
 
-fn spawn_ui(peer: Arc<PuppyNet>, bind: SocketAddr) -> tokio::task::JoinHandle<()> {
+fn validate_local_no_auth(bind: SocketAddr, local_no_auth: bool) -> Result<()> {
+	if local_no_auth && !bind.ip().is_loopback() {
+		anyhow::bail!("--local-no-auth requires --ui-bind to use a loopback address");
+	}
+	Ok(())
+}
+
+fn spawn_ui(
+	peer: Arc<PuppyNet>,
+	bind: SocketAddr,
+	local_no_auth: bool,
+) -> tokio::task::JoinHandle<()> {
 	tokio::spawn(async move {
-		if let Err(err) = ui::run_ui(peer, bind).await {
+		if let Err(err) = ui::run_ui(peer, bind, local_no_auth).await {
 			log::error!("ui server error: {err:?}");
 		}
 	})
@@ -121,7 +133,8 @@ pub async fn run(config: Config) -> Result<()> {
 	connect_configured_peers(&peer, &config)?;
 
 	let ui_addr = parse_socket_addr("--ui-bind", &config.ui_bind)?;
-	let ui_task = spawn_ui(Arc::clone(&peer), ui_addr);
+	validate_local_no_auth(ui_addr, config.local_no_auth)?;
+	let ui_task = spawn_ui(Arc::clone(&peer), ui_addr, config.local_no_auth);
 	let control_task = spawn_control(Arc::clone(&peer));
 
 	let http_task = if let Some(addr_str) = &config.http {
@@ -142,4 +155,19 @@ pub async fn run(config: Config) -> Result<()> {
 	wait_for_peer(peer).await;
 
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn local_no_auth_requires_loopback_ui_bind() {
+		let loopback = "127.0.0.1:8832".parse().unwrap();
+		let unspecified = "0.0.0.0:8832".parse().unwrap();
+
+		assert!(validate_local_no_auth(loopback, true).is_ok());
+		assert!(validate_local_no_auth(unspecified, true).is_err());
+		assert!(validate_local_no_auth(unspecified, false).is_ok());
+	}
 }

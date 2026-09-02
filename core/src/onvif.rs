@@ -17,7 +17,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration as StdDuration, Instant};
 use tokio::io::AsyncReadExt;
-use tokio::process::Command;
+use tokio::process::{Child, ChildStdout, Command};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, sleep, timeout};
 use url::Url;
@@ -606,26 +606,62 @@ fn configured_camera(id: &str) -> Result<OnvifCameraConfig> {
 	load_onvif_camera(&conn, id)?.ok_or_else(|| anyhow!("ONVIF camera was not found"))
 }
 
-pub(crate) async fn media_stream_uri(source_id: &str) -> Result<String> {
+pub(crate) async fn start_fmp4_stream(
+	source_id: &str,
+) -> Result<(Child, ChildStdout, JoinHandle<String>)> {
 	let id = source_id
 		.strip_prefix(SOURCE_PREFIX)
 		.ok_or_else(|| anyhow!("invalid ONVIF source"))?;
 	let config = configured_camera(id)?;
-	stream_uri(&config).await.map(|(uri, _)| uri)
-}
-
-pub(crate) async fn stop_capture_worker(source_id: &str) {
-	let Some(id) = source_id.strip_prefix(SOURCE_PREFIX) else {
-		return;
-	};
-	let worker = camera_workers()
-		.lock()
-		.ok()
-		.and_then(|mut workers| workers.remove(id));
-	if let Some(worker) = worker {
-		worker.task.abort();
-		let _ = worker.task.await;
+	if !config.enabled {
+		bail!("ONVIF camera is disabled");
 	}
+	let (stream_uri, _) = stream_uri(&config).await?;
+	let mut child = Command::new("ffmpeg")
+		.args([
+			"-hide_banner",
+			"-loglevel",
+			"error",
+			"-rtsp_transport",
+			"tcp",
+			"-timeout",
+			"5000000",
+			"-i",
+			&stream_uri,
+			"-map",
+			"0:v:0",
+			"-an",
+			"-c:v",
+			"copy",
+			"-movflags",
+			"empty_moov+frag_keyframe+default_base_moof",
+			"-f",
+			"mp4",
+			"pipe:1",
+		])
+		.stdin(Stdio::null())
+		.stdout(Stdio::piped())
+		.stderr(Stdio::piped())
+		.kill_on_drop(true)
+		.spawn()
+		.context("failed to start ONVIF fMP4 stream")?;
+	let stdout = child
+		.stdout
+		.take()
+		.ok_or_else(|| anyhow!("ffmpeg did not expose its video output"))?;
+	let mut stderr = child
+		.stderr
+		.take()
+		.ok_or_else(|| anyhow!("ffmpeg did not expose its error output"))?;
+	let password = config.password;
+	let error_task = tokio::spawn(async move {
+		let mut error = String::new();
+		if let Err(read_error) = stderr.read_to_string(&mut error).await {
+			return format!("failed to read ffmpeg error output: {read_error}");
+		}
+		redact_ffmpeg_error(error.trim(), &stream_uri, &password)
+	});
+	Ok((child, stdout, error_task))
 }
 
 pub(crate) fn configured_cameras() -> Result<Vec<OnvifCameraConfig>> {

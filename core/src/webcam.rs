@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration as StdDuration, Instant as StdInstant};
 use tokio::process::Command;
+use tokio::sync::mpsc as tokio_mpsc;
 use tokio::task;
 use tokio::time::{Duration, timeout};
 
@@ -419,6 +420,49 @@ where
 		}
 	};
 	Ok(device.build_input_stream(*config, data_callback, error_callback, None)?)
+}
+
+fn build_microphone_pcm_stream<T>(
+	device: &cpal::Device,
+	config: &cpal::StreamConfig,
+	chunks: tokio_mpsc::Sender<Vec<u8>>,
+) -> Result<cpal::Stream>
+where
+	T: Sample + SizedSample,
+	i16: FromSample<T>,
+{
+	let data_callback = move |data: &[T], _: &cpal::InputCallbackInfo| {
+		let mut chunk = Vec::with_capacity(data.len() * 2);
+		for sample in data {
+			chunk.extend_from_slice(&i16::from_sample(*sample).to_le_bytes());
+		}
+		let _ = chunks.try_send(chunk);
+	};
+	let error_callback = |error: cpal::Error| {
+		log::warn!("microphone PCM capture error: {error}");
+	};
+	Ok(device.build_input_stream(*config, data_callback, error_callback, None)?)
+}
+
+pub(crate) fn stream_microphone_pcm(
+	source_id: &str,
+) -> Result<(u32, u16, tokio_mpsc::Receiver<Vec<u8>>, cpal::Stream)> {
+	validate_microphone_id(source_id)?;
+	let (device, supported_config) = microphone_device(source_id)?;
+	let channels = supported_config.channels();
+	let sample_rate = supported_config.sample_rate();
+	let sample_format = supported_config.sample_format();
+	let config = supported_config.into();
+	let (tx, rx) = tokio_mpsc::channel(16);
+	let stream = match sample_format {
+		SampleFormat::I8 => build_microphone_pcm_stream::<i8>(&device, &config, tx)?,
+		SampleFormat::I16 => build_microphone_pcm_stream::<i16>(&device, &config, tx)?,
+		SampleFormat::I32 => build_microphone_pcm_stream::<i32>(&device, &config, tx)?,
+		SampleFormat::F32 => build_microphone_pcm_stream::<f32>(&device, &config, tx)?,
+		format => bail!("Unsupported microphone sample format: {format}"),
+	};
+	stream.play()?;
+	Ok((sample_rate, channels, rx, stream))
 }
 
 fn capture_microphone_audio(source_id: &str) -> Result<Vec<u8>> {
@@ -1050,29 +1094,6 @@ pub(crate) async fn capture_media_frame(source_id: String) -> Result<MediaFrame>
 	let backend = select_webcam_backend().await;
 	backend.available().await?;
 	backend.capture_frame(source_id).await
-}
-
-pub(crate) async fn capture_media_frame_configured(
-	source_id: String,
-	width: u32,
-	height: u32,
-	fps: u32,
-) -> Result<MediaFrame> {
-	#[cfg(target_os = "linux")]
-	if source_id.starts_with("/dev/video") && width > 0 && height > 0 {
-		validate_device_id(&source_id)?;
-		let data = timeout(
-			Duration::from_secs(8),
-			task::spawn_blocking(move || capture_v4l2_mjpeg(&source_id, width, height, fps)),
-		)
-		.await
-		.map_err(|_| anyhow!("timed out capturing webcam frame"))???;
-		return Ok(MediaFrame {
-			mime: String::from("image/jpeg"),
-			data,
-		});
-	}
-	capture_media_frame(source_id).await
 }
 
 #[cfg(target_os = "linux")]

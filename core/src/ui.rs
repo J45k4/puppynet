@@ -1,6 +1,5 @@
 use crate::auth;
 use crate::db::FileEntry;
-use crate::media_webrtc::{CreateMediaSession, MediaSessionManager};
 use crate::node_id::NodeId as PeerId;
 use crate::p2p::{
 	AudioCapability, AudioDevice, AudioDeviceKind, CpuInfo, DesktopInput, DirEntry, InterfaceInfo,
@@ -22,7 +21,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::sync::mpsc::TryRecvError;
-use tokio::{signal, sync::Mutex, task};
+use tokio::{io::AsyncReadExt, signal, sync::Mutex, task};
 use wgui::{ClientEvent, HttpRequest, HttpResponse, Item, Wgui, WguiHandle};
 
 const SESSION_COOKIE: &str = "sid";
@@ -154,13 +153,13 @@ enum UiAction {
 }
 
 pub(super) struct UiServer {
-	media: Arc<MediaSessionManager>,
 	puppy: Arc<PuppyNet>,
 	state: Mutex<UiState>,
 }
 
 pub(super) struct UiContext {
 	server: Arc<UiServer>,
+	local_no_auth: bool,
 	sessions: std::sync::Mutex<HashMap<String, UiClientSession>>,
 	pending_login_tokens: std::sync::Mutex<HashMap<String, String>>,
 }
@@ -282,7 +281,6 @@ struct UiPuppyEyeCamera {
 	media_receiver_props: UiMediaReceiverProps,
 	profile_options: Vec<UiSelectOption>,
 	source_id: String,
-	stream_src: String,
 	view_href: String,
 }
 
@@ -362,6 +360,7 @@ struct UiMediaReceiverProps {
 	media_kind: String,
 	revision: String,
 	source_id: String,
+	transport: String,
 }
 
 #[derive(Clone, Default)]
@@ -530,9 +529,7 @@ pub(super) struct UiViewState {
 	puppy_eye_viewer_device_name: String,
 	puppy_eye_viewer_device_href: String,
 	puppy_eye_viewer_source_id: String,
-	puppy_eye_viewer_stream_src: String,
-	puppy_eye_viewer_webrtc: bool,
-	puppy_eye_viewer_webrtc_props: UiMediaReceiverProps,
+	puppy_eye_viewer_props: UiMediaReceiverProps,
 	puppy_eye_viewer_index: u32,
 	onvif_cameras: Vec<UiOnvifCamera>,
 	onvif_has_cameras: bool,
@@ -560,8 +557,7 @@ pub(super) struct UiViewState {
 	onvif_viewer_device_href: String,
 	onvif_viewer_device_service_url: String,
 	onvif_viewer_profile_token: String,
-	onvif_viewer_stream_src: String,
-	onvif_viewer_webrtc_props: UiMediaReceiverProps,
+	onvif_viewer_props: UiMediaReceiverProps,
 	onvif_viewer_index: u32,
 	monitor_has_stream: bool,
 	monitor_status: String,
@@ -643,6 +639,9 @@ impl<'a> UiClientActions<'a> {
 	}
 
 	fn authenticated_username(&self) -> Option<String> {
+		if self.ctx.state.local_no_auth {
+			return Some(String::from("local"));
+		}
 		if let Some(session_id) = self.ctx.session_id() {
 			let hash = auth::token_hash(&session_id);
 			if let Ok(Some(username)) = self.ctx.state.server.puppy.http_me(&hash) {
@@ -953,11 +952,27 @@ fn peer_webcams_href(peer_id: &str) -> String {
 	}
 }
 
-fn puppy_eye_stream_href(peer_id: &str, source_id: &str) -> String {
+fn peer_media_stream_href(peer_id: &str, source_id: &str, endpoint: &str) -> String {
 	let query = url::form_urlencoded::Serializer::new(String::new())
 		.append_pair("device", source_id)
 		.finish();
-	format!("/api/peers/{peer_id}/webcam.mjpeg?{query}")
+	format!("/api/peers/{peer_id}/{endpoint}?{query}")
+}
+
+fn puppy_eye_stream_href(peer_id: &str, source_id: &str) -> String {
+	peer_media_stream_href(peer_id, source_id, "webcam.mjpeg")
+}
+
+fn monitor_stream_href(peer_id: &str, source_id: &str) -> String {
+	peer_media_stream_href(peer_id, source_id, "monitor.mjpeg")
+}
+
+fn onvif_fmp4_stream_href(peer_id: &str, source_id: &str) -> String {
+	peer_media_stream_href(peer_id, source_id, "onvif.fmp4")
+}
+
+fn microphone_pcm_stream_href(peer_id: &str, source_id: &str) -> String {
+	peer_media_stream_href(peer_id, source_id, "microphone.pcm")
 }
 
 fn puppy_eye_view_href(peer_id: &str, source_id: &str) -> String {
@@ -965,11 +980,29 @@ fn puppy_eye_view_href(peer_id: &str, source_id: &str) -> String {
 	format!("/device/{peer_id}/camera/{source_id}")
 }
 
-fn media_sessions_href(peer_id: &str) -> String {
-	if peer_id.is_empty() {
-		String::new()
-	} else {
-		format!("/api/peers/{peer_id}/media/sessions")
+fn camera_stream_props(
+	local_peer_id: Option<&str>,
+	peer_id: &str,
+	source_id: &str,
+	auto_start: bool,
+	revision: String,
+) -> UiMediaReceiverProps {
+	let fmp4 = source_id.starts_with("onvif:") && local_peer_id == Some(peer_id);
+	UiMediaReceiverProps {
+		auto_start,
+		endpoint: if fmp4 {
+			onvif_fmp4_stream_href(peer_id, source_id)
+		} else {
+			puppy_eye_stream_href(peer_id, source_id)
+		},
+		media_kind: String::from("video"),
+		revision,
+		source_id: source_id.to_string(),
+		transport: if fmp4 {
+			String::from("fmp4")
+		} else {
+			String::from("mjpeg")
+		},
 	}
 }
 
@@ -1152,13 +1185,9 @@ impl UiClientActions<'_> {
 				line: audio_device_line(device),
 			})
 			.collect::<Vec<_>>();
-		let is_webcam_supported =
-			is_current_device && webcam_supported(state.peer_webcam_capability.as_ref());
-		let webcam_capability_status = if is_current_device {
-			webcam_capability_status(state.peer_webcam_capability.as_ref())
-		} else {
-			String::from("Remote webcam streaming is not available yet.")
-		};
+		let is_webcam_supported = webcam_supported(state.peer_webcam_capability.as_ref());
+		let webcam_capability_status =
+			webcam_capability_status(state.peer_webcam_capability.as_ref());
 		let selected_webcam_device = if session.webcam_selected_device.is_empty() {
 			state
 				.peer_webcams
@@ -1190,11 +1219,12 @@ impl UiClientActions<'_> {
 				device_href: peer_details_href(&camera.device_id),
 				device_name: camera.device_name.clone(),
 				index: index as u32,
-				media_receiver_props: UiMediaReceiverProps {
-					auto_start: true,
-					endpoint: media_sessions_href(&camera.device_id),
-					media_kind: String::from("video"),
-					revision: state
+				media_receiver_props: camera_stream_props(
+					state.local_peer_id.as_deref(),
+					&camera.device_id,
+					&camera.source.id,
+					true,
+					state
 						.puppy_eye_configured_cameras
 						.iter()
 						.find(|configured| {
@@ -1203,15 +1233,13 @@ impl UiClientActions<'_> {
 						})
 						.map(|configured| configured.camera.profile_token.clone())
 						.unwrap_or_default(),
-					source_id: camera.source.id.clone(),
-				},
+				),
 				profile_options: session
 					.eye_profile_options_by_camera
 					.get(&camera.source.id)
 					.cloned()
 					.unwrap_or_default(),
 				source_id: camera.source.id.clone(),
-				stream_src: puppy_eye_stream_href(&camera.device_id, &camera.source.id),
 				view_href: puppy_eye_view_href(&camera.device_id, &camera.source.id),
 			})
 			.collect::<Vec<_>>();
@@ -1242,28 +1270,26 @@ impl UiClientActions<'_> {
 		let puppy_eye_viewer_source_id = puppy_eye_viewer
 			.map(|camera| camera.source.id.clone())
 			.unwrap_or_default();
-		let puppy_eye_viewer_stream_src = puppy_eye_viewer
-			.map(|camera| puppy_eye_stream_href(&camera.device_id, &camera.source.id))
-			.unwrap_or_default();
-		let puppy_eye_viewer_webrtc = puppy_eye_viewer.is_some();
-		let puppy_eye_viewer_webrtc_props = puppy_eye_viewer
-			.map(|camera| UiMediaReceiverProps {
-				auto_start: true,
-				endpoint: media_sessions_href(&camera.device_id),
-				media_kind: String::from("video"),
-				revision: camera
-					.source
-					.id
-					.strip_prefix("onvif:")
-					.and_then(|id| {
-						state
-							.puppy_eye_configured_cameras
-							.iter()
-							.find(|configured| configured.camera.id == id)
-					})
-					.map(|configured| configured.camera.profile_token.clone())
-					.unwrap_or_default(),
-				source_id: camera.source.id.clone(),
+		let puppy_eye_viewer_props = puppy_eye_viewer
+			.map(|camera| {
+				camera_stream_props(
+					state.local_peer_id.as_deref(),
+					&camera.device_id,
+					&camera.source.id,
+					true,
+					camera
+						.source
+						.id
+						.strip_prefix("onvif:")
+						.and_then(|id| {
+							state
+								.puppy_eye_configured_cameras
+								.iter()
+								.find(|configured| configured.camera.id == id)
+						})
+						.map(|configured| configured.camera.profile_token.clone())
+						.unwrap_or_default(),
+				)
 			})
 			.unwrap_or_default();
 		let puppy_eye_viewer_index = puppy_eye_viewer
@@ -1318,21 +1344,19 @@ impl UiClientActions<'_> {
 		let onvif_viewer_profile_token = onvif_viewer
 			.map(|camera| camera.camera.profile_token.clone())
 			.unwrap_or_default();
-		let onvif_viewer_stream_src = onvif_viewer
-			.map(|camera| {
-				puppy_eye_stream_href(&camera.device_id, &format!("onvif:{}", camera.camera.id))
-			})
-			.unwrap_or_default();
 		let onvif_viewer_source_id = onvif_viewer
 			.map(|camera| format!("onvif:{}", camera.camera.id))
 			.unwrap_or_default();
-		let onvif_viewer_webrtc_props = onvif_viewer
-			.map(|camera| UiMediaReceiverProps {
-				auto_start: true,
-				endpoint: media_sessions_href(&camera.device_id),
-				media_kind: String::from("video"),
-				revision: camera.camera.profile_token.clone(),
-				source_id: format!("onvif:{}", camera.camera.id),
+		let onvif_viewer_props = onvif_viewer
+			.map(|camera| {
+				let source_id = format!("onvif:{}", camera.camera.id);
+				camera_stream_props(
+					state.local_peer_id.as_deref(),
+					&camera.device_id,
+					&source_id,
+					true,
+					camera.camera.profile_token.clone(),
+				)
 			})
 			.unwrap_or_default();
 		let onvif_viewer_index = state
@@ -1429,12 +1453,7 @@ impl UiClientActions<'_> {
 			peer_files_href(state.selected_peer.as_deref().unwrap_or_default(), "/");
 		let selected_peer_webcams_href =
 			peer_webcams_href(state.selected_peer.as_deref().unwrap_or_default());
-		let media_sessions_endpoint = state
-			.selected_peer
-			.as_deref()
-			.filter(|_| is_current_device)
-			.map(media_sessions_href)
-			.unwrap_or_default();
+		let selected_peer_id = state.selected_peer.as_deref().unwrap_or_default();
 		let microphone_status = if !is_current_device {
 			String::from("Remote microphone streaming is not available yet.")
 		} else {
@@ -1555,10 +1574,11 @@ impl UiClientActions<'_> {
 			trackpad_props: UiTrackpadProps { sensitivity: 1.0 },
 			monitor_stream_props: UiMediaReceiverProps {
 				auto_start: true,
-				endpoint: media_sessions_endpoint.clone(),
+				endpoint: monitor_stream_href(selected_peer_id, &selected_screen),
 				media_kind: String::from("video"),
 				revision: String::new(),
 				source_id: selected_screen.clone(),
+				transport: String::from("mjpeg"),
 			},
 			monitor_stream_enabled,
 			audio_status: session.audio_status,
@@ -1578,10 +1598,15 @@ impl UiClientActions<'_> {
 			microphone_status,
 			microphone_listener_props: UiMediaReceiverProps {
 				auto_start: false,
-				endpoint: media_sessions_endpoint.clone(),
+				endpoint: if is_current_device {
+					microphone_pcm_stream_href(selected_peer_id, &selected_microphone)
+				} else {
+					String::new()
+				},
 				media_kind: String::from("audio"),
 				revision: String::new(),
 				source_id: selected_microphone.clone(),
+				transport: String::from("pcm"),
 			},
 			microphone_has_stream: is_current_device && !selected_microphone.is_empty(),
 			selected_microphone,
@@ -1591,14 +1616,14 @@ impl UiClientActions<'_> {
 			webcam_capability_status,
 			webcam_supported: is_webcam_supported,
 			has_webcam_devices: !webcam_devices.is_empty(),
-			webcam_stream_props: UiMediaReceiverProps {
-				auto_start: true,
-				endpoint: media_sessions_endpoint.clone(),
-				media_kind: String::from("video"),
-				revision: String::new(),
-				source_id: selected_webcam_device.clone(),
-			},
-			webcam_has_stream: is_current_device && !selected_webcam_device.is_empty(),
+			webcam_stream_props: camera_stream_props(
+				state.local_peer_id.as_deref(),
+				selected_peer_id,
+				&selected_webcam_device,
+				true,
+				String::new(),
+			),
+			webcam_has_stream: !selected_webcam_device.is_empty(),
 			puppy_eye_has_cameras: !puppy_eye_cameras.is_empty(),
 			puppy_eye_cameras,
 			puppy_eye_status: state.puppy_eye_status,
@@ -1609,9 +1634,7 @@ impl UiClientActions<'_> {
 			puppy_eye_viewer_device_name,
 			puppy_eye_viewer_device_href,
 			puppy_eye_viewer_source_id,
-			puppy_eye_viewer_stream_src,
-			puppy_eye_viewer_webrtc,
-			puppy_eye_viewer_webrtc_props,
+			puppy_eye_viewer_props,
 			puppy_eye_viewer_index,
 			onvif_has_cameras: !onvif_cameras.is_empty(),
 			onvif_cameras,
@@ -1643,12 +1666,9 @@ impl UiClientActions<'_> {
 			onvif_viewer_device_href,
 			onvif_viewer_device_service_url,
 			onvif_viewer_profile_token,
-			onvif_viewer_stream_src,
-			onvif_viewer_webrtc_props,
+			onvif_viewer_props,
 			onvif_viewer_index,
-			monitor_has_stream: is_current_device
-				&& monitor_stream_enabled
-				&& !selected_screen.is_empty(),
+			monitor_has_stream: monitor_stream_enabled && !selected_screen.is_empty(),
 			monitor_status,
 			update_version: session.update_version,
 			update_status: session.update_status,
@@ -3987,7 +4007,6 @@ impl<'a> UiServerActions<'a> {
 impl UiServer {
 	fn new(puppy: Arc<PuppyNet>) -> Result<Self> {
 		Ok(Self {
-			media: MediaSessionManager::new()?,
 			puppy,
 			state: Mutex::new(UiState::new()),
 		})
@@ -4193,13 +4212,6 @@ impl UiServer {
 	}
 
 	async fn refresh_peer_screens(&self, peer_id: &str) {
-		if !self.is_local_media_peer(peer_id).await {
-			let mut state = self.state.lock().await;
-			state.peer_screens.clear();
-			state.peer_screen_status =
-				String::from("Remote screen streaming is not available yet.");
-			return;
-		}
 		match PeerId::from_str(peer_id) {
 			Ok(peer) => {
 				let capability = match self.puppy.media_capability(peer.clone()).await {
@@ -4359,16 +4371,6 @@ impl UiServer {
 	}
 
 	async fn refresh_peer_webcams(&self, peer_id: &str) {
-		if !self.is_local_media_peer(peer_id).await {
-			let mut state = self.state.lock().await;
-			state.peer_webcam_capability = Some(MediaCapability {
-				supported: false,
-				backend: None,
-				message: String::from("Remote webcam streaming is not available yet."),
-			});
-			state.peer_webcams.clear();
-			return;
-		}
 		match PeerId::from_str(peer_id) {
 			Ok(peer) => {
 				let capability = match self.puppy.media_capability(peer.clone()).await {
@@ -4708,12 +4710,17 @@ fn decode_query_value(value: &str) -> String {
 fn peer_webcam_stream_peer(path: &str) -> Option<&str> {
 	let rest = path.strip_prefix("/api/peers/")?;
 	rest.strip_suffix("/webcam.mjpeg")
+		.or_else(|| rest.strip_suffix("/monitor.mjpeg"))
 }
 
-#[cfg(any())]
-fn peer_microphone_stream_peer(path: &str) -> Option<&str> {
+fn peer_onvif_fmp4_stream_peer(path: &str) -> Option<&str> {
 	let rest = path.strip_prefix("/api/peers/")?;
-	rest.strip_suffix("/microphone.wav")
+	rest.strip_suffix("/onvif.fmp4")
+}
+
+fn peer_microphone_pcm_stream_peer(path: &str) -> Option<&str> {
+	let rest = path.strip_prefix("/api/peers/")?;
+	rest.strip_suffix("/microphone.pcm")
 }
 
 fn mjpeg_frame_chunk(mime: &str, data: &[u8]) -> Vec<u8> {
@@ -4742,14 +4749,6 @@ fn media_stream_label(path: &str) -> &'static str {
 	}
 }
 
-fn media_stream_frame_delay(stream_label: &str) -> std::time::Duration {
-	if stream_label == "monitor" {
-		std::time::Duration::from_millis(500)
-	} else {
-		std::time::Duration::from_millis(150)
-	}
-}
-
 fn monitor_stream_enabled_for_session(ctx: &Arc<UiContext>, session_id: Option<&str>) -> bool {
 	let Some(session_id) = session_id else {
 		return false;
@@ -4768,14 +4767,7 @@ fn monitor_stream_enabled_for_session(ctx: &Arc<UiContext>, session_id: Option<&
 async fn handle_peer_webcam_stream(request: HttpRequest, ctx: Arc<UiContext>) -> HttpResponse {
 	let stream_label = media_stream_label(&request.path);
 	let session_id = cookie_value(&request.headers, SESSION_COOKIE);
-	let authenticated = session_id
-		.as_deref()
-		.and_then(|sid| {
-			let hash = auth::token_hash(sid);
-			ctx.server.puppy.http_me(&hash).ok().flatten()
-		})
-		.is_some();
-	if !authenticated {
+	if !authenticated_http_request(&request, &ctx) {
 		log::warn!("{stream_label} stream rejected: not authenticated");
 		return HttpResponse::new(401, "not authenticated")
 			.header("content-type", "text/plain")
@@ -4865,7 +4857,6 @@ async fn handle_peer_webcam_stream(request: HttpRequest, ctx: Arc<UiContext>) ->
 						true
 					};
 					let chunk = mjpeg_frame_chunk(&frame.mime, &frame.data);
-					tokio::time::sleep(media_stream_frame_delay(stream_label)).await;
 					Some((
 						Ok::<_, Infallible>(chunk),
 						(
@@ -4896,23 +4887,95 @@ async fn handle_peer_webcam_stream(request: HttpRequest, ctx: Arc<UiContext>) ->
 		.header("x-accel-buffering", "no")
 }
 
-#[cfg(any())]
-async fn handle_peer_microphone_stream(request: HttpRequest, ctx: Arc<UiContext>) -> HttpResponse {
-	let session_id = cookie_value(&request.headers, SESSION_COOKIE);
-	let authenticated = session_id
-		.as_deref()
-		.and_then(|sid| {
-			let hash = auth::token_hash(sid);
-			ctx.server.puppy.http_me(&hash).ok().flatten()
-		})
-		.is_some();
-	if !authenticated {
-		log::warn!("microphone stream rejected: not authenticated");
+async fn handle_onvif_fmp4_stream(request: HttpRequest, ctx: Arc<UiContext>) -> HttpResponse {
+	if !authenticated_http_request(&request, &ctx) {
 		return HttpResponse::new(401, "not authenticated")
 			.header("content-type", "text/plain")
 			.header("cache-control", "no-store");
 	}
-	let Some(peer_id) = peer_microphone_stream_peer(&request.path) else {
+	let Some(peer_id) = peer_onvif_fmp4_stream_peer(&request.path) else {
+		return HttpResponse::new(404, "ONVIF stream not found")
+			.header("content-type", "text/plain")
+			.header("cache-control", "no-store");
+	};
+	let Ok(peer) = PeerId::from_str(peer_id) else {
+		return HttpResponse::new(400, "invalid peer id")
+			.header("content-type", "text/plain")
+			.header("cache-control", "no-store");
+	};
+	if ctx.server.local_peer_id().await != Some(peer) {
+		return HttpResponse::new(409, "remote ONVIF fMP4 streaming is not available")
+			.header("content-type", "text/plain")
+			.header("cache-control", "no-store");
+	}
+	let source_id = request
+		.query
+		.get("device")
+		.map(|value| decode_query_value(value))
+		.unwrap_or_default();
+	if !source_id.starts_with("onvif:") {
+		return HttpResponse::new(400, "invalid ONVIF camera source")
+			.header("content-type", "text/plain")
+			.header("cache-control", "no-store");
+	}
+	let (child, stdout, error_task) = match crate::onvif::start_fmp4_stream(&source_id).await {
+		Ok(stream) => stream,
+		Err(error) => {
+			log::warn!("failed to start ONVIF fMP4 stream for {source_id}: {error}");
+			return HttpResponse::new(503, format!("failed to start ONVIF stream: {error}"))
+				.header("content-type", "text/plain")
+				.header("cache-control", "no-store");
+		}
+	};
+	log::info!("ONVIF fMP4 stream started for {source_id}");
+	let stream = futures::stream::unfold(
+		(child, stdout, error_task, source_id),
+		|(mut child, mut stdout, error_task, source_id)| async move {
+			let mut chunk = vec![0; 32 * 1024];
+			match stdout.read(&mut chunk).await {
+				Ok(0) => {
+					let status = child
+						.wait()
+						.await
+						.map(|status| status.to_string())
+						.unwrap_or_else(|error| format!("unknown status: {error}"));
+					let detail = error_task
+						.await
+						.unwrap_or_else(|error| format!("error task failed: {error}"));
+					if detail.is_empty() {
+						log::warn!("ONVIF fMP4 stream {source_id} stopped with {status}");
+					} else {
+						log::warn!("ONVIF fMP4 stream {source_id} stopped with {status}: {detail}");
+					}
+					None
+				}
+				Ok(count) => {
+					chunk.truncate(count);
+					Some((
+						Ok::<_, Infallible>(chunk),
+						(child, stdout, error_task, source_id),
+					))
+				}
+				Err(error) => {
+					log::warn!("ONVIF fMP4 stream {source_id} stopped: {error}");
+					None
+				}
+			}
+		},
+	);
+	HttpResponse::stream(200, stream)
+		.header("content-type", "video/mp4")
+		.header("cache-control", "no-store")
+		.header("x-accel-buffering", "no")
+}
+
+async fn handle_microphone_pcm_stream(request: HttpRequest, ctx: Arc<UiContext>) -> HttpResponse {
+	if !authenticated_http_request(&request, &ctx) {
+		return HttpResponse::new(401, "not authenticated")
+			.header("content-type", "text/plain")
+			.header("cache-control", "no-store");
+	}
+	let Some(peer_id) = peer_microphone_pcm_stream_peer(&request.path) else {
 		return HttpResponse::new(404, "microphone stream not found")
 			.header("content-type", "text/plain")
 			.header("cache-control", "no-store");
@@ -4922,24 +4985,36 @@ async fn handle_peer_microphone_stream(request: HttpRequest, ctx: Arc<UiContext>
 			.header("content-type", "text/plain")
 			.header("cache-control", "no-store");
 	};
+	if ctx.server.local_peer_id().await != Some(peer) {
+		return HttpResponse::new(409, "remote microphone streaming is not available")
+			.header("content-type", "text/plain")
+			.header("cache-control", "no-store");
+	}
 	let source_id = request
 		.query
 		.get("device")
 		.map(|value| decode_query_value(value))
 		.unwrap_or_else(|| String::from("microphone:default"));
-
-	let puppy = Arc::clone(&ctx.server.puppy);
-	match puppy.get_media_frame(peer, source_id).await {
-		Ok(frame) => HttpResponse::new(200, frame.data)
-			.header("content-type", frame.mime)
-			.header("cache-control", "no-store"),
-		Err(err) => {
-			log::warn!("microphone stream failed: {err}");
-			HttpResponse::new(503, format!("failed to capture microphone audio: {err}"))
+	let (sample_rate, channels, rx, capture) = match webcam::stream_microphone_pcm(&source_id) {
+		Ok(stream) => stream,
+		Err(error) => {
+			log::warn!("failed to start microphone stream for {source_id}: {error}");
+			return HttpResponse::new(503, format!("failed to start microphone stream: {error}"))
 				.header("content-type", "text/plain")
-				.header("cache-control", "no-store")
+				.header("cache-control", "no-store");
 		}
-	}
+	};
+	let stream = futures::stream::unfold((rx, capture), |(mut rx, capture)| async move {
+		rx.recv()
+			.await
+			.map(|chunk| (Ok::<_, Infallible>(chunk), (rx, capture)))
+	});
+	HttpResponse::stream(200, stream)
+		.header("content-type", "audio/L16")
+		.header("x-audio-channels", channels.to_string())
+		.header("x-audio-sample-rate", sample_rate.to_string())
+		.header("cache-control", "no-store")
+		.header("x-accel-buffering", "no")
 }
 
 fn request_header<'a>(headers: &'a HashMap<String, String>, name: &str) -> Option<&'a str> {
@@ -4950,6 +5025,9 @@ fn request_header<'a>(headers: &'a HashMap<String, String>, name: &str) -> Optio
 }
 
 fn authenticated_http_request(request: &HttpRequest, ctx: &Arc<UiContext>) -> bool {
+	if ctx.local_no_auth {
+		return true;
+	}
 	cookie_value(&request.headers, SESSION_COOKIE)
 		.and_then(|sid| {
 			let hash = auth::token_hash(&sid);
@@ -4995,101 +5073,27 @@ fn pairing_qr_response(request: &HttpRequest, ctx: &Arc<UiContext>) -> HttpRespo
 	}
 }
 
-fn same_origin_request(request: &HttpRequest) -> bool {
-	let Some(origin) = request_header(&request.headers, "origin") else {
-		return true;
-	};
-	let Some(host) = request_header(&request.headers, "host") else {
-		return false;
-	};
-	origin == format!("http://{host}") || origin == format!("https://{host}")
-}
-
-fn peer_media_sessions_peer(path: &str) -> Option<&str> {
-	path.strip_prefix("/api/peers/")?
-		.strip_suffix("/media/sessions")
-		.filter(|peer| !peer.is_empty() && !peer.contains('/'))
-}
-
-fn media_session_id(path: &str) -> Option<&str> {
-	let session_id = path.strip_prefix("/api/media/sessions/")?;
-	(!session_id.is_empty() && !session_id.contains('/')).then_some(session_id)
-}
-
-fn media_error(status: u16, message: impl Into<String>) -> HttpResponse {
-	json_response(status, serde_json::json!({ "error": message.into() }))
-		.header("cache-control", "no-store")
-}
-
-async fn handle_create_media_session(request: HttpRequest, ctx: Arc<UiContext>) -> HttpResponse {
-	if !authenticated_http_request(&request, &ctx) {
-		return media_error(401, "not authenticated");
-	}
-	if !same_origin_request(&request) {
-		return media_error(403, "cross-origin media signaling is not allowed");
-	}
-	let Some(peer_id) = peer_media_sessions_peer(&request.path) else {
-		return media_error(404, "media session endpoint not found");
-	};
-	let Ok(peer) = PeerId::from_str(peer_id) else {
-		return media_error(400, "invalid peer id");
-	};
-	if ctx.server.local_peer_id().await != Some(peer) {
-		return media_error(409, "remote media streaming is not available yet");
-	}
-	if request.body.len() > 1024 * 1024 {
-		return media_error(413, "media session request is too large");
-	}
-	if !request_header(&request.headers, "content-type")
-		.map(|value| value.split(';').next() == Some("application/json"))
-		.unwrap_or(false)
-	{
-		return media_error(415, "media session requests must use application/json");
-	}
-	let request = match serde_json::from_slice::<CreateMediaSession>(&request.body) {
-		Ok(request) => request,
-		Err(error) => return media_error(400, format!("invalid media session request: {error}")),
-	};
-	match ctx.server.media.create_session(request).await {
-		Ok(session) => match serde_json::to_value(session) {
-			Ok(session) => json_response(201, session).header("cache-control", "no-store"),
-			Err(error) => media_error(500, format!("failed to serialize media session: {error}")),
-		},
-		Err(error) => {
-			log::warn!("failed to create local WebRTC media session: {error}");
-			media_error(503, format!("failed to create media session: {error}"))
-		}
-	}
-}
-
-async fn handle_delete_media_session(request: HttpRequest, ctx: Arc<UiContext>) -> HttpResponse {
-	if !authenticated_http_request(&request, &ctx) {
-		return media_error(401, "not authenticated");
-	}
-	if !same_origin_request(&request) {
-		return media_error(403, "cross-origin media signaling is not allowed");
-	}
-	let Some(session_id) = media_session_id(&request.path) else {
-		return media_error(404, "media session not found");
-	};
-	if ctx.server.media.remove_session(session_id).await {
-		HttpResponse::new(204, Vec::new()).header("cache-control", "no-store")
-	} else {
-		media_error(404, "media session not found")
-	}
-}
-
 async fn handle_ui_http(request: HttpRequest, ctx: Arc<UiContext>) -> Option<HttpResponse> {
 	match (request.method.as_str(), request.path.as_str()) {
+		("GET", "/")
+			if ctx.local_no_auth && cookie_value(&request.headers, SESSION_COOKIE).is_none() =>
+		{
+			let (token, _) = auth::generate_session_token();
+			Some(
+				redirect_response("/")
+					.header("cache-control", "no-store")
+					.header("set-cookie", session_cookie(&token)),
+			)
+		}
 		("GET", "/pairing/qr.svg") => Some(pairing_qr_response(&request, &ctx)),
+		("GET", path) if peer_onvif_fmp4_stream_peer(path).is_some() => {
+			Some(handle_onvif_fmp4_stream(request, ctx).await)
+		}
 		("GET", path) if peer_webcam_stream_peer(path).is_some() => {
 			Some(handle_peer_webcam_stream(request, ctx).await)
 		}
-		("POST", path) if peer_media_sessions_peer(path).is_some() => {
-			Some(handle_create_media_session(request, ctx).await)
-		}
-		("DELETE", path) if media_session_id(path).is_some() => {
-			Some(handle_delete_media_session(request, ctx).await)
+		("GET", path) if peer_microphone_pcm_stream_peer(path).is_some() => {
+			Some(handle_microphone_pcm_stream(request, ctx).await)
 		}
 		("GET", "/assets/trackpad.js") => Some(
 			HttpResponse::new(200, TRACKPAD_JS.to_vec())
@@ -5121,6 +5125,9 @@ async fn handle_ui_http(request: HttpRequest, ctx: Arc<UiContext>) -> Option<Htt
 			)
 		}
 		("GET", "/auth/logout") | ("POST", "/auth/logout") => {
+			if ctx.local_no_auth {
+				return Some(redirect_response("/").header("cache-control", "no-store"));
+			}
 			if let Some(sid) = cookie_value(&request.headers, SESSION_COOKIE) {
 				let hash = auth::token_hash(&sid);
 				let _ = ctx.server.puppy.drop_session(&hash);
@@ -5132,10 +5139,14 @@ async fn handle_ui_http(request: HttpRequest, ctx: Arc<UiContext>) -> Option<Htt
 			)
 		}
 		("GET", "/auth/me") => {
-			let user = cookie_value(&request.headers, SESSION_COOKIE).and_then(|sid| {
-				let hash = auth::token_hash(&sid);
-				ctx.server.puppy.http_me(&hash).ok().flatten()
-			});
+			let user = if ctx.local_no_auth {
+				Some(String::from("local"))
+			} else {
+				cookie_value(&request.headers, SESSION_COOKIE).and_then(|sid| {
+					let hash = auth::token_hash(&sid);
+					ctx.server.puppy.http_me(&hash).ok().flatten()
+				})
+			};
 			Some(match user {
 				Some(user) => json_response(200, serde_json::json!({ "user": user })),
 				None => json_response(401, serde_json::json!({ "error": "not authenticated" })),
@@ -5335,16 +5346,16 @@ fn render_media_receiver(
 ) -> Item {
 	wgui::custom_component(
 		"media-receiver",
-		"/assets/media_receiver.js?v=8",
+		"/assets/media_receiver.js?v=11",
 		serde_json::json!({
 			"auto_start": props.auto_start,
 			"endpoint": props.endpoint,
 			"media_kind": props.media_kind,
 			"revision": props.revision,
 			"resolution_options": profile_options,
-			"resolution_mode": if props.source_id.starts_with("onvif:") { "profile" } else { "capture" },
-			"resolution_selectable": !profile_options.is_empty() || props.source_id.starts_with("onvif:"),
+			"resolution_selectable": props.source_id.starts_with("onvif:"),
 			"source_id": props.source_id,
+			"transport": props.transport,
 		}),
 	)
 	.custom_event("resolutionChange", INPUT_EYE_PROFILE)
@@ -5764,6 +5775,9 @@ fn render_summary(state: &UiViewState) -> Item {
 				for webcam in &state.webcam_devices {
 					body.push(wgui::text(&webcam.name));
 				}
+				if state.webcam_has_stream {
+					body.push(render_media_receiver(&state.webcam_stream_props, &[], 0));
+				}
 			}
 			if state.page == "peer_detail" {
 				body.push(wgui::button("Refresh audio").on_click(ACTION_REFRESH_AUDIO));
@@ -5783,6 +5797,21 @@ fn render_summary(state: &UiViewState) -> Item {
 						.ivalue(state.audio_volume),
 				);
 				body.push(wgui::button(&state.audio_mute_label).on_click(ACTION_AUDIO_MUTE));
+				body.push(wgui::text(&state.microphone_status));
+				if state.has_microphone_options {
+					body.push(
+						wgui::select(select_options(&state.microphone_options))
+							.id(INPUT_MICROPHONE)
+							.svalue(&state.selected_microphone),
+					);
+				}
+				if state.microphone_has_stream {
+					body.push(render_media_receiver(
+						&state.microphone_listener_props,
+						&[],
+						0,
+					));
+				}
 				body.push(
 					wgui::text_input()
 						.id(INPUT_SHELL)
@@ -5798,6 +5827,9 @@ fn render_summary(state: &UiViewState) -> Item {
 			if state.page == "peer_control" {
 				body.push(wgui::button("Toggle monitor").on_click(ACTION_TOGGLE_MONITOR));
 				body.push(wgui::text(&state.monitor_status));
+				if state.monitor_has_stream {
+					body.push(render_media_receiver(&state.monitor_stream_props, &[], 0));
+				}
 				body.push(
 					wgui::text_input()
 						.id(INPUT_CONTROL_TEXT)
@@ -5814,7 +5846,7 @@ fn render_summary(state: &UiViewState) -> Item {
 					state,
 					&state.puppy_eye_viewer_name,
 					&state.puppy_eye_viewer_device_name,
-					&state.puppy_eye_viewer_webrtc_props,
+					&state.puppy_eye_viewer_props,
 					state.puppy_eye_viewer_index,
 					false,
 				));
@@ -5826,7 +5858,7 @@ fn render_summary(state: &UiViewState) -> Item {
 					state,
 					&state.onvif_viewer_name,
 					&state.onvif_viewer_device_name,
-					&state.onvif_viewer_webrtc_props,
+					&state.onvif_viewer_props,
 					state.onvif_viewer_index,
 					false,
 				));
@@ -6215,7 +6247,7 @@ async fn available_ui_addr(mut bind: SocketAddr) -> Result<SocketAddr> {
 	}
 }
 
-pub async fn run_ui(puppy: Arc<PuppyNet>, bind: SocketAddr) -> Result<()> {
+pub async fn run_ui(puppy: Arc<PuppyNet>, bind: SocketAddr, local_no_auth: bool) -> Result<()> {
 	let bind = available_ui_addr(bind).await?;
 	log::info!("starting PuppyNet UI on {}", bind);
 	let mut wgui = Wgui::new(bind);
@@ -6225,6 +6257,7 @@ pub async fn run_ui(puppy: Arc<PuppyNet>, bind: SocketAddr) -> Result<()> {
 
 	let ctx = Arc::new(UiContext {
 		server: Arc::clone(&server_state),
+		local_no_auth,
 		sessions: std::sync::Mutex::new(HashMap::new()),
 		pending_login_tokens: std::sync::Mutex::new(HashMap::new()),
 	});
@@ -6339,23 +6372,27 @@ mod tests {
 			Some("peer-id")
 		);
 		assert_eq!(
+			peer_webcam_stream_peer("/api/peers/peer-id/monitor.mjpeg"),
+			Some("peer-id")
+		);
+		assert_eq!(
 			peer_webcam_stream_peer("/api/peers/peer-id/webcam.mjpeg/extra"),
 			None
 		);
 		assert_eq!(
-			peer_media_sessions_peer("/api/peers/peer-id/media/sessions"),
+			peer_onvif_fmp4_stream_peer("/api/peers/peer-id/onvif.fmp4"),
 			Some("peer-id")
 		);
 		assert_eq!(
-			peer_media_sessions_peer("/api/peers/peer-id/media/sessions/extra"),
+			peer_onvif_fmp4_stream_peer("/api/peers/peer-id/onvif.fmp4/extra"),
 			None
 		);
 		assert_eq!(
-			media_session_id("/api/media/sessions/session-id"),
-			Some("session-id")
+			peer_microphone_pcm_stream_peer("/api/peers/peer-id/microphone.pcm"),
+			Some("peer-id")
 		);
 		assert_eq!(
-			media_session_id("/api/media/sessions/session-id/extra"),
+			peer_microphone_pcm_stream_peer("/api/peers/peer-id/microphone.pcm/extra"),
 			None
 		);
 	}
@@ -6386,22 +6423,6 @@ mod tests {
 			pairing_endpoint("[fd00::1]:8080").unwrap(),
 			"ws://[fd00::1]:8833/peer/v1"
 		);
-	}
-
-	#[test]
-	fn media_signaling_rejects_cross_origin_requests() {
-		let request = HttpRequest {
-			method: String::from("POST"),
-			path: String::from("/api/peers/peer-id/media/sessions"),
-			query: HashMap::new(),
-			headers: HashMap::from([
-				(String::from("host"), String::from("10.0.0.2:8080")),
-				(String::from("origin"), String::from("http://example.com")),
-			]),
-			body: Vec::new(),
-		};
-
-		assert!(!same_origin_request(&request));
 	}
 
 	#[test]
